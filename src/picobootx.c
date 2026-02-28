@@ -153,7 +153,7 @@ static void pb_dispatch_read(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 static void pb_dispatch_get_info(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     const pb_get_info_args_t *args = (const pb_get_info_args_t *)cmd->args;
 
-    DEBUG("GI: info_type=0x%08x param0=0x%08x transfer_len=%u", args->info_type, args->param0, cmd->transfer_len);
+    //DEBUG("GI: info_type=0x%08x param0=0x%08x transfer_len=%u", args->info_type, args->param0, cmd->transfer_len);
 
     // Note that the RP2350 datasheet says that bTransferLength mst be < 255,
     // but picotool uses 256.
@@ -346,7 +346,7 @@ static void pb_dispatch_otp_read(pb_state_block_t *s, const picoboot_cmd_t *cmd)
         return;
     }
 
-    DEBUG("otp read: row=%u row_count=%u ecc=%d", args->row, args->row_count, args->ecc);
+    //DEBUG("otp read: row=%u row_count=%u ecc=%d", args->row, args->row_count, args->ecc);
 
     s->xfer.otp_read.current_row = args->row;
     s->xfer.otp_read.rows_remaining = args->row_count;
@@ -404,8 +404,8 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     s->token  = cmd->token;
     s->cmd_id = cmd->cmd_id;
 
-    DEBUG("%s id=0x%02x token=0x%08x tlen=%u",
-          command_to_str((pb_cmd_id_t)cmd->cmd_id), cmd->cmd_id, cmd->token, cmd->transfer_len);
+    //DEBUG("%s id=0x%02x token=0x%08x tlen=%u",
+    //      command_to_str((pb_cmd_id_t)cmd->cmd_id), cmd->cmd_id, cmd->token, cmd->transfer_len);
 
     switch ((pb_cmd_id_t)cmd->cmd_id) {
         case PB_CMD_EXCLUSIVE_ACCESS:
@@ -436,6 +436,7 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
         case PB_CMD_REBOOT:
         case PB_CMD_EXEC:
         case PB_CMD_VECTORIZE_FLASH:
+            LOG("Unsupported command ID 0x%02x received", cmd->cmd_id);
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             break;
 
@@ -828,7 +829,7 @@ bool picoboot_control_xfer_cb(
     switch (req->bRequest) {
         case PICOBOOT_BREQUEST_INTERFACE_RESET:
             if (stage == CONTROL_STAGE_SETUP) {
-                DEBUG("CTRL: IR");
+                //DEBUG("CTRL: IR");
 
                 // Unstall endpoints (if stalled - this function will check
                 // before unstalling)

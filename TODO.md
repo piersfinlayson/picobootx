@@ -1,0 +1,1 @@
+- Remove Pico SDK dependency

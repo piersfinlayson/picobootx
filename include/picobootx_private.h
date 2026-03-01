@@ -96,6 +96,44 @@ typedef enum {
 extern const char *pb_state_to_str[];
 
 // ---------------------------------------------------------------------------
+// Per-command dispatch table
+// ---------------------------------------------------------------------------
+
+// Returns the expected transfer_len from the command args for commands where
+// it is not statically zero.  NULL means transfer_len is always 0.
+typedef uint32_t (*pb_get_transfer_len_fn)(const picoboot_cmd_t *cmd);
+
+// Prepares for a data in transfer.
+typedef pb_status_t (*pb_data_in_prepare_fn)(
+    pb_state_block_t *s,
+    const picoboot_cmd_t *cmd,
+    void *ctx
+);
+
+// Convention:
+//   *done = true                          : transfer complete
+//   *done = false, *bytes_written > 0     : data produced, more may follow
+//   *done = false, *bytes_written == 0    : insufficient space for next item, retry
+typedef pb_status_t (*pb_data_in_fill_fn)(
+    pb_state_block_t *s,
+    uint8_t *buf,
+    uint32_t max_len,
+    uint32_t *bytes_written,
+    bool *done,
+    void *ctx
+);
+
+typedef struct {
+    uint8_t                  cmd_id;
+    pb_cmd_category_t        category;
+    uint8_t                  cmd_size;
+    pb_get_transfer_len_fn   get_transfer_len;
+    bool                     skip_tlen_check;
+    pb_data_in_prepare_fn    data_in_prepare;   // NULL for non-data_in
+    pb_data_in_fill_fn       data_in_fill;      // NULL for non-data_in
+} pb_cmd_table_entry_t;
+
+// ---------------------------------------------------------------------------
 // Per-command in-progress state (union — only one active at a time)
 // ---------------------------------------------------------------------------
 
@@ -105,9 +143,10 @@ typedef struct {
 } pb_in_read_t;
 
 typedef struct {
-    uint32_t remaining_flags;    // bitmask of requested flags not yet sent
+    uint32_t remaining_flags;    // bitmask of flags not yet sent (SYS), or word index (PARTITION)
     uint32_t transfer_remaining; // bytes still owed to host
-    bool     header_sent;        // true once the leading count word has been sent
+    bool     header_sent;        // true once the leading word count has been sent (SYS only)
+    bool     is_partition;       // true for PARTITION info type
 } pb_in_get_info_t;
 
 typedef struct {

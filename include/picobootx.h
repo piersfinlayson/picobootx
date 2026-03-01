@@ -98,6 +98,28 @@ typedef enum {
 _Static_assert(sizeof(pb_status_t) == 1, "pb_status_t size mismatch");
 
 // ---------------------------------------------------------------------------
+// Command categories
+//
+// Defines the protocol mechanics of a command: how it is validated, what
+// state transition follows dispatch, and how the state machine handles it.
+// USB IN/OUT direction is from the host's perspective.
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    PB_CAT_ACTION_SYNC,     // synchronous: call op, it returns, send ack
+                            // (exclusive_access, exit_xip, enter_xip)
+    PB_CAT_ACTION_ASYNC,    // async: call op to initiate, completion signalled
+                            // via callback (flash_erase)
+    PB_CAT_ACTION_DEFERRED, // send ack first, execute after ack clears
+                            // (reboot2, reboot)
+    PB_CAT_DATA_IN,         // device->host data transfer
+                            // (read, get_info, otp_read)
+    PB_CAT_DATA_OUT,        // host->device data transfer
+                            // (write, otp_write)
+    PB_CAT_UNSUPPORTED,     // known but rejected on this platform
+} pb_cmd_category_t;
+
+// ---------------------------------------------------------------------------
 // Wire structs
 // ---------------------------------------------------------------------------
 
@@ -236,23 +258,27 @@ typedef struct pb_state_block pb_state_block_t;
 //   ep_out          : BULK OUT endpoint address
 //   ep_in           : BULK IN endpoint address
 //   ctx             : passed verbatim to all callbacks
-void picoboot_init(pb_state_block_t            *state,
-                   const picoboot_ops_t        *ops,
-                   const picoboot_custom_ops_t *custom,
-                   uint8_t                     *flash_write_buf,
-                   uint8_t                      rhport,
-                   uint8_t                      ep_out,
-                   uint8_t                      ep_in,
-                   void                        *ctx);
+void picoboot_init(
+    pb_state_block_t *state,
+    const picoboot_ops_t *ops,
+    const picoboot_custom_ops_t *custom,
+    uint8_t *flash_write_buf,
+    uint8_t rhport,
+    uint8_t ep_out,
+    uint8_t ep_in,
+    void *ctx
+);
 
 // Call from your main loop / plugin task alongside tud_task().
 void picoboot_task(pb_state_block_t *state);
 
 // Wire into tud_vendor_control_xfer_cb() — return its result directly.
-bool picoboot_control_xfer_cb(pb_state_block_t             *state,
-                               uint8_t                       rhport,
-                               uint8_t                       stage,
-                               tusb_control_request_t const *req);
+bool picoboot_control_xfer_cb(
+    pb_state_block_t *state,
+    uint8_t rhport,
+    uint8_t stage,
+    tusb_control_request_t const *req
+);
 
 // Call from your app_picoboot_tx_cb().
 void picoboot_tx_cb(pb_state_block_t *state, uint32_t sent_bytes);

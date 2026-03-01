@@ -164,7 +164,7 @@ static char const *string_desc_arr[] =
 {
   (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
   "piers.rocks",                 // 1: Manufacturer
-  "picobootx",                   // 2: Product
+  "picobootx example",           // 2: Product
   NULL,                          // 3: Serials will use unique ID if possible
   "picoboot interface",          // 4: Vendor Interface
 };

@@ -54,7 +54,6 @@
 #include "device/usbd.h"
 #include "device/usbd_pvt.h"
 #include "picobootx_vendor.h"
-#include "usb_plugin.h"
 
 // The vendor device's interface configuration.
 typedef struct {

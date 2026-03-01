@@ -14,8 +14,6 @@ picobootx also interoperates with third-party host tools that support picoboot, 
 - [pico⚡flash](https://picoflash.org) - A picoboot implementation that runs in a WebUSB capable browser, allowing you to drive the picoboot protocol from a web page.  No host software installation required, and works on macOS, Linux, Windows and Android using Chrome.
 - [Rust picoboot](https://docs.rs/picoboot/latest/picoboot/) - A Rust library for implementing picoboot host tooling, which can be used to build custom host applications that interact with picoboot devices.
 
-picobootx is by the same author as pico⚡flash and Rust picoboot.
-
 picobootx is used by [One ROM](https://onerom.org), the most flexible replacement ROM for your retro system, for live reprogramming and control of One ROM.  One ROM is from the same author as picobootx.
 
 ## Features
@@ -31,13 +29,17 @@ picobootx is used by [One ROM](https://onerom.org), the most flexible replacemen
 
 See [the integration guide](INTEGRATION.md) for how to integrate picobootx into your own project.
 
+See [the tinyusb example](examples/tinyusb/README.md) for a complete, working, bare-metal picobootx implementation using tinyusb and [pico-sdkless](https://github.com/piersfinlayson/pico-sdkless), which can be used as a reference for your own implementation.
+
 ## PICOBOOT Protocol
 
 The PICOBOOT protocol is documented in the RP2040 and RP2350 datasheets.  picobootx follows the RP2350 datasheet, and does not currently fully implement RP2040 support.
 
 ## USB stack integration
 
-picobootx comes pre-integrated with tinyusb, and is intended to replace tinyusb's default vendor device implementation (as that has some limitations meaning it is unsuitable for picoboot protocol support - see [tinyusb Wrinkles](#tinyusb-wrinkles) below).
+picobootx comes pre-integrated with tinyusb, and is intended to replace tinyusb's default vendor device implementation as tinyusb's vendor device implementation has some limitations that make it unsuitable for picoboot protocol support, including:
+- no support for stalling/unstalling endpoints
+- no ability to send a ZLP (zero length packet) on demand as required by the protocol.
 
 The heart of picobootx should be USB stack agnostic, though and easy to port to other USB stacks (or even other physical layers).
 
@@ -55,7 +57,7 @@ picobootx is licensed under the MIT License.  See [LICENSE](LICENSE) for details
 
 ## picotool/tinyusb Quirks
 
-Some notable quirks were discovered in picotool and tinyusb during picobootx's development, which are documented here.
+Some notable quirks were discovered in picotool and tinyusb during picobootx's development, which are documented here.  picobootx works around all of these quirks, providing a fully compatible implementation.
 
 ### picotool Specification Deficiencies
 
@@ -75,4 +77,4 @@ Some notable quirks were discovered in picotool and tinyusb during picobootx's d
 
 ### tinyusb Wrinkles
 
-- tinyusb appears not to provide any easy/proper/supported way for devices to stall/unstall their own endpoints.  See the comment in picobootx_vendor.h for more details.
+- tinyusb appears not to provide any easy/proper/supported way for devices to stall/unstall their own endpoints.  See the comment in picobootx_vendor.h for more details.  This limitation has been worked around in picobootx. 

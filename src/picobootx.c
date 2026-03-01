@@ -5,7 +5,6 @@
 #include <string.h>
 #include "tusb.h"
 #include "picobootx_private.h"
-#include "usb_plugin.h"
 #include "picobootx_vendor.h"
 
 // ---------------------------------------------------------------------------

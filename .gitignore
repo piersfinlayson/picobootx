@@ -1,1 +1,4 @@
-build
+examples/tinyusb/build
+examples/tinyusb/tinyusb-repo
+examples/tinyusb/pico-sdkless-repo
+examples/tinyusb/tools

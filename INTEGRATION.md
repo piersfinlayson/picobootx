@@ -2,6 +2,8 @@
 
 picobootx is designed to be integrated in a larger embedded application, that includes USB.  picobootx was developed specifically to work with the tinyusb USB stack.  The guidance that follows assumes you are using tinyusb, but the general principles should apply to other USB stacks as well.
 
+There is a complete, working, bare-metal, picobootx tinyusb example in the [examples/tinyusb](examples/tinyusb) directory which acts as a reference implementation for the steps outlined below.  You can build and run this example as-is, and then modify it as needed to integrate picobootx into your own application.
+
 Steps:
 
 1. Include the picobootx header file
@@ -61,10 +63,29 @@ static uint32_t picoboot_state_buf[PICOBOOT_STATE_SIZE / 4];
 
 ## 4. Initialise picobootx
 
-In main, or elsewhere, but before picobootx is used, call `picoboot_init`, passing in your operations struct and the pointer to picobootx's state block.
+In main, or elsewhere, but before picobootx is used, call `picoboot_init`, passing in:
+- your operations struct
+- the pointer to picobootx's state block
+- optional pointer to custom protocol support (NULL if not used)
+- optional pointer to 256 byte buffer for flash/OTP write support (NULL if those operations are not supported)
+- the USB port number that picobootx should use, from tusb_configh.h (for RP2350 this is always 0)
+- the endpoint number to use for the picoboot OUT endpoint (must be a valid EP OUT endpoint that is not used for other purposes in your application)
+- the endpoint number to use for the picoboot IN endpoint (must be a valid EP IN endpoint that is not used for other purposes in your application)
+- optional pointer to custom context to be passed to protocol support functions (NULL if not required, e.g. because your protocol support functions don't need any context).
+
+Example:
 
 ```c
-picoboot_init(picoboot_state, &picoboot_ops);
+picoboot_init(
+    picoboot_state,
+    &picoboot_ops,
+    NULL,                   // No custom protocol support
+    NULL,                   // Flash/OTP write not supported
+    BOARD_TUD_RHPORT,       // Always 0 on RP2350
+    EPNUM_PICOBOOTX_OUT,    // EP OUT
+    EPNUM_PICOBOOTX_IN,     // EP IN
+    NULL                    // No custom context needed
+);
 ```
 
 ## 5. picoboot Task Function

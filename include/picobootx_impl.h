@@ -7,6 +7,10 @@
 #if !defined(PICOBOOTX_IMPL_H)
 #define PICOBOOTX_IMPL_H
 
+// Helper to take return codes from boot ROM functions and convert to
+// pb_status_t
+pb_status_t pb_status_from_bootrom(int ret);
+
 // Lookup RP2350 bootrom functions
 void *picoboot_lookup_boot_fn(char a, char b);
 
@@ -36,7 +40,7 @@ void picoboot_default_reboot2_execute(
 );
 
 // Validates standard set of addresses for an RP2350
-pb_status_t picoboot_default_validate_read(
+pb_status_t picoboot_default_read_prepare(
     uint32_t addr, 
     uint32_t size, 
     void *ctx
@@ -50,11 +54,37 @@ pb_status_t picoboot_default_read(
     void *ctx
 );
 
-// Reads OTP data as specified.  Does not perform any validation.
+// Validates write is to a supported address for an RP2350 
+pb_status_t picoboot_default_write_prepare(
+    uint32_t addr,
+    uint32_t size,
+    bool *is_flash,
+    void *ctx
+);
+
+// Writes data to the specified address.  Does not perform any validation.
+pb_status_t picoboot_default_write(
+    uint32_t addr,
+    const uint8_t *buf,
+    uint32_t len,
+    void *ctx
+);
+
+// Reads OTP data as specified.
 pb_status_t picoboot_default_otp_read(
     uint16_t row,
     uint8_t ecc,
     uint8_t *buf,
+    uint32_t len,
+    void *ctx
+);
+
+// Writes OTP data as specified.
+// len is the length of the buffer in bytes
+pb_status_t picoboot_default_otp_write(
+    uint16_t row,
+    uint8_t ecc,
+    const uint8_t *buf,
     uint32_t len,
     void *ctx
 );
@@ -66,16 +96,6 @@ pb_status_t picoboot_default_get_info_sys(
     uint32_t  buf_size,
     uint32_t *bytes_written,
     void     *ctx
-);
-
-// Reads OTP rows as specified.
-// len is the length of the buffer in bytes
-pb_status_t picoboot_default_otp_write(
-    uint16_t row,
-    uint8_t ecc,
-    uint8_t *buf,
-    uint32_t len,
-    void *ctx
 );
 
 // Retrieve the device's serial number, as UTF-16, for inclusion in a USB

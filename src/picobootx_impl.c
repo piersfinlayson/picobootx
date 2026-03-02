@@ -8,6 +8,49 @@
 
 #include "picobootx_private.h"
 
+// Error codes returned by ROM functions
+#define BOOTROM_ERROR_TIMEOUT                   (-1)    // Unused in RP2350
+#define BOOTROM_ERROR_GENERIC                   (-2)    // Unused in RP2350
+#define BOOTROM_ERROR_NO_DATA                   (-3)    // Unused in RP2350
+#define BOOTROM_ERROR_NOT_PERMITTED             (-4)
+#define BOOTROM_ERROR_INVALID_ARG               (-5)
+#define BOOTROM_ERROR_IO                        (-6)    // Unused in RP2350
+#define BOOTROM_ERROR_BADAUTH                   (-7)    // Unused in RP2350
+#define BOOTROM_ERROR_CONNECT_FAILED            (-8)    // Unused in RP2350
+#define BOOTROM_ERROR_INSUFFICIENT_RESOURCES    (-9)    // Unused in RP2350
+#define BOOTROM_ERROR_INVALID_ADDRESS           (-10)
+#define BOOTROM_ERROR_BAD_ALIGNMENT             (-11)
+#define BOOTROM_ERROR_INVALID_STATE             (-12)
+#define BOOTROM_ERROR_BUFFER_TOO_SMALL          (-13)
+#define BOOTROM_ERROR_PRECONDITION_NOT_MET      (-14)
+#define BOOTROM_ERROR_MODIFIED_DATA             (-15)
+#define BOOTROM_ERROR_INVALID_DATA              (-16)
+#define BOOTROM_ERROR_NOT_FOUND                 (-17)
+#define BOOTROM_ERROR_UNSUPPORTED_MODIFICATION  (-18)
+#define BOOTROM_ERROR_LOCK_REQUIRED             (-19)
+
+// OTP access flags used by otp_access_fn_t
+#define OTP_ACCESS_FLAG_WRITE 0x00010000u
+#define OTP_ACCESS_FLAG_ECC   0x00020000u
+
+pb_status_t pb_status_from_bootrom(int ret) {
+    switch (ret) {
+        case 0:                                    return PB_STATUS_OK;
+        case BOOTROM_ERROR_NOT_PERMITTED:          return PB_STATUS_NOT_PERMITTED;
+        case BOOTROM_ERROR_INVALID_ARG:            return PB_STATUS_INVALID_ARG;
+        case BOOTROM_ERROR_INVALID_ADDRESS:        return PB_STATUS_INVALID_ADDRESS;
+        case BOOTROM_ERROR_BAD_ALIGNMENT:          return PB_STATUS_BAD_ALIGNMENT;
+        case BOOTROM_ERROR_INVALID_STATE:          return PB_STATUS_INVALID_STATE;
+        case BOOTROM_ERROR_BUFFER_TOO_SMALL:       return PB_STATUS_BUFFER_TOO_SMALL;
+        case BOOTROM_ERROR_PRECONDITION_NOT_MET:   return PB_STATUS_PRECONDITION_NOT_MET;
+        case BOOTROM_ERROR_MODIFIED_DATA:          return PB_STATUS_MODIFIED_DATA;
+        case BOOTROM_ERROR_INVALID_DATA:           return PB_STATUS_INVALID_DATA;
+        case BOOTROM_ERROR_NOT_FOUND:              return PB_STATUS_NOT_FOUND;
+        case BOOTROM_ERROR_UNSUPPORTED_MODIFICATION: return PB_STATUS_UNSUPPORTED_MOD;
+        default:                                   return PB_STATUS_UNKNOWN_ERROR;
+    }
+}
+
 void *picoboot_lookup_boot_fn(char a, char b) {
     // Get the ROM table lookup function - RP2350
     typedef void *(*rom_table_lookup_fn)(uint32_t code, uint32_t mask);
@@ -62,7 +105,7 @@ size_t picoboot_get_serial(uint16_t *buffer, size_t max_len) {
     }
 
     uint8_t chipid[8];
-    int rc = otp_access(chipid, sizeof(chipid), 0x00020000 | 0x000);
+    int rc = otp_access(chipid, sizeof(chipid), OTP_ACCESS_FLAG_ECC | 0x000);
     if (rc != 0) {
         ERR("Failed to read chip ID from OTP: %d", rc);
         return 0;
@@ -74,7 +117,7 @@ size_t picoboot_get_serial(uint16_t *buffer, size_t max_len) {
     }
 
     // Format as UTF-16LE hex string, MSW first
-    static const char hex[] = "0123456789abcdef";
+    static const char hex[] = "0123456789ABCDEF";
     size_t pos = 0;
     for (int w = 3; w >= 0; w--) {
         for (int nibble = 3; nibble >= 0; nibble--) {
@@ -155,7 +198,7 @@ void picoboot_default_reboot2_execute(const pb_reboot2_args_t *args, void *ctx) 
 #define RP2350_SRAM_BASE   0x20000000u
 #define RP2350_SRAM_SIZE   0x00082000u  // 520KB
 
-pb_status_t picoboot_default_validate_read(
+pb_status_t picoboot_default_read_prepare(
     uint32_t addr, 
     uint32_t size, 
     void *ctx
@@ -196,6 +239,44 @@ pb_status_t picoboot_default_read(uint32_t addr, uint8_t *buf, uint32_t len, voi
     return PB_STATUS_OK;
 }
 
+pb_status_t picoboot_default_write_prepare(
+    uint32_t addr,
+    uint32_t size,
+    bool *is_flash,
+    void *ctx
+) {
+    (void)ctx;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wtype-limits"
+    bool is_sram =
+        (addr >= RP2350_SRAM_BASE &&
+         (addr + size) <= (RP2350_SRAM_BASE + RP2350_SRAM_SIZE));
+    bool is_flash_region =
+        (addr >= RP2350_FLASH_BASE &&
+         (addr + size) <= (RP2350_FLASH_BASE + RP2350_FLASH_SIZE));
+#pragma GCC diagnostic pop
+
+    if (!is_sram && !is_flash_region) {
+        LOG("Invalid write request: addr=0x%08x size=%u", addr, size);
+        return PB_STATUS_INVALID_ARG;
+    }
+
+    *is_flash = is_flash_region;
+    return PB_STATUS_OK;
+}
+
+pb_status_t picoboot_default_write(
+    uint32_t addr,
+    const uint8_t *buf,
+    uint32_t len,
+    void *ctx
+) {
+    (void)ctx;
+    memcpy((void *)addr, buf, len);
+    return PB_STATUS_OK;
+}
+
 pb_status_t picoboot_default_get_info_sys(
     uint32_t  flag,
     uint8_t  *buf,
@@ -221,7 +302,7 @@ pb_status_t picoboot_default_get_info_sys(
     int ret = get_sys_info(tmp, wc + 1, flag);
     if (ret < 0) {
         ERR("get_sys_info failed: %d", ret);
-        return PB_STATUS_NOT_FOUND;
+        return pb_status_from_bootrom(ret);
     }
 
     if (!(tmp[0] & flag)) {
@@ -257,12 +338,47 @@ pb_status_t picoboot_default_otp_read(
 
     uint32_t access_row = row;
     if (ecc) {
-        access_row |= 0x20000u;
+        access_row |= OTP_ACCESS_FLAG_ECC;
     }
     int ret = otb_access(buf, len, access_row);
     if (ret < 0) {
-        ERR("OTP access failed: %d", ret);
-        return PB_STATUS_UNKNOWN_ERROR;
+        ERR("OTP read failed at row %u: %d", row, ret);
+        return pb_status_from_bootrom(ret);
+    }
+    return PB_STATUS_OK;
+}
+
+pb_status_t picoboot_default_otp_write(
+    uint16_t row,
+    uint8_t ecc,
+    const uint8_t *buf,
+    uint32_t len,
+    void *ctx
+) {
+    (void)ctx;
+
+    uint8_t row_size = ecc ? 2u : 4u;
+    if (len % row_size != 0u) {
+        ERR("OTP write length %u is not a multiple of row size %u", len, row_size);
+        return PB_STATUS_INVALID_ARG;
+    }
+
+    otp_access_fn_t otp_access = pb_lookup_otp_access_fn();
+    if (otp_access == NULL) {
+        ERR("Unable to find OTP access function in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    uint32_t access_row = row;
+    access_row |= OTP_ACCESS_FLAG_WRITE;
+    if (ecc) {
+        access_row |= OTP_ACCESS_FLAG_ECC;
+    }
+
+    int ret = otp_access((uint8_t *)buf, len, access_row);
+    if (ret < 0) {
+        ERR("OTP write failed at row %u: %d", row, ret);
+        return pb_status_from_bootrom(ret);
     }
     return PB_STATUS_OK;
 }

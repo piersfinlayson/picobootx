@@ -46,7 +46,7 @@ _Static_assert(CFG_TUD_ENDPOINT0_SIZE == 64, "The picoboot protocol requires bMa
 // Size of pb_state_block_t in bytes. Use this to allocate storage without
 // needing to include picoboot_private.h. Verified by _Static_assert in
 // picoboot_private.h.
-#define PICOBOOT_STATE_SIZE     76u
+#define PICOBOOT_STATE_SIZE     80u
 
 // ---------------------------------------------------------------------------
 // GET_INFO info types
@@ -196,7 +196,7 @@ typedef struct {
     );
 
     // Read functions
-    pb_status_t (*validate_read)(uint32_t addr, uint32_t size, void *ctx);
+    pb_status_t (*read_prepare)(uint32_t addr, uint32_t size, void *ctx);
     pb_status_t (*read)(
         uint32_t addr,
         uint8_t *buf,
@@ -211,12 +211,38 @@ typedef struct {
         void *ctx
     );
 
+    // Write functions. write_prepare required for WRITE command.
+    // flash_page_write required if flash writes are to be supported;
+    // flash_write_buf must also be non-NULL.
+    pb_status_t (*write_prepare)(
+        uint32_t addr,
+        uint32_t size,
+        bool *is_flash,
+        void *ctx
+    );
+    pb_status_t (*flash_page_write)(
+        uint32_t addr,
+        const uint8_t *buf,
+        void *ctx
+    );
+
     // Flash erase
     pb_status_t (*flash_erase)(const pb_addr_size_args_t *args, void *ctx);
 
     // Write functions.  Only supported if picoboot is initialised with a flash_write_buf.
-    pb_status_t (*write)(uint32_t addr, const uint8_t *buf, uint32_t len, void *ctx);
-    pb_status_t (*otp_write)(const pb_otp_args_t *args, const uint8_t *buf, uint32_t len, void *ctx);
+    pb_status_t (*write)(
+        uint32_t addr, 
+        const uint8_t *buf, 
+        uint32_t len, 
+        void *ctx
+    );
+    pb_status_t (*otp_write)(
+        uint16_t row,
+        uint8_t ecc,
+        const uint8_t *buf,
+        uint32_t len,
+        void *ctx
+    );
 } picoboot_ops_t;
 
 // Custom / extended command dispatch (alternative magic value).  Not yet supported

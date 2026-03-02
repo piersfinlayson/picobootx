@@ -25,9 +25,12 @@ static const picoboot_ops_t picoboot_ops = {
     .enter_xip          = picoboot_default_enter_xip,
     .reboot2_prepare    = picoboot_default_reboot2_prepare,
     .reboot2_execute    = picoboot_default_reboot2_execute,
-    .validate_read      = picoboot_default_validate_read, 
+    .read_prepare       = picoboot_default_read_prepare, 
     .read               = picoboot_default_read,
+    .write_prepare      = picoboot_default_write_prepare,
+    .write              = picoboot_default_write,
     .otp_read           = picoboot_default_otp_read,
+    .otp_write          = picoboot_default_otp_write,
     .get_info_sys       = picoboot_default_get_info_sys,
 };
 
@@ -160,6 +163,15 @@ void setup_ms_timer(void) {
 // Clock setup
 //
 void setup_xosc(void) {
+    // First set CLK_REF and ROSC to the values the A4 bootrom sets them to, so
+    // we start from a known state.
+
+    // Set CLK_REF divider to 5
+    CLOCK_REF_DIV = CLOCK_CLK_REF_DIV_INT(5);
+    
+    // Set ROSC divider to 2
+    ROSC_DIV = ROSC_DIV_VAL(2);
+
     // Initialize XOSC peripheral.  We are using the 12MHz xtal from the
     // reference hardware design, so we can use values from the datasheet.
     // See S8.2 for more details.
@@ -175,6 +187,22 @@ void setup_xosc(void) {
     // Switch CLK_REF to use XOSC instead of the ROSC
     CLOCK_REF_CTRL = CLOCK_REF_SRC_XOSC;
     while ((CLOCK_REF_SELECTED & CLOCK_REF_SRC_SEL_XOSC) != CLOCK_REF_SRC_SEL_XOSC);
+
+    // Set CLK_REF divider to 1
+    CLOCK_REF_DIV = CLOCK_CLK_REF_DIV_INT(1);
+
+    // Set the system clock to use CLK_REF (which is now running from XOSC)
+    // as its source
+
+    // Switch SRC to CLK_REF first (safe on both A2 and A4)
+    CLOCK_SYS_CTRL &= ~CLOCK_SYS_CTRL_SRC_MASK;
+    while ((CLOCK_SYS_SELECTED & CLOCK_SYS_SELECTED_MASK) != CLOCK_SYS_SELECTED_CLKREF);
+    // Now safe to configure AUXSRC
+    CLOCK_SYS_CTRL &= ~CLOCK_SYS_AUX_SRC_MASK;
+    CLOCK_SYS_CTRL |= CLOCK_SYS_AUX_SRC_ROSC_CLK_SRC;
+    // Now switch SRC to AUX
+    CLOCK_SYS_CTRL |= CLOCK_SYS_CTRL_SRC_CLK_AUX;
+    while ((CLOCK_SYS_SELECTED & CLOCK_SYS_SELECTED_MASK) != CLOCK_SYS_SELECTED_AUX);
 }
 
 //
@@ -192,8 +220,8 @@ void setup_usb(void) {
     PLL_USB_PWR = PLL_PWR_PD | PLL_PWR_VCOPD;
 
     // For 48MHz: 12MHz × 40 ÷ 5 ÷ 2 = 48MHz
-    PLL_USB_FBDIV_INT = 40;
     PLL_USB_CS = PLL_CS_REFDIV(1);
+    PLL_USB_FBDIV_INT = 40;
 
     // Power up VCO (keep post-dividers powered down)
     PLL_USB_PWR = PLL_PWR_POSTDIVPD;
@@ -208,6 +236,7 @@ void setup_usb(void) {
     PLL_USB_PWR = 0;
 
     // Route USB clock to PLL_USB
+    CLOCK_CLK_USB_DIV = CLOCK_USB_DIV_INT(1);
     CLOCK_CLK_USB_CTRL = CLOCK_USB_CTRL_ENABLE | CLOCK_USB_CTRL_AUXSRC_PLL_USB;
 
     reset_block(RESETS_RESET_USBCTRL_BITS);

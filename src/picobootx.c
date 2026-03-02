@@ -124,11 +124,11 @@ static pb_status_t pb_read_prepare(
     const picoboot_cmd_t *cmd,
     void *ctx
 ) {
-    if (!s->ops->validate_read || !s->ops->read) {
+    if (!s->ops->read_prepare || !s->ops->read) {
         return PB_STATUS_UNKNOWN_CMD;
     }
     const pb_addr_size_args_t *args = (const pb_addr_size_args_t *)cmd->args;
-    pb_status_t st = s->ops->validate_read(args->addr, args->size, ctx);
+    pb_status_t st = s->ops->read_prepare(args->addr, args->size, ctx);
     if (st != PB_STATUS_OK) {
         return st;
     }
@@ -182,10 +182,10 @@ static pb_status_t pb_otp_read_prepare(
         return PB_STATUS_UNKNOWN_CMD;
     }
     const pb_otp_args_t *args = (const pb_otp_args_t *)cmd->args;
-    s->xfer.otp_read.current_row        = args->row;
-    s->xfer.otp_read.rows_remaining     = args->row_count;
-    s->xfer.otp_read.ecc                = args->ecc;
-    s->xfer.otp_read.transfer_remaining = cmd->transfer_len;
+    s->xfer.otp.current_row        = args->row;
+    s->xfer.otp.rows_remaining     = args->row_count;
+    s->xfer.otp.ecc                = args->ecc;
+    s->xfer.otp.transfer_remaining = cmd->transfer_len;
     return PB_STATUS_OK;
 }
 
@@ -317,17 +317,17 @@ static pb_status_t pb_otp_read_fill(
     bool *done,
     void *ctx
 ) {
-    pb_in_otp_read_t *or = &s->xfer.otp_read;
+    pb_otp_access_t *otp = &s->xfer.otp;
     *bytes_written = 0u;
     *done = false;
 
-    if (or->rows_remaining == 0u) {
+    if (otp->rows_remaining == 0u) {
         *done = true;
         return PB_STATUS_OK;
     }
 
-    uint32_t row_size        = or->ecc ? 2u : 4u;
-    uint32_t total_remaining = row_size * or->rows_remaining;
+    uint32_t row_size        = otp->ecc ? 2u : 4u;
+    uint32_t total_remaining = row_size * otp->rows_remaining;
     uint32_t chunk           = total_remaining < max_len ? total_remaining : max_len;
     chunk = (chunk / row_size) * row_size;  // round down to row boundary
 
@@ -335,16 +335,154 @@ static pb_status_t pb_otp_read_fill(
         return PB_STATUS_OK;  // signal retry
     }
 
-    pb_status_t st = s->ops->otp_read(or->current_row, or->ecc, buf, chunk, ctx);
+    pb_status_t st = s->ops->otp_read(otp->current_row, otp->ecc, buf, chunk, ctx);
     if (st != PB_STATUS_OK) {
         return st;
     }
 
     uint32_t rows_done  = chunk / row_size;
-    or->current_row    += (uint16_t)rows_done;
-    or->rows_remaining -= (uint16_t)rows_done;
+    otp->current_row    += (uint16_t)rows_done;
+    otp->rows_remaining -= (uint16_t)rows_done;
     *bytes_written      = chunk;
-    *done               = (or->rows_remaining == 0u);
+    *done               = (otp->rows_remaining == 0u);
+    return PB_STATUS_OK;
+}
+
+static pb_status_t pb_otp_write_prepare(
+    pb_state_block_t *s,
+    const picoboot_cmd_t *cmd,
+    void *ctx
+) {
+    (void)ctx;
+    if (!s->ops->otp_write) {
+        return PB_STATUS_UNKNOWN_CMD;
+    }
+    const pb_otp_args_t *args = (const pb_otp_args_t *)cmd->args;
+    s->xfer.otp.current_row        = args->row;
+    s->xfer.otp.rows_remaining     = args->row_count;
+    s->xfer.otp.ecc                = args->ecc;
+    s->xfer.otp.transfer_remaining = cmd->transfer_len;
+    return PB_STATUS_OK;
+}
+
+static pb_status_t pb_otp_write_consume(
+    pb_state_block_t *s,
+    const uint8_t *buf,
+    uint32_t len,
+    bool *done,
+    void *ctx
+) {
+    pb_otp_access_t *otp = &s->xfer.otp;
+    *done = false;
+
+    uint32_t row_size = otp->ecc ? 2u : 4u;
+
+    // len must be a multiple of row_size — should be guaranteed by transfer_len validation
+    uint32_t rows = len / row_size;
+    if (rows == 0u) {
+        return PB_STATUS_OK;
+    }
+
+    pb_status_t st = s->ops->otp_write(otp->current_row, otp->ecc, buf, len, ctx);
+    if (st != PB_STATUS_OK) {
+        return st;
+    }
+
+    otp->current_row       += (uint16_t)rows;
+    otp->rows_remaining    -= (uint16_t)rows;
+    otp->transfer_remaining = (otp->transfer_remaining > len)
+                              ? otp->transfer_remaining - len
+                              : 0u;
+    *done = (otp->rows_remaining == 0u);
+    return PB_STATUS_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Data-out prepare and consume functions
+// ---------------------------------------------------------------------------
+
+static pb_status_t pb_write_prepare(
+    pb_state_block_t *s,
+    const picoboot_cmd_t *cmd,
+    void *ctx
+) {
+    if (!s->ops->write_prepare) {
+        return PB_STATUS_UNKNOWN_CMD;
+    }
+    const pb_addr_size_args_t *args = (const pb_addr_size_args_t *)cmd->args;
+    bool is_flash = false;
+    pb_status_t st = s->ops->write_prepare(args->addr, args->size, &is_flash, ctx);
+    if (st != PB_STATUS_OK) {
+        return st;
+    }
+    if (is_flash) {
+        if (!s->flash_write_buf || !s->ops->flash_page_write) {
+            return PB_STATUS_NOT_PERMITTED;
+        }
+    } else {
+        if (!s->ops->write) {
+            return PB_STATUS_UNKNOWN_CMD;
+        }
+    }
+    s->xfer.write.addr        = args->addr;
+    s->xfer.write.expected    = args->size;
+    s->xfer.write.received    = 0u;
+    s->xfer.write.is_flash    = is_flash;
+    s->xfer.write.page_offset = 0u;
+    return PB_STATUS_OK;
+}
+
+static pb_status_t pb_write_consume(
+    pb_state_block_t *s,
+    const uint8_t *buf,
+    uint32_t len,
+    bool *done,
+    void *ctx
+) {
+    pb_out_write_t *w = &s->xfer.write;
+    *done = false;
+
+    if (w->is_flash) {
+        const uint8_t *src = buf;
+        uint32_t remaining = len;
+
+        while (remaining > 0u) {
+            uint32_t space = 256u - w->page_offset;
+            uint32_t chunk = remaining < space ? remaining : space;
+            memcpy(s->flash_write_buf + w->page_offset, src, chunk);
+            w->page_offset += (uint16_t)chunk;
+            src            += chunk;
+            remaining      -= chunk;
+            w->received    += chunk;
+
+            bool page_full = (w->page_offset == 256u);
+            bool all_done  = (w->received == w->expected);
+
+            if (page_full || all_done) {
+                // Zero-pad partial final page before writing
+                if (w->page_offset < 256u) {
+                    memset(s->flash_write_buf + w->page_offset, 0,
+                           256u - w->page_offset);
+                }
+                pb_status_t st = s->ops->flash_page_write(
+                    w->addr, s->flash_write_buf, ctx);
+                if (st != PB_STATUS_OK) {
+                    return st;
+                }
+                w->addr       += w->page_offset;
+                w->page_offset = 0u;
+            }
+        }
+    } else {
+        pb_status_t st = s->ops->write(w->addr, buf, len, ctx);
+        if (st != PB_STATUS_OK) {
+            return st;
+        }
+        w->addr     += len;
+        w->received += len;
+    }
+
+    *done = (w->received == w->expected);
     return PB_STATUS_OK;
 }
 
@@ -364,19 +502,18 @@ static uint32_t tlen_otp(const picoboot_cmd_t *cmd) {
 }
 
 static const pb_cmd_table_entry_t k_cmd_table[] = {
-    { PB_CMD_EXCLUSIVE_ACCESS, PB_CAT_ACTION_SYNC,     0x01u, NULL,           false, NULL,                NULL             },
-    { PB_CMD_EXIT_XIP,         PB_CAT_ACTION_SYNC,     0x00u, NULL,           false, NULL,                NULL             },
-    { PB_CMD_ENTER_XIP,        PB_CAT_ACTION_SYNC,     0x00u, NULL,           false, NULL,                NULL             },
-    { PB_CMD_FLASH_ERASE,      PB_CAT_ACTION_ASYNC,    0x08u, NULL,           false, NULL,                NULL             },
-    { PB_CMD_REBOOT2,          PB_CAT_ACTION_DEFERRED, 0x10u, NULL,           false, NULL,                NULL             },
-    { PB_CMD_READ,             PB_CAT_DATA_IN,         0x08u, tlen_addr_size, false, pb_read_prepare,     pb_read_fill     },
-    { PB_CMD_GET_INFO,         PB_CAT_DATA_IN,         0x10u, NULL,           true,  pb_get_info_prepare, pb_get_info_fill },
-    { PB_CMD_OTP_READ,         PB_CAT_DATA_IN,         0x05u, tlen_otp,       false, pb_otp_read_prepare, pb_otp_read_fill },
-    { PB_CMD_WRITE,            PB_CAT_DATA_OUT,        0x08u, tlen_addr_size, false, NULL,                NULL             },
-    { PB_CMD_OTP_WRITE,        PB_CAT_DATA_OUT,        0x05u, tlen_otp,       false, NULL,                NULL             },
-    { PB_CMD_REBOOT,           PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                NULL             },
-    { PB_CMD_EXEC,             PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                NULL             },
-    { PB_CMD_VECTORIZE_FLASH,  PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                NULL             },
+    { PB_CMD_EXCLUSIVE_ACCESS, PB_CAT_ACTION_SYNC,     0x01u, NULL,           false, NULL,                 { NULL }              },
+    { PB_CMD_EXIT_XIP,         PB_CAT_ACTION_SYNC,     0x00u, NULL,           false, NULL,                 { NULL }              },
+    { PB_CMD_ENTER_XIP,        PB_CAT_ACTION_SYNC,     0x00u, NULL,           false, NULL,                 { NULL }              },
+    { PB_CMD_FLASH_ERASE,      PB_CAT_ACTION_ASYNC,    0x08u, NULL,           false, NULL,                 { NULL }              },
+    { PB_CMD_REBOOT2,          PB_CAT_ACTION_DEFERRED, 0x10u, NULL,           false, NULL,                 { NULL }              },
+    { PB_CMD_READ,             PB_CAT_DATA_IN,         0x08u, tlen_addr_size, false, pb_read_prepare,      { .fill = pb_read_fill }     },
+    { PB_CMD_GET_INFO,         PB_CAT_DATA_IN,         0x10u, NULL,           true,  pb_get_info_prepare,  { .fill = pb_get_info_fill } },
+    { PB_CMD_OTP_READ,         PB_CAT_DATA_IN,         0x05u, tlen_otp,       false, pb_otp_read_prepare,  { .fill = pb_otp_read_fill } },
+    { PB_CMD_WRITE,            PB_CAT_DATA_OUT,        0x08u, tlen_addr_size, false, pb_write_prepare,     { .consume = pb_write_consume } },
+    { PB_CMD_OTP_WRITE,        PB_CAT_DATA_OUT,        0x05u, tlen_otp,       false, pb_otp_write_prepare, { .consume = pb_otp_write_consume } },    { PB_CMD_REBOOT,           PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                { NULL }              },
+    { PB_CMD_EXEC,             PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                 { NULL }              },
+    { PB_CMD_VECTORIZE_FLASH,  PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                 { NULL }              },
 };
 
 #define CMD_TABLE_COUNT (sizeof(k_cmd_table) / sizeof(k_cmd_table[0]))
@@ -476,11 +613,11 @@ static void pb_handle_action_deferred(pb_state_block_t *s, const picoboot_cmd_t 
 
 static void pb_handle_data_in(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     const pb_cmd_table_entry_t *entry = pb_find_cmd(cmd->cmd_id);
-    if (!entry || !entry->data_in_prepare) {
+    if (!entry || !entry->prepare || !entry->fill) {
         pb_stall(s, PB_STATUS_UNKNOWN_CMD);
         return;
     }
-    pb_status_t st = entry->data_in_prepare(s, cmd, s->ctx);
+    pb_status_t st = entry->prepare(s, cmd, s->ctx);
     if (st != PB_STATUS_OK) {
         pb_stall(s, st);
         return;
@@ -489,20 +626,48 @@ static void pb_handle_data_in(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 }
 
 static void pb_handle_data_out(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
-    if (!s->flash_write_buf) {
-        pb_stall(s, PB_STATUS_NOT_PERMITTED);
+    const pb_cmd_table_entry_t *entry = pb_find_cmd(cmd->cmd_id);
+    if (!entry || !entry->prepare || !entry->consume) {
+        pb_stall(s, PB_STATUS_UNKNOWN_CMD);
+        return;
+    }
+    pb_status_t st = entry->prepare(s, cmd, s->ctx);
+    if (st != PB_STATUS_OK) {
+        pb_stall(s, st);
+        return;
+    }
+    pb_set_state(s, PB_STATE_DATA_OUT);
+}
+
+static void pb_task_data_out(pb_state_block_t *s) {
+    const pb_cmd_table_entry_t *entry = pb_find_cmd(s->cmd_id);
+    if (!entry || !entry->consume) {
+        ERR("pb_task_data_out: no consume fn for cmd 0x%02x", s->cmd_id);
+        pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
     }
 
-    switch ((pb_cmd_id_t)cmd->cmd_id) {
-        case PB_CMD_WRITE:
-        case PB_CMD_OTP_WRITE:
-            // Not yet implemented
-            pb_stall(s, PB_STATUS_UNKNOWN_CMD);
-            return;
-        default:
-            pb_stall(s, PB_STATUS_UNKNOWN_CMD);
-            return;
+    uint8_t  buf[64];
+    uint32_t available = picoboot_vendor_available();
+    if (available == 0u) {
+        return;
+    }
+
+    uint32_t chunk = available < sizeof(buf) ? available : sizeof(buf);
+    uint32_t n = picoboot_vendor_read(buf, chunk);
+    if (n == 0u) {
+        return;
+    }
+
+    bool done = false;
+    pb_status_t st = entry->consume(s, buf, n, &done, s->ctx);
+    if (st != PB_STATUS_OK) {
+        pb_stall(s, st);
+        return;
+    }
+
+    if (done) {
+        pb_send_zlp(s);
     }
 }
 
@@ -622,7 +787,7 @@ static void pb_task_idle(pb_state_block_t *s) {
 
 static void pb_task_data_in(pb_state_block_t *s) {
     const pb_cmd_table_entry_t *entry = pb_find_cmd(s->cmd_id);
-    if (!entry || !entry->data_in_fill) {
+    if (!entry || !entry->fill) {
         ERR("pb_task_data_in: no fill fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
@@ -641,7 +806,7 @@ static void pb_task_data_in(pb_state_block_t *s) {
         uint32_t bytes_written = 0u;
         bool     done          = false;
 
-        pb_status_t st = entry->data_in_fill(s, buf, max_len, &bytes_written, &done, s->ctx);
+        pb_status_t st = entry->fill(s, buf, max_len, &bytes_written, &done, s->ctx);
         if (st != PB_STATUS_OK) {
             pb_stall(s, st);
             return;
@@ -708,7 +873,7 @@ void picoboot_task(pb_state_block_t *state) {
             // Transition to IDLE happens in picoboot_vendor_rx_cb()
             break;
         case PB_STATE_DATA_OUT:
-            // Not yet implemented
+            pb_task_data_out(state);
             break;
         case PB_STATE_STALLED:
             break;

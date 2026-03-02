@@ -39,9 +39,12 @@ static const picoboot_ops_t picoboot_ops = {
     .enter_xip          = picoboot_default_enter_xip,
     .reboot2_prepare    = picoboot_default_reboot2_prepare,
     .reboot2_execute    = picoboot_default_reboot2_execute,
-    .validate_read      = picoboot_default_validate_read, 
+    .read_prepare       = picoboot_default_read_prepare, 
     .read               = picoboot_default_read,
+    .write_prepare      = picoboot_default_write_prepare,
+    .write              = picoboot_default_write,
     .otp_read           = picoboot_default_otp_read,
+    .otp_write          = picoboot_default_otp_write,
     .get_info_sys       = picoboot_default_get_info_sys,
 };
 ```

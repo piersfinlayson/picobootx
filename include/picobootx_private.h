@@ -103,8 +103,8 @@ extern const char *pb_state_to_str[];
 // it is not statically zero.  NULL means transfer_len is always 0.
 typedef uint32_t (*pb_get_transfer_len_fn)(const picoboot_cmd_t *cmd);
 
-// Prepares for a data in transfer.
-typedef pb_status_t (*pb_data_in_prepare_fn)(
+// Prepares for data in and data out transfers.
+typedef pb_status_t (*pb_data_prepare_fn)(
     pb_state_block_t *s,
     const picoboot_cmd_t *cmd,
     void *ctx
@@ -123,14 +123,25 @@ typedef pb_status_t (*pb_data_in_fill_fn)(
     void *ctx
 );
 
+typedef pb_status_t (*pb_data_out_consume_fn)(
+    pb_state_block_t *s,
+    const uint8_t *buf,
+    uint32_t len,
+    bool *done,
+    void *ctx
+);
+
 typedef struct {
     uint8_t                  cmd_id;
     pb_cmd_category_t        category;
     uint8_t                  cmd_size;
     pb_get_transfer_len_fn   get_transfer_len;
     bool                     skip_tlen_check;
-    pb_data_in_prepare_fn    data_in_prepare;   // NULL for non-data_in
-    pb_data_in_fill_fn       data_in_fill;      // NULL for non-data_in
+    pb_data_prepare_fn       prepare;
+    union {
+        pb_data_in_fill_fn    fill;
+        pb_data_out_consume_fn consume;
+    };
 } pb_cmd_table_entry_t;
 
 // ---------------------------------------------------------------------------
@@ -150,15 +161,18 @@ typedef struct {
 } pb_in_get_info_t;
 
 typedef struct {
-    uint16_t current_row;        // next row to read
-    uint16_t rows_remaining;     // rows not yet sent
+    uint16_t current_row;        // next row to access
+    uint16_t rows_remaining;     // rows not yet transferred
     uint8_t  ecc;                // 0=raw (4 bytes/row), 1=ECC (2 bytes/row)
-    uint32_t transfer_remaining; // bytes still owed to host
-} pb_in_otp_read_t;
+    uint32_t transfer_remaining; // bytes still owed to/from host
+} pb_otp_access_t;
 
 typedef struct {
-    uint32_t received;           // bytes accumulated so far
-    uint32_t expected;           // total bytes expected from host
+    uint32_t addr;              // current write address, advances as data consumed
+    uint32_t expected;          // total bytes expected from host
+    uint32_t received;          // bytes received so far
+    bool     is_flash;          // true if destination is flash
+    uint16_t page_offset;       // bytes accumulated in flash_write_buf (flash only)
 } pb_out_write_t;
 
 // ---------------------------------------------------------------------------
@@ -190,11 +204,11 @@ struct pb_state_block {
 
     // Per-command transfer state — only one active at a time
     union {
-        pb_in_read_t     read;     //  8 bytes
-        pb_in_get_info_t get_info; // 12 bytes (largest)
-        pb_in_otp_read_t otp_read; // 12 bytes
-        pb_out_write_t   write;    //  8 bytes
-    } xfer;                        // 12 bytes
+        pb_in_read_t     read;      //  8 bytes
+        pb_in_get_info_t get_info;  // 12 bytes
+        pb_otp_access_t  otp;       // 12 bytes
+        pb_out_write_t   write;     // 16 bytes (largest)
+    } xfer;                         // 16 bytes
 
     // ZLP buffer: usbd_edpt_xfer requires a non-NULL pointer even for
     // zero-length transfers on some hardware. 1 byte, owned by state block.

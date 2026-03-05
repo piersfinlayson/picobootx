@@ -53,6 +53,7 @@
 
 #include "device/usbd.h"
 #include "device/usbd_pvt.h"
+#include "picobootx_private.h"
 #include "picobootx_vendor.h"
 
 // The vendor device's interface configuration.
@@ -129,50 +130,47 @@ bool picoboot_vendor_write_clear(void) {
 }
 
 // Management API
+bool picoboot_vendor_is_endpoint_stalled(uint8_t ep_addr) {
+    return usbd_edpt_stalled(p_itf.rhport, ep_addr);
+}
+
 void picoboot_vendor_stall_endpoint(uint8_t ep_addr) {
     if (usbd_edpt_stalled(p_itf.rhport, ep_addr)) {
         // Already stalled
+        DEBUG("Endpoint %02X already stalled", ep_addr);
         return;
     }
 
-    // This is a bit weird.  I have tried a LOT of ways to successfully stall
-    // and then later unstall the endpoints.  This is the specific sequence
-    // which works:
-    // - clear_stall sets busy to 0
-    // - release sets claimed to 0
-    // - stall sets busy to 1
-    //
-    // The calls HAVE to be done in this order as claimed can only be cleared
-    // when busy is 0.  If claimed is left true, the subsequent unstall and
-    // re-arm does NOT re-arm the hardware but leaves the ctrl_buf zeroed out.
-    //
-    // Two other things I tried, both of which required changes to tinyusb
-    // itself.
-    //
-    // 1.
-    // 
-    // To usbd_edpt_stall() add, at the end:
-    // _usbd_dev.ep_status[epnum][dir].claimed = 0;
-    //
-    // 2.
-    //
-    // In dcd_rp2040.c, dcd_ept_stall(), change:
-    // hwbuf_ctrl_set(...)
-    // to
-    // hwbut_ctrl_set_mask(...)
-    //
-    // This leaves the buffer as it was previously set, but only sets the
-    // stall flag instead of clearing it and settig stall which is what the
-    // original code does.
-    usbd_edpt_clear_stall(p_itf.rhport, ep_addr);
-    usbd_edpt_release(p_itf.rhport, ep_addr);
-    usbd_edpt_stall(p_itf.rhport, ep_addr);
+    // tinyusb stalling is a bit broken.  I had to add stall_unclaimed in
+    // order to allow an unstalled endpoint to then be re-armed.
+    DEBUG("Stalling endpoint %02X", ep_addr);
+    usbd_edpt_stall_unclaim(p_itf.rhport, ep_addr);
 }
 
 void picoboot_vendor_unstall_endpoint(uint8_t ep_addr) {
-    if (usbd_edpt_stalled(p_itf.rhport, ep_addr)) {
-        // Only clear stall if it's currently stalled
-        usbd_edpt_clear_stall(p_itf.rhport, ep_addr);
+    bool was_stalled = usbd_edpt_stalled(p_itf.rhport, ep_addr);
+    if (was_stalled) {
+        // Again tinyusb unstalling is a bit broken.  It only provides an API
+        // to unstall that resets the data toggle, which breaks data pid sync
+        // between the host and device when used outside of the scope of
+        // SET/CLEAR_FEATURE(ENDPOINT_HALT) requests - which is what picoboot
+        // uses (INTERFACE_RESET requests) to re-arm endpoints after a stall.
+        // So I added the clear_stall_soft API to allow unstalling without
+        // resetting the data toggle.
+        DEBUG("Unstalling endpoint %02X", ep_addr);
+        usbd_edpt_clear_stall_soft(p_itf.rhport, ep_addr);
+    }
+    if (tu_edpt_dir(ep_addr) == TUSB_DIR_OUT) {
+        if (was_stalled) {
+            DEBUG("Re-arm OUT endpoint");
+            picoboot_vendor_read_clear();
+        } else {
+            DEBUG("Endpoint %02X was not stalled, just clearing", ep_addr);
+            tu_edpt_stream_clear(&p_itf.rx_stream);
+        }
+    } else {
+        DEBUG("Re-arm IN endpoint");
+        picoboot_vendor_write_clear();
     }
 }
 
@@ -282,7 +280,7 @@ bool vendord_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint
         // Try to send more if possible
         tu_edpt_stream_write_xfer(&p_itf.tx_stream);
 
-        // Standard vendor drive sends a ZLP if the last packet is exactly the
+        // Standard vendor driver sends a ZLP if the last packet is exactly the
         // endpoint size, but for picoboot we want to suppress it ZLPs have a
         // special meaning in the protocol.
     }
@@ -291,12 +289,15 @@ bool vendord_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint
 }
 
 bool picoboot_vendor_send_zlp(void) {
-    // This is exactly how tusb.c sends a ZLP packet in
-    // tu_edpt_stream_write_zlp_if_needed()
-    tu_edpt_stream_t *tx = &p_itf.tx_stream;
-    TU_VERIFY(usbd_edpt_claim(p_itf.rhport, tx->ep_addr), false);
-    if (!usbd_edpt_xfer_fifo(p_itf.rhport, tx->ep_addr, &tx->ff, 0, false)) {
-        usbd_edpt_release(p_itf.rhport, tx->ep_addr);
+    uint8_t buf[1] = {0};
+    uint8_t sent = picoboot_vendor_write(buf, 1);
+    if (sent != 1) {
+        LOG("Failed to send ZLP: sent %u bytes", sent);
+        return false;
+    }
+    sent = picoboot_vendor_write_flush();
+    if (sent != 1) {
+        LOG("Failed to flush ZLP: sent %u bytes", sent);
         return false;
     }
     return true;

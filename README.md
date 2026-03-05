@@ -77,4 +77,4 @@ Some notable quirks were discovered in picotool and tinyusb during picobootx's d
 
 ### tinyusb Wrinkles
 
-- tinyusb appears not to provide any easy/proper/supported way for devices to stall/unstall their own endpoints.  See the comment in picobootx_vendor.h for more details.  This limitation has been worked around in picobootx. 
+- tinyusb appears not to provide any easy/proper/supported way for devices to stall/unstall their own endpoints.  tinyusb has been forked and picobootx builds against that fork.

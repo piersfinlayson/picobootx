@@ -99,6 +99,9 @@ bool picoboot_vendor_send_zlp(void);
 // Management API
 //
 
+// Retrieve stall status of an endpoint
+bool picoboot_vendor_is_endpoint_stalled(uint8_t ep_addr);
+
 // Stall an endpoint
 void picoboot_vendor_stall_endpoint(uint8_t ep_addr);
 

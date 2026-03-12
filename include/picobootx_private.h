@@ -22,7 +22,7 @@ extern void picoboot_debug(const char *msg, ...);
 extern void picoboot_log(const char *msg, ...);
 #define LOG picoboot_log
 #endif // LOG
-#if !defined(ERROR)
+#if !defined(ERR)
 extern void picoboot_error(const char *msg, ...);
 #define ERR picoboot_error
 #endif // ERROR
@@ -33,9 +33,9 @@ extern void picoboot_error(const char *msg, ...);
 #if !defined(LOG)
 #define LOG(...) do {} while(0)
 #endif // LOG
-#if !defined(ERROR)
+#if !defined(ERR)
 #define ERR(...) do {} while(0)
-#endif // ERROR
+#endif // ERR
 #endif // PICOBOOT_LOGGING
 
 //

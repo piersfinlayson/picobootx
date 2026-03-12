@@ -23,7 +23,7 @@ extern void picoboot_log(const char *fmt, ...);
 #define LOG(...) picoboot_log(__VA_ARGS__)
 #endif // LOG
 #if !defined(ERROR)
-extern void picoboot_error(const char *fmt, ...);
+extern void picoboot_error(const char *msg, ...);
 #define ERR(...) picoboot_error(__VA_ARGS__)
 #endif // ERROR
 #else // !PICOBOOT_LOGGING
@@ -33,9 +33,9 @@ extern void picoboot_error(const char *fmt, ...);
 #if !defined(LOG)
 #define LOG(...) do {} while(0)
 #endif // LOG
-#if !defined(ERROR)
+#if !defined(ERR)
 #define ERR(...) do {} while(0)
-#endif // ERROR
+#endif // ERR
 #endif // PICOBOOT_LOGGING
 
 //

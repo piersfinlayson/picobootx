@@ -230,12 +230,12 @@ pb_status_t picoboot_default_read(uint32_t addr, uint8_t *buf, uint32_t len, voi
 
     if ((addr % 4 == 0) && (len == 4)) {
         // Aligned word read - can just read directly into the buffer
-        *(uint32_t *)buf = *(const uint32_t *)addr;
+        *(uint32_t *)buf = *(const uint32_t *)(uintptr_t)addr;
         return PB_STATUS_OK;
     }
 
     // Otherwise memcpy
-    memcpy(buf, (const void *)addr, len);
+    memcpy(buf, (const void *)(uintptr_t)addr, len);
     return PB_STATUS_OK;
 }
 
@@ -273,7 +273,7 @@ pb_status_t picoboot_default_write(
     void *ctx
 ) {
     (void)ctx;
-    memcpy((void *)addr, buf, len);
+    memcpy((void *)(uintptr_t)addr, buf, len);
     return PB_STATUS_OK;
 }
 

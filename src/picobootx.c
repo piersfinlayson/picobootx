@@ -65,9 +65,33 @@ static uint8_t pb_info_words_for_flag(uint32_t flag) {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+#define USB_DPRAM_BASE      0x50100000u
+#define EP3_OUT_BUF_CTRL    (*(volatile uint32_t *)(USB_DPRAM_BASE + 0x80 + (3 * 8) + 4))
+#define EP83_IN_BUF_CTRL    (*(volatile uint32_t *)(USB_DPRAM_BASE + 0x80 + (4 * 8)))
+#define USB_BUFF_STATUS     (*(volatile uint32_t *)(0x50110058u))
+
+// Key bits in BUF_CTRL
+#define BUF_CTRL_AVAIL      (1u << 10)
+#define BUF_CTRL_STALL      (1u << 11)
+#define BUF_CTRL_FULL       (1u << 15)
+
 static void pb_set_state(pb_state_block_t *s, pb_state_t new_state) {
-    //DEBUG("STATE: %s -> %s", pb_state_to_str[s->state], pb_state_to_str[new_state]);
+    DEBUG("STATE: %s -> %s", pb_state_to_str[s->state], pb_state_to_str[new_state]);
     s->state = new_state;
+    DEBUG("bc3=0x%08lx a=%u s=%u f=%u bs=0x%08lx",
+        EP3_OUT_BUF_CTRL,
+        (EP3_OUT_BUF_CTRL & BUF_CTRL_AVAIL) ? 1 : 0,
+        (EP3_OUT_BUF_CTRL & BUF_CTRL_STALL) ? 1 : 0,
+        (EP3_OUT_BUF_CTRL & BUF_CTRL_FULL)  ? 1 : 0,
+        USB_BUFF_STATUS);
+    DEBUG("bc84=0x%08lx a=%u s=%u f=%u bs=0x%08lx",
+        EP83_IN_BUF_CTRL,
+        (EP83_IN_BUF_CTRL & BUF_CTRL_AVAIL) ? 1 : 0,
+        (EP83_IN_BUF_CTRL & BUF_CTRL_STALL) ? 1 : 0,
+        (EP83_IN_BUF_CTRL & BUF_CTRL_FULL)  ? 1 : 0,
+        USB_BUFF_STATUS);
+    //for (volatile int ii = 0; ii < 10000000; ii++);
+
 }
 
 void pb_set_status(pb_state_block_t *s, pb_status_t code, bool in_progress) {
@@ -79,10 +103,17 @@ void pb_set_status(pb_state_block_t *s, pb_status_t code, bool in_progress) {
 }
 
 void pb_stall(pb_state_block_t *s, pb_status_t code) {
+    // Stall is used per the picoboot specification (RP2350 datasheet 5.6.4)
+    // if the command received was invalid or not recognised.  Both bulk
+    // endpoints are stalled.  The specification also implies the stall
+    // condition is set if a command failed (set GET_COMMAND_STATUS, RP2350
+    // datasheet 5.6.5.2).
+    // The RP2350 bootrom concurs, and sets in_progress to false.
     ERR("STALL: cmd_id=0x%02x status=%u", s->cmd_id, code);
     pb_set_status(s, code, false);
     picoboot_vendor_stall_endpoint(s->ep_out);
     picoboot_vendor_stall_endpoint(s->ep_in);
+    s->status.in_progress = false;
     pb_set_state(s, PB_STATE_STALLED);
 }
 
@@ -291,6 +322,11 @@ static pb_status_t pb_get_info_fill(
         pb_status_t st = s->ops->get_info_sys(flag, buf, data_bytes, bytes_written, ctx);
         if (st != PB_STATUS_OK) {
             return st;
+        }
+        if (data_bytes != *bytes_written) {
+            ERR("get_info_sys for flag 0x%08x wrote %u bytes, expected %u",
+                flag, *bytes_written, data_bytes);
+            return PB_STATUS_UNKNOWN_ERROR;
         }
         gi->remaining_flags    &= ~flag;
         gi->transfer_remaining  = (gi->transfer_remaining > *bytes_written)
@@ -511,7 +547,8 @@ static const pb_cmd_table_entry_t k_cmd_table[] = {
     { PB_CMD_GET_INFO,         PB_CAT_DATA_IN,         0x10u, NULL,           true,  pb_get_info_prepare,  { .fill = pb_get_info_fill } },
     { PB_CMD_OTP_READ,         PB_CAT_DATA_IN,         0x05u, tlen_otp,       false, pb_otp_read_prepare,  { .fill = pb_otp_read_fill } },
     { PB_CMD_WRITE,            PB_CAT_DATA_OUT,        0x08u, tlen_addr_size, false, pb_write_prepare,     { .consume = pb_write_consume } },
-    { PB_CMD_OTP_WRITE,        PB_CAT_DATA_OUT,        0x05u, tlen_otp,       false, pb_otp_write_prepare, { .consume = pb_otp_write_consume } },    { PB_CMD_REBOOT,           PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                { NULL }              },
+    { PB_CMD_OTP_WRITE,        PB_CAT_DATA_OUT,        0x05u, tlen_otp,       false, pb_otp_write_prepare, { .consume = pb_otp_write_consume } },
+    { PB_CMD_REBOOT,           PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                { NULL }              },
     { PB_CMD_EXEC,             PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                 { NULL }              },
     { PB_CMD_VECTORIZE_FLASH,  PB_CAT_UNSUPPORTED,     0x00u, NULL,           false, NULL,                 { NULL }              },
 };
@@ -572,6 +609,7 @@ static void pb_handle_action_async(pb_state_block_t *s, const picoboot_cmd_t *cm
                 pb_stall(s, PB_STATUS_UNKNOWN_CMD);
                 return;
             }
+            LOG("Note FLASH_ERASE may need to be made properly async to avoid stalling USB");
             DEBUG("f erase: addr=0x%08x size=%u",
                 ((const pb_addr_size_args_t *)cmd->args)->addr,
                 ((const pb_addr_size_args_t *)cmd->args)->size);
@@ -679,8 +717,8 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     s->token  = cmd->token;
     s->cmd_id = cmd->cmd_id;
 
-    //DEBUG("%s id=0x%02x token=0x%08x tlen=%u",
-    //      command_to_str((pb_cmd_id_t)cmd->cmd_id), cmd->cmd_id, cmd->token, cmd->transfer_len);
+    DEBUG("%s id=0x%02x token=0x%08x tlen=%u",
+          command_to_str((pb_cmd_id_t)cmd->cmd_id), cmd->cmd_id, cmd->token, cmd->transfer_len);
 
     const pb_cmd_table_entry_t *entry = pb_find_cmd(cmd->cmd_id);
     if (!entry) {
@@ -753,7 +791,13 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 // ---------------------------------------------------------------------------
 
 static void pb_task_idle(pb_state_block_t *s) {
-    if (picoboot_vendor_available() < (uint32_t)PICOBOOT_CMD_LEN) {
+    uint32_t avail = picoboot_vendor_available();
+    if (avail < (uint32_t)PICOBOOT_CMD_LEN) {
+        if (avail > 1u) {
+            LOG("Partial packet received, ignoring: %u bytes", avail);
+            picoboot_vendor_read_clear();
+        }
+        // Note that 0/1 bytes are handled in all cases in _rx_cb()
         return;
     }
 
@@ -848,14 +892,21 @@ void picoboot_init(pb_state_block_t            *state,
                    uint8_t                      ep_in,
                    void                        *ctx) {
     memset(state, 0, sizeof(*state));
-    state->ops             = ops;
-    state->custom          = custom;
+
+    state->ops = ops;
+    state->custom = custom;
     state->flash_write_buf = flash_write_buf;
-    state->rhport          = rhport;
-    state->ep_out          = ep_out;
-    state->ep_in           = ep_in;
-    state->ctx             = ctx;
-    state->state           = PB_STATE_IDLE;
+    state->ctx = ctx;
+
+    state->state = PB_STATE_IDLE;
+
+    state->token = 0u;
+    state->rhport = rhport;
+    state->ep_out = ep_out;
+    state->ep_in = ep_in;
+    state->cmd_id = 0u;
+
+    pb_set_status(state, PB_STATUS_OK, false);
 }
 
 void picoboot_task(pb_state_block_t *state) {
@@ -886,17 +937,22 @@ void picoboot_tx_cb(
 ) {
     (void)sent_bytes;
 
+    //DEBUG("TX callback: sent_bytes=%u", sent_bytes);
+
     if (state->state != PB_STATE_AWAIT_ZLP) {
+        // Ignore notifications for non-ZLP sent events
         return;
     }
 
     if (state->cmd_id == (uint8_t)PB_CMD_REBOOT2) {
+        // As we have now sent the ZLP we can reboot
         if (state->ops->reboot2_execute) {
             state->ops->reboot2_execute(&state->reboot2_args, state->ctx);
         }
     }
 
-    // For the non-reboot2 case (which should never get this far)
+    // For the non-reboot2 case (reboot2 should never get this far)
+    LOG("ZLP ACK sent, returning to IDLE %u bytes", sent_bytes);
     pb_set_state(state, PB_STATE_IDLE);
 }
 
@@ -904,17 +960,22 @@ void picoboot_rx_cb(
     pb_state_block_t *state,
     uint32_t available_bytes
 ) {
+    //DEBUG("RX callback: available_bytes=%u", available_bytes);
     if (available_bytes <= 1) {
-        // Both 0 and 1 byte values are considered ZLP by this stack in case
-        // the host implementation doesn't support sending real ZLPs.
         if (state->state == PB_STATE_AWAIT_ACK) {
+            // Both 0 and 1 byte values are considered ZLP by this stack in case
+            // the host implementation doesn't support sending real ZLPs.
+            LOG("Received ZLP ACK (available_bytes=%u)", available_bytes);
             pb_set_status(state, PB_STATUS_OK, false);
             pb_set_state(state, PB_STATE_IDLE);
         }
 
-        // No need to actually read the 0/1 byte value, just clear the OUT
-        // endpoint buffer
-        picoboot_vendor_read_clear();
+        // Consume the byte if it's 1 byte, otherwise no need to do a read at
+        // all
+        if (available_bytes == 1) {
+            uint8_t dummy;
+            picoboot_vendor_read(&dummy, 1);
+        }
     }
 }
 
@@ -924,6 +985,31 @@ bool picoboot_control_xfer_cb(
     uint8_t stage,
     tusb_control_request_t const *req
 ) {
+    // Handle CLEAR_FEATURE(ENDPOINT_HALT) requests from the host to unstall our endpoints.
+    if ((req->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD) &&
+        (req->bRequest == TUSB_REQ_CLEAR_FEATURE) &&
+        (req->wValue == TUSB_REQ_FEATURE_EDPT_HALT)) {
+        uint8_t ep = (uint8_t)(req->wIndex & 0xFFu);
+        if (ep == state->ep_out || ep == state->ep_in) {
+            if (stage == CONTROL_STAGE_SETUP) {
+                DEBUG("CTRL: CLEAR_FEATURE(ENDPOINT_HALT) for EP%02x", ep);
+                // tinyusb will have unstalled the endpoint by the time we get
+                // here - we need to re-arm the endpoint
+                if (ep == state->ep_out) {
+                    DEBUG("Re-arming OUT endpoint");
+                    picoboot_vendor_read_clear();
+                } else if (ep == state->ep_in) {
+                    DEBUG("Re-arming IN endpoint");
+                    picoboot_vendor_write_clear();
+                }
+                // Do not touch the state machine, this is how the bootrom
+                // implementation handles it.
+                return tud_control_status(rhport, req);
+            }
+            return true;
+        }
+    }
+
     if ((req->bmRequestType_bit.type != TUSB_REQ_TYPE_CLASS &&
          req->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR) ||
         req->bmRequestType_bit.recipient != TUSB_REQ_RCPT_INTERFACE) {
@@ -946,18 +1032,10 @@ bool picoboot_control_xfer_cb(
     switch (req->bRequest) {
         case PICOBOOT_BREQUEST_INTERFACE_RESET:
             if (stage == CONTROL_STAGE_SETUP) {
-                //DEBUG("CTRL: IR");
-
-                // Unstall endpoints (if stalled - this function will check
-                // before unstalling)
+                DEBUG("CTRL: IR");
                 picoboot_vendor_unstall_endpoint(state->ep_out);
                 picoboot_vendor_unstall_endpoint(state->ep_in);
 
-                // Clear both endpoints.  This ensures any pending read data
-                // is read and thrown away, and also that the write buffer is
-                // cleared and both endpoints are ready for the next command.
-                picoboot_vendor_read_clear();
-                picoboot_vendor_write_clear();
                 // Clear out state
                 pb_set_state(state, PB_STATE_IDLE);
                 pb_set_status(state, PB_STATUS_OK, false);
@@ -980,6 +1058,18 @@ bool picoboot_control_xfer_cb(
             if (stage == CONTROL_STAGE_SETUP) {
                 DEBUG("CTRL: GCS s=%u sc=%u t=0x%08x ip=%u",
                     stage, state->status.status_code, state->status.token, state->status.in_progress);
+
+                // See if either endpoint is stalled
+                bool stalled_out = picoboot_vendor_is_endpoint_stalled(state->ep_out);
+                bool stalled_in  = picoboot_vendor_is_endpoint_stalled(state->ep_in);
+                if (stalled_out || stalled_in) {
+                    DEBUG("GCS Endpoint stalled: OUT=%u EP%02X IN=%u EP%02X", stalled_out, state->ep_out, stalled_in, state->ep_in);
+                    if (state->status.status_code == PB_STATUS_OK) {
+                        ERR("GCS: endpoint stalled but status OK, setting to UNKNOWN_ERROR");
+                        pb_set_status(state, PB_STATUS_UNKNOWN_ERROR, false);
+                        pb_set_state(state, PB_STATE_STALLED);
+                    }
+                }
                 return tud_control_xfer(rhport, req,
                                         &state->status,
                                         sizeof(state->status));

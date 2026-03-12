@@ -15,16 +15,16 @@ extern "C" {
 // Logging macros
 #if defined(PICOBOOT_LOGGING) && (PICOBOOT_LOGGING == 1)
 #if !defined(DEBUG)
-extern void picoboot_debug(const char *msg, ...);
-#define DEBUG picoboot_debug
+extern void picoboot_debug(const char *fmt, ...);
+#define DEBUG(...) picoboot_debug(__VA_ARGS__)
 #endif // DEBUG
 #if !defined(LOG)
-extern void picoboot_log(const char *msg, ...);
-#define LOG picoboot_log
+extern void picoboot_log(const char *fmt, ...);
+#define LOG(...) picoboot_log(__VA_ARGS__)
 #endif // LOG
-#if !defined(ERR)
+#if !defined(ERROR)
 extern void picoboot_error(const char *msg, ...);
-#define ERR picoboot_error
+#define ERR(...) picoboot_error(__VA_ARGS__)
 #endif // ERROR
 #else // !PICOBOOT_LOGGING
 #if !defined(DEBUG)
@@ -210,10 +210,7 @@ struct pb_state_block {
         pb_out_write_t   write;     // 16 bytes (largest)
     } xfer;                         // 16 bytes
 
-    // ZLP buffer: usbd_edpt_xfer requires a non-NULL pointer even for
-    // zero-length transfers on some hardware. 1 byte, owned by state block.
-    uint8_t                      zlp_buf[1];      // 1 byte (+3 padding = 4)
-};                                                // total: 76 bytes on 32-bit ARM
+};
 
 // Verify PICOBOOT_STATE_SIZE matches the actual struct size.
 // If this fires, update PICOBOOT_STATE_SIZE in picoboot.h.

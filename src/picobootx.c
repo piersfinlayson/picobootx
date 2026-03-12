@@ -798,7 +798,7 @@ static void pb_task_idle(pb_state_block_t *s) {
             LOG("Partial packet received, ignoring: %u bytes", avail);
             picoboot_vendor_read_clear();
         }
-        // Note that 0/1 bytes are handled in all cases in _rx_cb()
+        // Note that 0/1 bytes are handled in all idle cases in _rx_cb()
         return;
     }
 
@@ -972,8 +972,9 @@ void picoboot_rx_cb(
         }
 
         // Consume the byte if it's 1 byte, otherwise no need to do a read at
-        // all
-        if (available_bytes == 1) {
+        // all.  Don't consume it if we're in DATA_OUT, but do in other states
+        // as it likely won't ever get read otherwise.
+        if ((available_bytes == 1) && (state->state != PB_STATE_DATA_OUT)){
             uint8_t dummy;
             picoboot_vendor_read(&dummy, 1);
         }

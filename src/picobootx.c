@@ -78,6 +78,7 @@ static uint8_t pb_info_words_for_flag(uint32_t flag) {
 static void pb_set_state(pb_state_block_t *s, pb_state_t new_state) {
     DEBUG("STATE: %s -> %s", pb_state_to_str[s->state], pb_state_to_str[new_state]);
     s->state = new_state;
+#if 0
     DEBUG("bc3=0x%08lx a=%u s=%u f=%u bs=0x%08lx",
         EP3_OUT_BUF_CTRL,
         (EP3_OUT_BUF_CTRL & BUF_CTRL_AVAIL) ? 1 : 0,
@@ -90,8 +91,8 @@ static void pb_set_state(pb_state_block_t *s, pb_state_t new_state) {
         (EP83_IN_BUF_CTRL & BUF_CTRL_STALL) ? 1 : 0,
         (EP83_IN_BUF_CTRL & BUF_CTRL_FULL)  ? 1 : 0,
         USB_BUFF_STATUS);
-    //for (volatile int ii = 0; ii < 10000000; ii++);
-
+        for (volatile int ii = 0; ii < 1000000; ii++);
+#endif
 }
 
 void pb_set_status(pb_state_block_t *s, pb_status_t code, bool in_progress) {
@@ -960,7 +961,7 @@ void picoboot_rx_cb(
     pb_state_block_t *state,
     uint32_t available_bytes
 ) {
-    //DEBUG("RX callback: available_bytes=%u", available_bytes);
+    DEBUG("RX callback: available_bytes=%u", available_bytes);
     if (available_bytes <= 1) {
         if (state->state == PB_STATE_AWAIT_ACK) {
             // Both 0 and 1 byte values are considered ZLP by this stack in case
@@ -976,6 +977,13 @@ void picoboot_rx_cb(
             uint8_t dummy;
             picoboot_vendor_read(&dummy, 1);
         }
+    }
+
+    if (state->state == PB_STATE_AWAIT_ACK) {
+        // Assume we've just "missed" the ACK.
+        LOG("Received non-ZLP data while awaiting ACK");
+        pb_set_status(state, PB_STATUS_OK, false);
+        pb_set_state(state, PB_STATE_IDLE);
     }
 }
 

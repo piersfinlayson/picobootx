@@ -7,6 +7,7 @@
 // Either use these or write your own using these as a starting point.
 
 #include "picobootx_private.h"
+#include "picobootx_impl.h"
 
 // Error codes returned by ROM functions
 #define BOOTROM_ERROR_TIMEOUT                   (-1)    // Unused in RP2350
@@ -90,6 +91,36 @@ static get_partition_table_info_fn_t pb_lookup_get_partition_table_info_fn(void)
 typedef int (*otp_access_fn_t)(uint8_t *buf, uint32_t buf_len, uint32_t row_and_flags);
 otp_access_fn_t pb_lookup_otp_access_fn(void) {
     return (otp_access_fn_t)picoboot_lookup_boot_fn('O', 'A');
+}
+
+typedef void (*flash_range_erase_fn_t)(uint32_t flash_offs, size_t count, uint32_t block_size, uint8_t block_cmd);
+static flash_range_erase_fn_t pb_lookup_flash_range_erase_fn(void) {
+    return (flash_range_erase_fn_t)picoboot_lookup_boot_fn('R', 'E');
+}
+
+typedef void (*flash_range_program_fn_t)(uint32_t flash_offs, const uint8_t *data, size_t count);
+static flash_range_program_fn_t pb_lookup_flash_range_program_fn(void) {
+    return (flash_range_program_fn_t)picoboot_lookup_boot_fn('R', 'P');
+}
+
+typedef void (*connect_internal_flash_fn_t)(void);
+static connect_internal_flash_fn_t pb_lookup_connect_internal_flash_fn(void) {
+    return (connect_internal_flash_fn_t)picoboot_lookup_boot_fn('I', 'F');
+}
+
+typedef void (*flash_exit_xip_fn_t)(void);
+static flash_exit_xip_fn_t pb_lookup_flash_exit_xip_fn(void) {
+    return (flash_exit_xip_fn_t)picoboot_lookup_boot_fn('E', 'X');
+}
+
+typedef void (*flash_flush_cache_fn_t)(void);
+static flash_flush_cache_fn_t pb_lookup_flash_flush_cache_fn(void) {
+    return (flash_flush_cache_fn_t)picoboot_lookup_boot_fn('F', 'C');
+}
+
+typedef void (*flash_select_xip_read_mode_fn_t)(uint8_t mode, uint8_t clkdiv);
+static flash_select_xip_read_mode_fn_t pb_lookup_flash_select_xip_read_mode_fn(void) {
+    return (flash_select_xip_read_mode_fn_t)picoboot_lookup_boot_fn('X', 'M');
 }
 
 size_t picoboot_get_serial(uint16_t *buffer, size_t max_len) {
@@ -190,14 +221,6 @@ void picoboot_default_reboot2_execute(const pb_reboot2_args_t *args, void *ctx) 
     reboot(flags, delay_ms, p0, p1);
 }
 
-// RP2350 memory regions
-#define RP2350_ROM_BASE    0x00000000u
-#define RP2350_ROM_SIZE    0x00008000u  // 32KB
-#define RP2350_FLASH_BASE  0x10000000u
-#define RP2350_FLASH_SIZE  0x02000000u  // 32MB
-#define RP2350_SRAM_BASE   0x20000000u
-#define RP2350_SRAM_SIZE   0x00082000u  // 520KB
-
 pb_status_t picoboot_default_read_prepare(
     uint32_t addr, 
     uint32_t size, 
@@ -262,6 +285,11 @@ pb_status_t picoboot_default_write_prepare(
         return PB_STATUS_INVALID_ARG;
     }
 
+    if (is_flash_region && (addr % 256u) != 0u) {
+        LOG("Unaligned flash write: addr=0x%08x", addr);
+        return PB_STATUS_BAD_ALIGNMENT;
+    }
+
     *is_flash = is_flash_region;
     return PB_STATUS_OK;
 }
@@ -274,6 +302,146 @@ pb_status_t picoboot_default_write(
 ) {
     (void)ctx;
     memcpy((void *)(uintptr_t)addr, buf, len);
+    return PB_STATUS_OK;
+}
+
+pb_status_t picoboot_default_flash_page_write(
+    uint32_t addr,
+    const uint8_t *buf,
+    void *ctx
+) {
+    (void)ctx;
+
+    flash_range_program_fn_t flash_range_program = pb_lookup_flash_range_program_fn();
+    if (flash_range_program == NULL) {
+        ERR("Unable to find flash_range_program in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    uint32_t flash_offs = addr - RP2350_FLASH_BASE;
+    flash_range_program(flash_offs, buf, 256u);
+    return PB_STATUS_OK;
+}
+
+pb_status_t picoboot_default_flash_erase_prepare(
+    const pb_addr_size_args_t *args,
+    void *ctx
+) {
+    (void)ctx;
+
+    if (args->addr < RP2350_FLASH_BASE ||
+        (args->addr + args->size) > (RP2350_FLASH_BASE + RP2350_FLASH_SIZE)) {
+        ERR("flash_erase_prepare: address out of range: addr=0x%08x size=%u", args->addr, args->size);
+        return PB_STATUS_INVALID_ADDRESS;
+    }
+
+    if ((args->addr % FLASH_SECTOR_SIZE) != 0u || (args->size % FLASH_SECTOR_SIZE) != 0u) {
+        ERR("flash_erase_prepare: addr/size not sector-aligned: addr=0x%08x size=%u", args->addr, args->size);
+        return PB_STATUS_BAD_ALIGNMENT;
+    }
+
+    return PB_STATUS_OK;
+}
+
+// This function MUST run from RAM, as it disables flash access while erasing.
+// It also disables interrupts (which are also serviced from flash) for the
+// duration of the erase.
+static void __attribute__((section(".ramfunc"), noinline)) flash_erase_critical(
+    flash_exit_xip_fn_t exit_xip,
+    flash_range_erase_fn_t range_erase,
+    flash_flush_cache_fn_t flush_cache,
+    flash_select_xip_read_mode_fn_t select_xip,
+    uint32_t flash_offs,
+    uint32_t size,
+    uint8_t clkdiv
+) {
+    // Disable interrupts
+    __asm volatile ("cpsid i");
+
+    // Exit XIP mode before erasing so that the RP2350 enters QSPI serial
+    // command mode (required for erases).  This has the impact of preventing
+    // access to flash from code. 
+    exit_xip();
+
+    // Erase the appropriate set of sectors.  The bootrom flash erase function
+    // figures out if it can do a bulk erase or needs to do multiple sector
+    // erases - which is why we pass in the command for doing larger erases in
+    // case it can use it.
+    range_erase(flash_offs, size, FLASH_BLOCK_SIZE, FLASH_BLOCK_ERASE_CMD);
+    
+    // Re-enable XIP mode so firmware can re-access flash.
+    select_xip(3, clkdiv);
+
+    // Flush the flash cache to ensure the pre-erased data isn't returned on
+    // subsequent reads.
+    flush_cache();
+
+    // Re-enable interrupts
+    __asm volatile ("cpsie i");
+}
+
+pb_status_t picoboot_default_flash_erase(
+    const pb_addr_size_args_t *args,
+    void *ctx
+) {
+    (void)ctx;
+
+    connect_internal_flash_fn_t connect_internal_flash = pb_lookup_connect_internal_flash_fn();
+    if (connect_internal_flash == NULL) {
+        ERR("Unable to find connect_internal_flash in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    flash_exit_xip_fn_t flash_exit_xip = pb_lookup_flash_exit_xip_fn();
+    if (flash_exit_xip == NULL) {
+        ERR("Unable to find flash_exit_xip in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    flash_range_erase_fn_t flash_range_erase = pb_lookup_flash_range_erase_fn();
+    if (flash_range_erase == NULL) {
+        ERR("Unable to find flash_range_erase in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    flash_flush_cache_fn_t flash_flush_cache = pb_lookup_flash_flush_cache_fn();
+    if (flash_flush_cache == NULL) {
+        ERR("Unable to find flash_flush_cache in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    flash_select_xip_read_mode_fn_t flash_select_xip_read_mode = pb_lookup_flash_select_xip_read_mode_fn();
+    if (flash_select_xip_read_mode == NULL) {
+        ERR("Unable to find flash_select_xip_read_mode in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    DEBUG("erase flash: addr=0x%08x size=%u", args->addr, args->size);
+    connect_internal_flash();
+
+    // Restore XIP mode using the clock divisor currently configured in QMI,
+    // which reflects whatever was set up by the firmware's own QMI setup.
+    // Mode 3 (EBh quad-IO) is the fastest; if this causes issues try mode 2
+    // (BBh dual-IO), mode 1 (0Bh serial), or mode 0 (03h serial, slowest/most
+    // compatible). Alternatively, the bootrom saves the discovered mode into
+    // boot RAM as an XIP setup function which could be called here instead,
+    // restoring exactly what the bootrom found during flash scanning.
+    uint8_t clkdiv = (XIP_QMI_M0_TIMING >> XIP_QMI_M0_CLKDIV_SHIFT) & XIP_QMI_M0_CLKDIV_MASK;
+    DEBUG("Will be restoring flash XIP mode 3 with clkdiv %u", clkdiv);
+
+    uint32_t flash_offs = args->addr - RP2350_FLASH_BASE;
+    flash_erase_critical(
+        flash_exit_xip,
+        flash_range_erase,
+        flash_flush_cache,
+        flash_select_xip_read_mode,
+        flash_offs,
+        args->size,
+        clkdiv
+    );
+
+    DEBUG("flash erase completed");
+
     return PB_STATUS_OK;
 }
 

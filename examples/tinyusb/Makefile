@@ -65,6 +65,7 @@ CFLAGS := -mcpu=cortex-m33 -mthumb -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
 LDFLAGS := -nostdlib \
            -T $(PICO_SDKLESS_COMMON_LD) \
            -Wl,--fatal-warnings \
+		   -Wl,--no-warn-rwx-segments \
            -Wl,-Map=$(BUILD_DIR)/$(BIN_PREFIX).map
 
 EXAMPLE_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(EXAMPLE_SRC))

@@ -606,14 +606,21 @@ static void pb_handle_action_async(pb_state_block_t *s, const picoboot_cmd_t *cm
 
     switch ((pb_cmd_id_t)cmd->cmd_id) {
         case PB_CMD_FLASH_ERASE:
-            if (!s->ops->flash_erase) {
+            if (!s->ops->flash_erase_prepare || !s->ops->flash_erase) {
                 pb_stall(s, PB_STATUS_UNKNOWN_CMD);
                 return;
             }
+
             LOG("Note FLASH_ERASE may need to be made properly async to avoid stalling USB");
             DEBUG("f erase: addr=0x%08x size=%u",
                 ((const pb_addr_size_args_t *)cmd->args)->addr,
                 ((const pb_addr_size_args_t *)cmd->args)->size);
+
+            st = s->ops->flash_erase_prepare((const pb_addr_size_args_t *)cmd->args, s->ctx);
+            if (st != PB_STATUS_OK) {
+                pb_stall(s, st);
+                return;
+            }
             st = s->ops->flash_erase((const pb_addr_size_args_t *)cmd->args, s->ctx);
             break;
         default:

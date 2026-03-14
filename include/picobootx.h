@@ -48,6 +48,10 @@ _Static_assert(CFG_TUD_ENDPOINT0_SIZE == 64, "The picoboot protocol requires bMa
 // picoboot_private.h.
 #define PICOBOOT_STATE_SIZE    76u
 
+#define FLASH_SECTOR_SIZE      4096u
+#define FLASH_PAGE_SIZE        256u
+#define FLASH_BLOCK_SIZE       65536u
+
 // ---------------------------------------------------------------------------
 // GET_INFO info types
 // ---------------------------------------------------------------------------
@@ -227,6 +231,7 @@ typedef struct {
     );
 
     // Flash erase
+    pb_status_t (*flash_erase_prepare)(const pb_addr_size_args_t *args, void *ctx);
     pb_status_t (*flash_erase)(const pb_addr_size_args_t *args, void *ctx);
 
     // Write functions.  Only supported if picoboot is initialised with a flash_write_buf.

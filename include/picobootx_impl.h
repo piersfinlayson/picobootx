@@ -7,6 +7,16 @@
 #if !defined(PICOBOOTX_IMPL_H)
 #define PICOBOOTX_IMPL_H
 
+// RP2350 memory regions
+#define RP2350_ROM_BASE    0x00000000u
+#define RP2350_ROM_SIZE    0x00008000u  // 32KB
+#define RP2350_FLASH_BASE  0x10000000u
+#define RP2350_FLASH_SIZE  0x02000000u  // 32MB
+#define RP2350_SRAM_BASE   0x20000000u
+#define RP2350_SRAM_SIZE   0x00082000u  // 520KB
+
+#define FLASH_BLOCK_ERASE_CMD 0xd8u
+
 // Helper to take return codes from boot ROM functions and convert to
 // pb_status_t
 pb_status_t pb_status_from_bootrom(int ret);
@@ -67,6 +77,26 @@ pb_status_t picoboot_default_write(
     uint32_t addr,
     const uint8_t *buf,
     uint32_t len,
+    void *ctx
+);
+
+// Writes a 256-byte page to flash at the specified address.
+// Does not perform any validation.
+pb_status_t picoboot_default_flash_page_write(
+    uint32_t addr,
+    const uint8_t *buf,
+    void *ctx
+);
+
+// Validates flash erase parameters for an RP2350
+pb_status_t picoboot_default_flash_erase_prepare(
+    const pb_addr_size_args_t *args,
+    void *ctx
+);
+
+// Performs flash erase.  Does not perform any validation.
+pb_status_t picoboot_default_flash_erase(
+    const pb_addr_size_args_t *args,
     void *ctx
 );
 

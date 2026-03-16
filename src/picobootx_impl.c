@@ -8,6 +8,7 @@
 
 #include "picobootx_private.h"
 #include "picobootx_impl.h"
+#include "pico.h"
 
 // Error codes returned by ROM functions
 #define BOOTROM_ERROR_TIMEOUT                   (-1)    // Unused in RP2350

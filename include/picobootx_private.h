@@ -93,7 +93,7 @@ typedef enum {
                           // completion packet on OUT (IN-direction commands only)
     PB_STATE_STALLED,     // bulk endpoints stalled; awaiting GET_COMMAND_STATUS
 } pb_state_t;
-extern const char *pb_state_to_str[];
+extern const char * const pb_state_to_str[];
 
 // ---------------------------------------------------------------------------
 // Per-command dispatch table

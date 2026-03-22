@@ -33,7 +33,7 @@ PB_INFO_FLAG_TABLE
     (sizeof(k_info_flag_table) / sizeof(k_info_flag_table[0]))
 
 // picobootx's states as strings for logging
-const char *pb_state_to_str[] = {
+const char * const pb_state_to_str[] = {
     "IDLE",
     "DATA_OUT",
     "DATA_IN",

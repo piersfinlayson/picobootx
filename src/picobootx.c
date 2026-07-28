@@ -37,6 +37,7 @@ const char * const pb_state_to_str[] = {
     "IDLE",
     "DATA_OUT",
     "DATA_IN",
+    "CUSTOM_IN",
     "AWAIT_ZLP",
     "AWAIT_ACK",
     "STALLED"
@@ -642,8 +643,8 @@ static void pb_handle_action_deferred(pb_state_block_t *s, const picoboot_cmd_t 
                 pb_stall(s, PB_STATUS_UNKNOWN_CMD);
                 return;
             }
-            s->reboot2_args = *(const pb_reboot2_args_t *)cmd->args;
-            pb_status_t st = s->ops->reboot2_prepare(&s->reboot2_args, s->ctx);
+            s->xfer.reboot2_args = *(const pb_reboot2_args_t *)cmd->args;
+            pb_status_t st = s->ops->reboot2_prepare(&s->xfer.reboot2_args, s->ctx);
             if (st != PB_STATUS_OK) {
                 pb_stall(s, st);
                 return;
@@ -795,6 +796,67 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 }
 
 // ---------------------------------------------------------------------------
+// Custom (alternative magic) command dispatch
+// ---------------------------------------------------------------------------
+
+// Handles a command carrying the integrator's custom magic.  These bypass the
+// standard command table entirely — the integrator owns the command IDs, the
+// args and any validation — so the only thing the library reads from the
+// command here is transfer_len and the direction bit, to decide whether a data
+// phase follows.
+static void pb_dispatch_custom_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
+    s->token  = cmd->token;
+    s->cmd_id = cmd->cmd_id;
+
+    DEBUG("CUSTOM id=0x%02x token=0x%08x tlen=%u",
+          cmd->cmd_id, cmd->token, cmd->transfer_len);
+
+    if (!s->custom->dispatch) {
+        // A custom ops block registered with a magic but no dispatch cannot
+        // serve any command.  Stall rather than call through a null pointer.
+        ERR("Custom dispatch fn not supplied: cmd_id=0x%02x", cmd->cmd_id);
+        pb_stall(s, PB_STATUS_UNKNOWN_CMD);
+        return;
+    }
+
+    if (cmd->transfer_len != 0u) {
+        if (!pb_cmd_is_in(cmd->cmd_id)) {
+            // Custom host->device data phases are not implemented.
+            LOG("Custom data-out unsupported: cmd_id=0x%02x tlen=%u",
+                cmd->cmd_id, cmd->transfer_len);
+            pb_stall(s, PB_STATUS_UNKNOWN_CMD);
+            return;
+        }
+        if (!s->custom->fill) {
+            // The integrator did not supply a fill callback, so it cannot
+            // return data to the host.
+            LOG("Custom data-in unsupported (no fill fn): cmd_id=0x%02x", cmd->cmd_id);
+            pb_stall(s, PB_STATUS_UNKNOWN_CMD);
+            return;
+        }
+    }
+
+    // dispatch runs for every custom command.  For a data-in command it takes
+    // the "prepare" role a command table entry would.
+    uint32_t bytes_written = 0u;
+    pb_status_t st = s->custom->dispatch(cmd, NULL, 0u, &bytes_written, s->ctx);
+    if (st != PB_STATUS_OK) {
+        pb_stall(s, st);
+        return;
+    }
+
+    if (cmd->transfer_len == 0u) {
+        pb_send_zlp(s);
+        return;
+    }
+
+    // Preserve the command for the duration of the data phase — fill is handed
+    // it on every call, and the caller's copy is about to go out of scope.
+    s->xfer.custom_cmd = *cmd;
+    pb_set_state(s, PB_STATE_CUSTOM_IN);
+}
+
+// ---------------------------------------------------------------------------
 // State machine handlers
 // ---------------------------------------------------------------------------
 
@@ -820,15 +882,7 @@ static void pb_task_idle(pb_state_block_t *s) {
     if (cmd.magic == PICOBOOT_MAGIC) {
         pb_dispatch_cmd(s, &cmd);
     } else if (s->custom && cmd.magic == s->custom->magic) {
-        s->token  = cmd.token;
-        s->cmd_id = cmd.cmd_id;
-        uint32_t bytes_written = 0u;
-        pb_status_t st = s->custom->dispatch(&cmd, NULL, 0u, &bytes_written, s->ctx);
-        if (st != PB_STATUS_OK) {
-            pb_stall(s, st);
-        } else {
-            pb_send_zlp(s);
-        }
+        pb_dispatch_custom_cmd(s, &cmd);
     } else {
         s->token  = cmd.token;
         s->cmd_id = cmd.cmd_id;
@@ -837,14 +891,10 @@ static void pb_task_idle(pb_state_block_t *s) {
     }
 }
 
-static void pb_task_data_in(pb_state_block_t *s) {
-    const pb_cmd_table_entry_t *entry = pb_find_cmd(s->cmd_id);
-    if (!entry || !entry->fill) {
-        ERR("pb_task_data_in: no fill fn for cmd 0x%02x", s->cmd_id);
-        pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
-        return;
-    }
-
+// Drives a device->host data phase: calls fill repeatedly, moving what it
+// produces onto the IN endpoint, until the transfer completes or the endpoint
+// runs out of space.  Shared by built-in and custom data-in commands.
+static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
     uint8_t buf[64];
 
     while (true) {
@@ -858,7 +908,7 @@ static void pb_task_data_in(pb_state_block_t *s) {
         uint32_t bytes_written = 0u;
         bool     done          = false;
 
-        pb_status_t st = entry->fill(s, buf, max_len, &bytes_written, &done, s->ctx);
+        pb_status_t st = fill(s, buf, max_len, &bytes_written, &done, s->ctx);
         if (st != PB_STATUS_OK) {
             pb_stall(s, st);
             return;
@@ -885,6 +935,43 @@ static void pb_task_data_in(pb_state_block_t *s) {
             return;
         }
     }
+}
+
+static void pb_task_data_in(pb_state_block_t *s) {
+    const pb_cmd_table_entry_t *entry = pb_find_cmd(s->cmd_id);
+    if (!entry || !entry->fill) {
+        ERR("pb_task_data_in: no fill fn for cmd 0x%02x", s->cmd_id);
+        pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
+        return;
+    }
+
+    pb_pump_data_in(s, entry->fill);
+}
+
+// Adapts the integrator's fill callback to the internal fill signature, so a
+// custom data-in transfer can share pb_pump_data_in with the built-ins.
+static pb_status_t pb_custom_fill(
+    pb_state_block_t *s,
+    uint8_t *buf,
+    uint32_t max_len,
+    uint32_t *bytes_written,
+    bool *done,
+    void *ctx
+) {
+    return s->custom->fill(&s->xfer.custom_cmd, buf, max_len, bytes_written,
+                           done, ctx);
+}
+
+static void pb_task_custom_in(pb_state_block_t *s) {
+    if (!s->custom || !s->custom->fill) {
+        // Unreachable: pb_dispatch_custom_cmd checks both before entering this
+        // state, and neither can change afterwards.
+        ERR("pb_task_custom_in: no fill fn for cmd 0x%02x", s->cmd_id);
+        pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
+        return;
+    }
+
+    pb_pump_data_in(s, pb_custom_fill);
 }
 
 // ---------------------------------------------------------------------------
@@ -925,6 +1012,9 @@ void picoboot_task(pb_state_block_t *state) {
         case PB_STATE_DATA_IN:
             pb_task_data_in(state);
             break;
+        case PB_STATE_CUSTOM_IN:
+            pb_task_custom_in(state);
+            break;
         case PB_STATE_AWAIT_ZLP:
             // Transition to IDLE happens in picoboot_vendor_tx_cb()
             break;
@@ -955,7 +1045,7 @@ void picoboot_tx_cb(
     if (state->cmd_id == (uint8_t)PB_CMD_REBOOT2) {
         // As we have now sent the ZLP we can reboot
         if (state->ops->reboot2_execute) {
-            state->ops->reboot2_execute(&state->reboot2_args, state->ctx);
+            state->ops->reboot2_execute(&state->xfer.reboot2_args, state->ctx);
         }
     }
 

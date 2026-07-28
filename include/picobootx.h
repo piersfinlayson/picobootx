@@ -250,14 +250,62 @@ typedef struct {
     );
 } picoboot_ops_t;
 
-// Custom / extended command dispatch (alternative magic value).  Not yet supported
+// Custom / extended command dispatch (alternative magic value).
+//
+// A command whose magic matches this struct's magic is handed to dispatch
+// instead of being resolved through the standard PICOBOOT command table.
+// Routing depends on the command's transfer_len and direction bit:
+//
+//   transfer_len == 0
+//       dispatch is called once and, if it returns PB_STATUS_OK, the library
+//       acknowledges the command with a ZLP.  No data phase.
+//
+//   transfer_len > 0 and PICOBOOT_DIR_IN set in cmd_id (device -> host)
+//       dispatch is called once to validate and prepare, then fill is called
+//       repeatedly until it reports the transfer complete.  If fill is NULL
+//       the command is stalled with PB_STATUS_UNKNOWN_CMD.
+//
+//   transfer_len > 0 and PICOBOOT_DIR_IN clear (host -> device)
+//       Not supported: the command is stalled with PB_STATUS_UNKNOWN_CMD.
+//
+// A non-PB_STATUS_OK return from either callback stalls the command with that
+// status, which the host retrieves via GET_COMMAND_STATUS.
 typedef struct {
     uint32_t    magic;
+
+    // Called once per custom command.  buf is currently always NULL and
+    // buf_len 0; bytes_written is provided for future use and is ignored.
+    // For a data-IN command this is the place to validate the args and set up
+    // whatever state fill will need.
     pb_status_t (*dispatch)(
         const picoboot_cmd_t *cmd,
         uint8_t *buf,
         uint32_t buf_len,
         uint32_t *bytes_written,
+        void *ctx
+    );
+
+    // Optional; NULL means custom data-IN commands are unsupported.
+    //
+    // Produces the device -> host payload for a custom command, in as many
+    // calls as it likes.  cmd is the originating command, preserved by the
+    // library for the duration of the transfer.  Write at most max_len bytes
+    // to buf and set *bytes_written accordingly:
+    //
+    //   *done = true                       : transfer complete (any bytes
+    //                                        written on this call are sent)
+    //   *done = false, *bytes_written > 0  : data produced, more may follow
+    //   *done = false, *bytes_written == 0 : not enough space for the next
+    //                                        item, call again later
+    //
+    // The callee tracks its own position between calls, in its own ctx — the
+    // library keeps no per-transfer cursor on its behalf.
+    pb_status_t (*fill)(
+        const picoboot_cmd_t *cmd,
+        uint8_t *buf,
+        uint32_t max_len,
+        uint32_t *bytes_written,
+        bool *done,
         void *ctx
     );
 } picoboot_custom_ops_t;

@@ -87,6 +87,8 @@ typedef enum {
     PB_STATE_IDLE,        // waiting for a 32-byte command on BULK_OUT
     PB_STATE_DATA_OUT,    // accumulating host->device data (WRITE, OTP_WRITE)
     PB_STATE_DATA_IN,     // streaming device->host data (READ, GET_INFO, OTP_READ)
+    PB_STATE_CUSTOM_IN,   // streaming device->host data for a custom (alternative
+                          // magic) command, via picoboot_custom_ops_t.fill
     PB_STATE_AWAIT_ZLP,   // ZLP sent on IN; waiting for tx completion callback
                           // before taking any post-command action (e.g. REBOOT2)
     PB_STATE_AWAIT_ACK,   // IN data transfer complete; waiting for host's
@@ -196,19 +198,23 @@ struct pb_state_block {
     uint8_t                      ep_in;           // 1 byte
     uint8_t                      cmd_id;          // 1 byte (completes word)
 
-    // Args persisted for post-ZLP action (REBOOT2 only)
-    pb_reboot2_args_t            reboot2_args;    // 16 bytes
-
     // Status returned by GET_COMMAND_STATUS
     picoboot_status_t            status;          // 16 bytes (packed struct)
 
-    // Per-command transfer state — only one active at a time
+    // Per-command state — only one member is ever live at a time.  These are
+    // mutually exclusive by command category: read/get_info/otp/write belong
+    // to a data phase, reboot2_args to a deferred action (which has no data
+    // phase), and custom_cmd to a custom-magic command (which is never a
+    // built-in).
     union {
-        pb_in_read_t     read;      //  8 bytes
-        pb_in_get_info_t get_info;  // 12 bytes
-        pb_otp_access_t  otp;       // 12 bytes
-        pb_out_write_t   write;     // 16 bytes (largest)
-    } xfer;                         // 16 bytes
+        pb_in_read_t      read;         //  8 bytes
+        pb_in_get_info_t  get_info;     // 12 bytes
+        pb_otp_access_t   otp;          // 12 bytes
+        pb_out_write_t    write;        // 16 bytes
+        pb_reboot2_args_t reboot2_args; // 16 bytes; persisted for post-ZLP action
+        picoboot_cmd_t    custom_cmd;   // 32 bytes (largest); the command being
+                                        // served by picoboot_custom_ops_t.fill
+    } xfer;                             // 32 bytes
 
 };
 

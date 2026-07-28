@@ -22,7 +22,7 @@ picobootx is used by [One ROM](https://onerom.org), the most flexible replacemen
 - Compatible with third-party picoboot host tools, including [pico⚡flash](https://picoflash.org) and the [Rust picoboot crate](https://docs.rs/picoboot/latest/picoboot/).
 - Extremely low resource usage.  Memory for picoboot can be allocated either statically or dynamically, with a choice of how much memory to allocate.
 - Flexible USB implementation allows other (non-vendor) interfaces to be exposed alongside picoboot.
-- Allows the PICOBOOT protocol to be extended infinitely with custom commands following the overall PICOBOOT commands structure, using a custom magic value in the header.
+- Allows the PICOBOOT protocol to be extended with custom commands following the overall PICOBOOT commands structure, using a custom magic value in the header.  The command ID space is yours entirely, and a custom command can either complete with no data phase, or return data of any length to the host.  (Host to device data phases for custom commands are not yet supported - see [Limitations](#limitations).)
 - No dependency on Raspberry Pi's Pico SDK.
 
 ## Getting Started
@@ -50,6 +50,7 @@ Current limitations include:
 - No OTP write support
 - No flash erase/write support
 - Only a single vendor interface is supported by the vendor implementation
+- Custom commands cannot receive a host to device data payload.  A custom command with a non-zero transfer length and the direction bit clear is stalled with `PB_STATUS_UNKNOWN_CMD`.  Device to host data is supported, via the optional `fill` callback in `picoboot_custom_ops_t`.
 
 ## License
 

@@ -69,7 +69,7 @@ static uint32_t picoboot_state_buf[PICOBOOT_STATE_SIZE / 4];
 In main, or elsewhere, but before picobootx is used, call `picoboot_init`, passing in:
 - your operations struct
 - the pointer to picobootx's state block
-- optional pointer to custom protocol support (NULL if not used)
+- optional pointer to custom protocol support (NULL if not used) - see [Custom Commands](#4a-custom-commands-optional)
 - optional pointer to 256 byte buffer for flash/OTP write support (NULL if those operations are not supported)
 - the USB port number that picobootx should use, from tusb_configh.h (for RP2350 this is always 0)
 - the endpoint number to use for the picoboot OUT endpoint (must be a valid EP OUT endpoint that is not used for other purposes in your application)
@@ -90,6 +90,36 @@ picoboot_init(
     NULL                    // No custom context needed
 );
 ```
+
+## 4a. Custom Commands (optional)
+
+The PICOBOOT command header carries a magic value, and picobootx dispatches any command whose magic matches your own to you instead of handling it itself.  That gives you a command ID space entirely separate from PICOBOOT's, with no risk of colliding with it now or in future.
+
+Supply a `picoboot_custom_ops_t` to `picoboot_init` (the third argument, `NULL` above):
+
+```c
+static pb_status_t my_dispatch(
+    const picoboot_cmd_t *cmd,
+    uint8_t *buf,
+    uint32_t buf_len,
+    uint32_t *bytes_written,
+    void *ctx
+);
+
+static const picoboot_custom_ops_t my_custom_ops = {
+    .magic    = MY_MAGIC,       // must differ from PICOBOOT_MAGIC
+    .dispatch = my_dispatch,
+    .fill     = NULL,           // optional; see below
+};
+```
+
+`dispatch` runs for every command carrying your magic.  For a command with no data phase (`transfer_len == 0`) that is all that happens: return `PB_STATUS_OK` and picobootx sends the host a zero-length packet, or return any other status to stall.
+
+To return data to the host, set the optional `fill` callback as well.  A command whose `cmd_id` has `PICOBOOT_DIR_IN` set and whose `transfer_len` is non-zero is then handled in two stages: `dispatch` runs first, taking the "prepare" role - validate the request there, and stall by returning a non-`PB_STATUS_OK` status - and then `fill` is called repeatedly until the transfer is complete.  Each call writes up to `max_len` bytes, sets `*bytes_written`, and sets `*done` when there is nothing further to send.  Writing nothing without setting `*done` means "no room for the next item, call me again".
+
+**`fill` keeps its own position.** picobootx holds no cursor on your behalf; it hands you the command on every call, so track your progress in your own `ctx`.  Leaving `fill` as `NULL` means custom commands cannot return data, and such a command is stalled with `PB_STATUS_UNKNOWN_CMD`.
+
+A host-to-device data phase on a custom command is not supported, and is stalled with `PB_STATUS_UNKNOWN_CMD`.
 
 ## 5. picoboot Task Function
 

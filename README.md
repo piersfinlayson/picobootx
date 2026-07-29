@@ -47,8 +47,6 @@ The heart of picobootx should be USB stack agnostic, though and easy to port to 
 
 Current limitations include:
 - No explicit RP2040 support
-- No OTP write support
-- No flash erase/write support
 - Only a single vendor interface is supported by the vendor implementation
 - Custom commands cannot receive a host to device data payload.  A custom command with a non-zero transfer length and the direction bit clear is stalled with `PB_STATUS_UNKNOWN_CMD`.  Device to host data is supported, via the optional `fill` callback in `picoboot_custom_ops_t`.
 

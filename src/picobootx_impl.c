@@ -8,7 +8,6 @@
 
 #include "picobootx_private.h"
 #include "picobootx_impl.h"
-#include "pico.h"
 
 // Error codes returned by ROM functions
 #define BOOTROM_ERROR_TIMEOUT                   (-1)    // Unused in RP2350
@@ -54,19 +53,8 @@ pb_status_t pb_status_from_bootrom(int ret) {
 }
 
 void *picoboot_lookup_boot_fn(char a, char b) {
-    // Get the ROM table lookup function - RP2350
-    typedef void *(*rom_table_lookup_fn)(uint32_t code, uint32_t mask);
-#define ROM_TABLE_LOOKUP_ADDR 0x00000016
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Warray-bounds"
-    rom_table_lookup_fn rom_table_lookup = 
-        (rom_table_lookup_fn)(uintptr_t)*(uint16_t*)(ROM_TABLE_LOOKUP_ADDR);
-#pragma GCC diagnostic pop
-
-    uint32_t code = (b << 8) | a;
-#define ROM_TABLE_FLAG_FUNC_ARM_SEC 0x0004
-    void *fn = rom_table_lookup(code, ROM_TABLE_FLAG_FUNC_ARM_SEC);
-    return fn;
+    uint32_t code = (uint32_t)((uint8_t)b << 8) | (uint8_t)a;
+    return PICOBOOTX_BOOTROM_LOOKUP(code, RP2350_ROM_TABLE_FLAG_FUNC_ARM_SEC);
 }
 
 typedef int (*reboot_fn_t)(uint32_t flags, uint32_t delay_ms, uint32_t p0, uint32_t p1);
@@ -252,14 +240,16 @@ pb_status_t picoboot_default_read(uint32_t addr, uint8_t *buf, uint32_t len, voi
 
     // Don't validate here as it will have been done in picoboot_read_validate
 
+    const void *src = PICOBOOTX_DEV_PTR(addr, len);
+
     if ((addr % 4 == 0) && (len == 4)) {
         // Aligned word read - can just read directly into the buffer
-        *(uint32_t *)buf = *(const uint32_t *)(uintptr_t)addr;
+        *(uint32_t *)buf = *(const uint32_t *)src;
         return PB_STATUS_OK;
     }
 
     // Otherwise memcpy
-    memcpy(buf, (const void *)(uintptr_t)addr, len);
+    memcpy(buf, src, len);
     return PB_STATUS_OK;
 }
 
@@ -302,7 +292,7 @@ pb_status_t picoboot_default_write(
     void *ctx
 ) {
     (void)ctx;
-    memcpy((void *)(uintptr_t)addr, buf, len);
+    memcpy(PICOBOOTX_DEV_PTR(addr, len), buf, len);
     return PB_STATUS_OK;
 }
 
@@ -347,7 +337,7 @@ pb_status_t picoboot_default_flash_erase_prepare(
 // This function MUST run from RAM, as it disables flash access while erasing.
 // It also disables interrupts (which are also serviced from flash) for the
 // duration of the erase.
-static void __attribute__((section(".ramfunc"), noinline)) flash_erase_critical(
+static void PICOBOOTX_RAMFUNC flash_erase_critical(
     flash_exit_xip_fn_t exit_xip,
     flash_range_erase_fn_t range_erase,
     flash_flush_cache_fn_t flush_cache,
@@ -357,7 +347,7 @@ static void __attribute__((section(".ramfunc"), noinline)) flash_erase_critical(
     uint8_t clkdiv
 ) {
     // Disable interrupts
-    __asm volatile ("cpsid i");
+    PICOBOOTX_IRQ_DISABLE();
 
     // Exit XIP mode before erasing so that the RP2350 enters QSPI serial
     // command mode (required for erases).  This has the impact of preventing
@@ -378,7 +368,7 @@ static void __attribute__((section(".ramfunc"), noinline)) flash_erase_critical(
     flush_cache();
 
     // Re-enable interrupts
-    __asm volatile ("cpsie i");
+    PICOBOOTX_IRQ_ENABLE();
 }
 
 pb_status_t picoboot_default_flash_erase(
@@ -427,7 +417,7 @@ pb_status_t picoboot_default_flash_erase(
     // compatible). Alternatively, the bootrom saves the discovered mode into
     // boot RAM as an XIP setup function which could be called here instead,
     // restoring exactly what the bootrom found during flash scanning.
-    uint8_t clkdiv = (XIP_QMI_M0_TIMING >> XIP_QMI_M0_CLKDIV_SHIFT) & XIP_QMI_M0_CLKDIV_MASK;
+    uint8_t clkdiv = PICOBOOTX_XIP_CLKDIV();
     DEBUG("Will be restoring flash XIP mode 3 with clkdiv %u", clkdiv);
 
     uint32_t flash_offs = args->addr - RP2350_FLASH_BASE;

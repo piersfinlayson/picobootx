@@ -288,6 +288,13 @@ bool vendord_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint
     return true;
 }
 
+// The single byte is deliberate.  picoboot_vendor_send_zlp in
+// picobootx_vendor.h explains why the acknowledgement is a one-byte packet
+// rather than one of no bytes, and why a host cannot tell the difference.
+//
+// The write and the flush are checked separately because each can be refused on
+// its own: the write when the transmit FIFO has no room, and the flush when the
+// endpoint is already claimed by a transfer that has not completed.
 bool picoboot_vendor_send_zlp(void) {
     uint8_t buf[1] = {0};
     uint8_t sent = picoboot_vendor_write(buf, 1);

@@ -220,8 +220,16 @@ struct pb_state_block {
 
 // Verify PICOBOOT_STATE_SIZE matches the actual struct size.
 // If this fires, update PICOBOOT_STATE_SIZE in picoboot.h.
+//
+// PICOBOOT_STATE_SIZE states how much an integrator allocates on the device,
+// where a pointer is four bytes.  A host test build has wider pointers, so the
+// block is larger there and the constant cannot describe it.  The constant is
+// the device's, so the check is the device's.  A host build sizes its own
+// allocation from sizeof instead.
+#if !defined(PICOBOOTX_HOST_TEST)
 _Static_assert(sizeof(struct pb_state_block) == PICOBOOT_STATE_SIZE,
                "PICOBOOT_STATE_SIZE in picoboot.h does not match sizeof(pb_state_block)");
+#endif
 
 // ---------------------------------------------------------------------------
 // Internal helpers

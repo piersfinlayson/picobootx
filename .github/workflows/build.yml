@@ -6,7 +6,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # Cross-builds the tinyusb example, which is the only build that exercises
+  # picobootx_vendor.c and the linker placement the flash erase routine needs.
+  device:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,5 +19,79 @@ jobs:
           sudo apt-get install -y gcc-arm-none-eabi
 
       - name: Build tinyusb example
-        working-directory: examples/tinyusb
-        run: make
+        run: make example
+
+  # The conformance suite needs a C compiler and make, and nothing else — no
+  # USB, no kernel modules, no privileges — so it runs on hosted runners.  Both
+  # operating systems are here because picobootx's value is portability, and
+  # both compilers because an integrator brings their own.
+  #
+  # The logging entry builds picobootx's own log statements in.  They are
+  # variadic calls the ordinary build compiles away entirely, so nothing else
+  # here would notice a format string that no longer matches its arguments.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+            sanitize: '0'
+            logging: '0'
+          - os: ubuntu-latest
+            cc: clang
+            sanitize: '0'
+            logging: '0'
+          - os: ubuntu-latest
+            cc: clang
+            sanitize: '1'
+            logging: '0'
+          - os: ubuntu-latest
+            cc: clang
+            sanitize: '0'
+            logging: '1'
+          - os: macos-latest
+            cc: clang
+            sanitize: '0'
+            logging: '0'
+    runs-on: ${{ matrix.os }}
+    name: >-
+      test (${{ matrix.os }}, ${{ matrix.cc }},
+      sanitize ${{ matrix.sanitize }}, logging ${{ matrix.logging }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run the conformance suite
+        env:
+          CC: ${{ matrix.cc }}
+        run: |
+          make test SANITIZE=${{ matrix.sanitize }} LOGGING=${{ matrix.logging }}
+
+  # How much of the library the suite reaches.  The number is printed and then
+  # gated: every line and function of picobootx.c and picobootx_impl.c, with the
+  # handful that defend an invariant the state machine has already established
+  # marked unreachable in the source.  So a new line nothing reaches fails here,
+  # and so does dropping the only test that reached an existing one.  Branches
+  # are printed but not gated, since gcc and llvm-cov disagree on what one is.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu packages an lcov too old to read the counters a current gcc
+      # writes, so the version used here is built from its own release tag.
+      - name: Install lcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl libcapture-tiny-perl libjson-xs-perl \
+                                  libdatetime-perl
+          git clone https://github.com/linux-test-project/lcov.git
+          cd lcov
+          git checkout v2.4
+          make install PREFIX=$HOME/lcov-install
+          echo "$HOME/lcov-install/bin" >> $GITHUB_PATH
+
+      - name: Measure coverage
+        env:
+          CC: gcc
+        run: make cov

@@ -24,6 +24,7 @@ picobootx is used by [One ROM](https://onerom.org), the most flexible replacemen
 - Flexible USB implementation allows other (non-vendor) interfaces to be exposed alongside picoboot.
 - Allows the PICOBOOT protocol to be extended with custom commands following the overall PICOBOOT commands structure, using a custom magic value in the header.  The command ID space is yours entirely, and a custom command can either complete with no data phase, or return data of any length to the host.  (Host to device data phases for custom commands are not yet supported - see [Limitations](#limitations).)
 - No dependency on Raspberry Pi's Pico SDK.
+- 100% code coverage of the core function via included unit test suite.
 
 ## Getting Started
 
@@ -42,6 +43,42 @@ picobootx comes pre-integrated with tinyusb, and is intended to replace tinyusb'
 - no ability to send a ZLP (zero length packet) on demand as required by the protocol.
 
 The heart of picobootx should be USB stack agnostic, though and easy to port to other USB stacks (or even other physical layers).
+
+## Testing
+
+[test](test) holds a conformance suite covering command framing, the stall and
+unstall protocol, packet boundaries, the device-to-host and host-to-device data
+phases, custom commands, what a transport that refuses or truncates a transfer
+gets, what an integrator's partial ops table does, how a bootrom routine that is
+absent or refuses is reported, and the picotool accommodations described under
+[picotool/tinyusb Quirks](#picotooltinyusb-quirks).
+
+It compiles picobootx's core and its default implementations for the machine you
+are on, with `PICOBOOTX_HOST_TEST` defined so the RP2350-specific parts of
+[picobootx_impl.c](src/picobootx_impl.c) resolve to a model of the chip rather
+than to hardware, and runs them against a stand-in for the USB transport.  The
+code under test is the shipped code.  It needs a C compiler and make, and runs
+on macOS and Linux:
+
+```bash
+make test
+```
+
+`make` on its own builds the suite without running it.  `make test
+FILTER=stall` runs one suite.  `make test LOGGING=1` builds with picobootx's own
+logging turned on.  `make test SANITIZE=1` builds under the address and
+undefined behaviour sanitizers.
+
+`make cov` runs the suite under coverage, reports how much of
+[picobootx.c](src/picobootx.c) and [picobootx_impl.c](src/picobootx_impl.c) it
+reached, and fails below every line and function of both.  Branches are reported
+but not gated, since gcc and llvm-cov do not agree on what counts as one.  The
+few arms the suite cannot reach are marked unreachable in the source with lcov
+exclusion comments, each saying which invariant makes it so.  `make cov-html`
+writes the same as a browsable report.  Both need lcov.
+[picobootx_vendor.c](src/picobootx_vendor.c) is not in this build and so is not
+in the figures — it is the tinyusb vendor driver the suite replaces with a
+stand-in, and it is compiled by [examples/tinyusb](examples/tinyusb).
 
 ## Limitations
 

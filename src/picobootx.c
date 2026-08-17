@@ -590,6 +590,11 @@ static const pb_cmd_table_entry_t *pb_find_cmd(uint8_t cmd_id) {
 static void pb_handle_action_sync(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     pb_status_t st = PB_STATUS_OK;
 
+    // The default arm below cannot be reached: this handler runs only for a
+    // command the table gave the PB_CAT_ACTION_SYNC category to, and the cases
+    // are every such row.  It defends a table edit that adds one without
+    // adding it here.  The switch's own branches are excluded with it, since
+    // the arm that cannot be taken is one of them.
     switch ((pb_cmd_id_t)cmd->cmd_id) {
         case PB_CMD_EXCLUSIVE_ACCESS:
             if (s->ops->exclusive_access) {
@@ -607,9 +612,11 @@ static void pb_handle_action_sync(pb_state_block_t *s, const picoboot_cmd_t *cmd
                 st = s->ops->enter_xip(s->ctx);
             }
             break;
+        // LCOV_EXCL_START
         default:
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             return;
+        // LCOV_EXCL_STOP
     }
 
     if (st != PB_STATUS_OK) {
@@ -622,6 +629,8 @@ static void pb_handle_action_sync(pb_state_block_t *s, const picoboot_cmd_t *cmd
 static void pb_handle_action_async(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     pb_status_t st = PB_STATUS_OK;
 
+    // Unreachable default, for the same reason as pb_handle_action_sync's:
+    // FLASH_ERASE is the only PB_CAT_ACTION_ASYNC row in the table.
     switch ((pb_cmd_id_t)cmd->cmd_id) {
         case PB_CMD_FLASH_ERASE:
             if (!s->ops->flash_erase_prepare || !s->ops->flash_erase) {
@@ -641,9 +650,11 @@ static void pb_handle_action_async(pb_state_block_t *s, const picoboot_cmd_t *cm
             }
             st = s->ops->flash_erase((const pb_addr_size_args_t *)cmd->args, s->ctx);
             break;
+        // LCOV_EXCL_START
         default:
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             return;
+        // LCOV_EXCL_STOP
     }
 
     if (st != PB_STATUS_OK) {
@@ -654,6 +665,8 @@ static void pb_handle_action_async(pb_state_block_t *s, const picoboot_cmd_t *cm
 }
 
 static void pb_handle_action_deferred(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
+    // Unreachable default, for the same reason as pb_handle_action_sync's:
+    // REBOOT2 is the only PB_CAT_ACTION_DEFERRED row in the table.
     switch ((pb_cmd_id_t)cmd->cmd_id) {
         case PB_CMD_REBOOT2: {
             if (!s->ops->reboot2_prepare) {
@@ -668,19 +681,26 @@ static void pb_handle_action_deferred(pb_state_block_t *s, const picoboot_cmd_t 
             }
             break;
         }
+        // LCOV_EXCL_START
         default:
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             return;
+        // LCOV_EXCL_STOP
     }
     pb_send_zlp(s);
 }
 
 static void pb_handle_data_in(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     const pb_cmd_table_entry_t *entry = pb_find_cmd(cmd->cmd_id);
+    // Unreachable: pb_dispatch_cmd found this same identifier in the table
+    // before routing here on its category, and every PB_CAT_DATA_IN row carries
+    // both a prepare and a fill.
+    // LCOV_EXCL_START
     if (!entry || !entry->prepare || !entry->fill) {
         pb_stall(s, PB_STATUS_UNKNOWN_CMD);
         return;
     }
+    // LCOV_EXCL_STOP
     pb_status_t st = entry->prepare(s, cmd, s->ctx);
     if (st != PB_STATUS_OK) {
         pb_stall(s, st);
@@ -691,10 +711,15 @@ static void pb_handle_data_in(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 
 static void pb_handle_data_out(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     const pb_cmd_table_entry_t *entry = pb_find_cmd(cmd->cmd_id);
+    // Unreachable: pb_dispatch_cmd found this same identifier in the table
+    // before routing here on its category, and every PB_CAT_DATA_OUT row
+    // carries both a prepare and a consume.
+    // LCOV_EXCL_START
     if (!entry || !entry->prepare || !entry->consume) {
         pb_stall(s, PB_STATUS_UNKNOWN_CMD);
         return;
     }
+    // LCOV_EXCL_STOP
     pb_status_t st = entry->prepare(s, cmd, s->ctx);
     if (st != PB_STATUS_OK) {
         pb_stall(s, st);
@@ -705,11 +730,16 @@ static void pb_handle_data_out(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 
 static void pb_task_data_out(pb_state_block_t *s) {
     const pb_cmd_table_entry_t *entry = pb_find_cmd(s->cmd_id);
+    // Unreachable: PB_STATE_DATA_OUT is entered only by pb_handle_data_out,
+    // which found a table row carrying a consume, and cmd_id is written only
+    // when a command is taken off the wire in PB_STATE_IDLE.
+    // LCOV_EXCL_START
     if (!entry || !entry->consume) {
         ERR("pb_task_data_out: no consume fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
     }
+    // LCOV_EXCL_STOP
 
     uint8_t  buf[64];
     uint32_t available = picoboot_vendor_available();
@@ -783,6 +813,10 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
         }
     }
 
+    // The default arm below cannot be reached: every row in the table carries
+    // one of the categories the arms above enumerate.  It defends a table edit
+    // that introduces a category without routing it.  The switch's own branches
+    // are excluded with it, since the arm that cannot be taken is one of them.
     switch (entry->category) {
         case PB_CAT_ACTION_SYNC:
             pb_handle_action_sync(s, cmd);
@@ -804,10 +838,12 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
             pb_handle_data_out(s, cmd);
             break;
 
+        // LCOV_EXCL_START
         default:
             ERR("Invalid command category %u for cmd_id 0x%02x", entry->category, cmd->cmd_id);
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             break;
+        // LCOV_EXCL_STOP
     }
 }
 
@@ -953,11 +989,16 @@ static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
 
 static void pb_task_data_in(pb_state_block_t *s) {
     const pb_cmd_table_entry_t *entry = pb_find_cmd(s->cmd_id);
+    // Unreachable: PB_STATE_DATA_IN is entered only by pb_handle_data_in, which
+    // found a table row carrying a fill, and cmd_id is written only when a
+    // command is taken off the wire in PB_STATE_IDLE.
+    // LCOV_EXCL_START
     if (!entry || !entry->fill) {
         ERR("pb_task_data_in: no fill fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
     }
+    // LCOV_EXCL_STOP
 
     pb_pump_data_in(s, entry->fill);
 }
@@ -977,13 +1018,15 @@ static pb_status_t pb_custom_fill(
 }
 
 static void pb_task_custom_in(pb_state_block_t *s) {
+    // Unreachable: pb_dispatch_custom_cmd checks both before entering this
+    // state, and neither can change afterwards.
+    // LCOV_EXCL_START
     if (!s->custom || !s->custom->fill) {
-        // Unreachable: pb_dispatch_custom_cmd checks both before entering this
-        // state, and neither can change afterwards.
         ERR("pb_task_custom_in: no fill fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
     }
+    // LCOV_EXCL_STOP
 
     pb_pump_data_in(s, pb_custom_fill);
 }
@@ -1115,6 +1158,10 @@ bool picoboot_control_xfer_cb(
                 DEBUG("CTRL: CLEAR_FEATURE(ENDPOINT_HALT) for EP%02x", ep);
                 // tinyusb will have unstalled the endpoint by the time we get
                 // here - we need to re-arm the endpoint
+                //
+                // The second test cannot fail: the enclosing condition has
+                // already established that ep is one of the two endpoints, so
+                // an ep that is not the OUT one is the IN one.
                 if (ep == state->ep_out) {
                     DEBUG("Re-arming OUT endpoint");
                     picoboot_vendor_read_clear();

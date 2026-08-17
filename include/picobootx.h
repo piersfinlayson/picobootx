@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "picobootx_version.h"
 #include "tusb.h"
 
 // tusb.h must be included before this header.
@@ -234,7 +235,12 @@ typedef struct {
     pb_status_t (*flash_erase_prepare)(const pb_addr_size_args_t *args, void *ctx);
     pb_status_t (*flash_erase)(const pb_addr_size_args_t *args, void *ctx);
 
-    // Write functions.  Only supported if picoboot is initialised with a flash_write_buf.
+    // write serves a WRITE that write_prepare reported is not flash, and
+    // otp_write serves OTP_WRITE.  Each is the only thing its command needs,
+    // and the command returns PB_STATUS_UNKNOWN_CMD without it.  Neither
+    // consults flash_write_buf — that buffer accumulates a whole 256-byte flash
+    // page out of 64-byte USB packets, and neither a memory write nor a 2- or
+    // 4-byte OTP row has anything to accumulate.
     pb_status_t (*write)(
         uint32_t addr, 
         const uint8_t *buf, 
@@ -273,10 +279,10 @@ typedef struct {
 typedef struct {
     uint32_t    magic;
 
-    // Called once per custom command.  buf is currently always NULL and
-    // buf_len 0; bytes_written is provided for future use and is ignored.
-    // For a data-IN command this is the place to validate the args and set up
-    // whatever state fill will need.
+    // Called once per custom command.  buf is NULL and buf_len 0, because a
+    // custom command has no host -> device data phase, and bytes_written is
+    // ignored.  For a data-IN command this is the place to validate the args
+    // and set up whatever state fill will need.
     pb_status_t (*dispatch)(
         const picoboot_cmd_t *cmd,
         uint8_t *buf,
@@ -331,8 +337,11 @@ typedef struct pb_state_block pb_state_block_t;
 //                     4-byte aligned)
 //   ops             : standard PICOBOOT command callbacks
 //   custom          : extended magic dispatch; may be NULL
-//   flash_write_buf : 256-byte, 4-byte-aligned buffer for write accumulation;
-//                     NULL disables WRITE and OTP_WRITE (PB_STATUS_NOT_PERMITTED)
+//   flash_write_buf : 256-byte, 4-byte-aligned buffer used to accumulate a
+//                     flash page.  NULL disables WRITE to flash, which then
+//                     returns PB_STATUS_NOT_PERMITTED once write_prepare has
+//                     reported the destination is flash.  WRITE to memory and
+//                     OTP_WRITE do not use it and are unaffected.
 //   rhport          : TinyUSB root hub port (0 on RP2350)
 //   ep_out          : BULK OUT endpoint address
 //   ep_in           : BULK IN endpoint address

@@ -104,6 +104,23 @@ void pb_set_status(pb_state_block_t *s, pb_status_t code, bool in_progress) {
     memset(s->status.reserved, 0, sizeof(s->status.reserved));
 }
 
+// Adopt a command as the one the device is working on.
+//
+// GET_COMMAND_STATUS answers out of the status block, and the picoboot
+// specification (RP2350 datasheet 5.6.5.2) requires it to answer for a command
+// that is still running as well as one that has finished — that is how a host
+// discovers why the bulk pipe stalled.  So the block names this command from
+// the moment it arrives, and reports it as in progress until pb_stall,
+// pb_send_zlp or the host's acknowledgement replaces that with an outcome.
+//
+// Every place that takes a command off the wire goes through here, so the
+// status block cannot be left naming a command the device has moved on from.
+static void pb_begin_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
+    s->token  = cmd->token;
+    s->cmd_id = cmd->cmd_id;
+    pb_set_status(s, PB_STATUS_OK, true);
+}
+
 void pb_stall(pb_state_block_t *s, pb_status_t code) {
     // Stall is used per the picoboot specification (RP2350 datasheet 5.6.4)
     // if the command received was invalid or not recognised.  Both bulk
@@ -723,8 +740,7 @@ static void pb_task_data_out(pb_state_block_t *s) {
 // ---------------------------------------------------------------------------
 
 static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
-    s->token  = cmd->token;
-    s->cmd_id = cmd->cmd_id;
+    pb_begin_cmd(s, cmd);
 
     DEBUG("%s id=0x%02x token=0x%08x tlen=%u",
           command_to_str((pb_cmd_id_t)cmd->cmd_id), cmd->cmd_id, cmd->token, cmd->transfer_len);
@@ -805,8 +821,7 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 // command here is transfer_len and the direction bit, to decide whether a data
 // phase follows.
 static void pb_dispatch_custom_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
-    s->token  = cmd->token;
-    s->cmd_id = cmd->cmd_id;
+    pb_begin_cmd(s, cmd);
 
     DEBUG("CUSTOM id=0x%02x token=0x%08x tlen=%u",
           cmd->cmd_id, cmd->token, cmd->transfer_len);
@@ -884,8 +899,7 @@ static void pb_task_idle(pb_state_block_t *s) {
     } else if (s->custom && cmd.magic == s->custom->magic) {
         pb_dispatch_custom_cmd(s, &cmd);
     } else {
-        s->token  = cmd.token;
-        s->cmd_id = cmd.cmd_id;
+        pb_begin_cmd(s, &cmd);
         ERR("pb_task_idle: unknown magic 0x%08x", cmd.magic);
         pb_stall(s, PB_STATUS_UNKNOWN_CMD);
     }

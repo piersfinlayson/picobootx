@@ -38,10 +38,23 @@
 CC      ?= cc
 OPT     ?= -O1 -g
 
+# Which suite is being built.
+#
+#   core  picobootx's core and default implementations, against the harness's
+#         own stand-in for the USB transport.  No tinyusb.
+#   usb   the same, plus picobootx_vendor.c, against real tinyusb driven by a
+#         host device controller and a model of a USB host.  This is the only
+#         way to reach the vendor driver, since it is a tinyusb class driver and
+#         nothing below usbd can call it.
+#
+# Both compile picobootx.c and picobootx_impl.c, with different headers and
+# different flags, so each keeps its own object directory.
+SUITE ?= core
+
 # Each configuration keeps its own object directory.  They differ only in
 # compiler flags, which make cannot see, so sharing one directory would leave
 # whichever configuration was built first in place.
-BUILD_VARIANT := base
+BUILD_VARIANT := $(SUITE)
 ifeq ($(LOGGING),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-logging
 endif
@@ -53,11 +66,36 @@ BUILD_VARIANT := $(BUILD_VARIANT)-coverage
 endif
 
 BUILD   ?= build/$(BUILD_VARIANT)
-TARGET  := $(BUILD)/picobootx-test
 
 ROOT    := ..
 
+# ---------------------------------------------------------------------------
+# tinyusb, for the usb suite
+#
+# Pinned to a commit rather than a tag, because the fork carries none.  A commit
+# cannot be reached by clone --branch, so the repository is created empty and
+# the one commit fetched into it — which also brings nothing else.
+#
+# Remove the tinyusb/ directory after changing this, so it is re-fetched.  The
+# example clones the same fork at whatever HEAD is, deliberately: this pin is so
+# a suite that gates CI cannot go red because the fork moved.
+# ---------------------------------------------------------------------------
+
+TINYUSB_DIR    := tinyusb
+TINYUSB_COMMIT := 8e4f5c1d269976d6c56660782a441a1d780845f0
+TINYUSB_URL    := https://github.com/piersfinlayson/tinyusb.git
+
+ifeq ($(SUITE),usb)
+# Only this suite needs tinyusb, so only its objects wait on the fetch.  The
+# core suite stays buildable with nothing but a compiler and make.
+TINYUSB_ORDER := | $(TINYUSB_DIR)
+TARGET   := $(BUILD)/picobootx-usb-test
+INCLUDES := -Iusb -I$(TINYUSB_DIR)/src -I$(TINYUSB_DIR)/src/common \
+            -I$(TINYUSB_DIR)/src/device -I$(ROOT)/include -Isrc
+else
+TARGET   := $(BUILD)/picobootx-test
 INCLUDES := -Ishim -I$(ROOT)/include -Isrc
+endif
 
 CFLAGS := $(OPT) -std=c11 -Wall -Wextra -Werror
 
@@ -87,18 +125,63 @@ CFLAGS  += --coverage
 LDFLAGS += --coverage
 endif
 
+# Rebuild when a header changes.  Without this a change to tusb_config.h leaves
+# every object that read it stale, and the build silently disagrees with itself.
+CFLAGS += -MMD -MP
+
 CFLAGS  += $(EXTRA_CFLAGS)
 LDFLAGS += $(EXTRA_LDFLAGS)
 
+# What tinyusb is compiled with: the same flags, without the warning policy
+# picobootx holds itself to.
+TINYUSB_CFLAGS := $(filter-out -Werror,$(CFLAGS)) -Wno-unused-parameter
+
+ifeq ($(SUITE),usb)
+
+# picobootx_vendor.c joins the library here.  It defines vendord_init, _open,
+# _reset, _deinit and _xfer_cb — tinyusb's own vendor class driver hooks — so it
+# stands in for class/vendor/vendor_device.c, which is why that file is not
+# among the tinyusb sources below.
+LIB_SRC := \
+	$(ROOT)/src/picobootx.c \
+	$(ROOT)/src/picobootx_impl.c \
+	$(ROOT)/src/picobootx_vendor.c
+
+TINYUSB_SRC := \
+	$(TINYUSB_DIR)/src/tusb.c \
+	$(TINYUSB_DIR)/src/common/tusb_fifo.c \
+	$(TINYUSB_DIR)/src/device/usbd.c \
+	$(TINYUSB_DIR)/src/device/usbd_control.c
+
+HARNESS_SRC := \
+	src/pbt_core.c \
+	src/pbt_device.c \
+	src/pbt_ops.c \
+	usb/usbt_suites.c \
+	usb/usbt_dcd.c \
+	usb/usbt_host.c \
+	usb/usbt_descriptors.c
+
+SUITE_SRC := \
+	usb/suites/enumeration.c \
+	usb/suites/vendor.c
+
+SRC := $(LIB_SRC) $(HARNESS_SRC) $(SUITE_SRC)
+VPATH := $(ROOT)/src:src:usb:usb/suites:$(TINYUSB_DIR)/src:$(TINYUSB_DIR)/src/common:$(TINYUSB_DIR)/src/device
+
+else
+
 # The library under test.  picobootx_vendor.c is deliberately absent: it is the
 # tinyusb vendor driver, and the harness supplies its own implementation of the
-# picoboot_vendor_* API it provides.
+# picoboot_vendor_* API it provides.  The usb suite covers it.
 LIB_SRC := \
 	$(ROOT)/src/picobootx.c \
 	$(ROOT)/src/picobootx_impl.c
 
 HARNESS_SRC := \
 	src/pbt_core.c \
+	src/pbt_flow.c \
+	src/pbt_suites.c \
 	src/pbt_device.c \
 	src/pbt_wire.c \
 	src/pbt_ops.c
@@ -116,9 +199,14 @@ SUITE_SRC := \
 	suites/quirks.c
 
 SRC := $(LIB_SRC) $(HARNESS_SRC) $(SUITE_SRC)
-OBJ := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(SRC)))
-
 VPATH := $(ROOT)/src:src:suites
+
+endif
+
+# tinyusb's objects are kept apart because they are compiled on different
+# terms — see TINYUSB_CFLAGS.
+OBJ    := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(SRC)))
+TU_OBJ := $(patsubst %.c,$(BUILD)/tu/%.o,$(notdir $(TINYUSB_SRC)))
 
 # ---------------------------------------------------------------------------
 # Coverage
@@ -143,28 +231,57 @@ VPATH := $(ROOT)/src:src:suites
 # The reader for the counters the compiler wrote.  See the note at the top.
 GCOV ?= gcov
 
+# Error classes lcov raises about the counters themselves rather than about
+# coverage.  llvm-cov's gcov emulation reports branch data lcov judges
+# inconsistent, and reports function extents lcov's version checks reject, and
+# neither says anything about what the suites reached.  gcc raises neither, so
+# accepting them costs the measured configuration nothing and lets the same
+# command work under either compiler.
+COV_IGNORE := --ignore-errors inconsistent,unsupported,corrupt
+
 # Coverage measures the logging build.  command_to_str is called only from a
 # log statement, so with logging off it is compiled and never reached, and a
 # figure counting it as missed would be measuring the build rather than the
 # suite.  cov-capture therefore re-enters make with both flags set, and the
 # directory it reads is named for both — whatever the flags of the invocation
 # it was reached from.
-COV_VARIANT := base-logging
+# Coverage measures the logging build of both suites, merged.  command_to_str
+# is called only from a log statement, so with logging off it is compiled and
+# never reached, and a figure counting it as missed would be measuring the build
+# rather than the suite.  cov-capture therefore re-enters make with both flags
+# set, once per suite, and reads the directories those runs wrote — whatever the
+# flags of the invocation it was reached from.
+COV_SUFFIX := -logging
 ifeq ($(SANITIZE),1)
-COV_VARIANT := $(COV_VARIANT)-sanitize
+COV_SUFFIX := $(COV_SUFFIX)-sanitize
 endif
-COV_BUILD := build/$(COV_VARIANT)-coverage
+COV_SUFFIX := $(COV_SUFFIX)-coverage
 
-COV_ALL  := $(COV_BUILD)/all.info
-COV_INFO := $(COV_BUILD)/picobootx.info
-COV_HTML := $(COV_BUILD)/html
+COV_CORE := build/core$(COV_SUFFIX)
+COV_USB  := build/usb$(COV_SUFFIX)
+COV_DIR  := build/coverage
+
+COV_ALL  := $(COV_DIR)/all.info
+COV_INFO := $(COV_DIR)/picobootx.info
+COV_HTML := $(COV_DIR)/html
+
+# Every source file of the library, whichever suite reaches it.  Named here
+# rather than taken from LIB_SRC, because LIB_SRC is whatever the current
+# invocation is building and the gate is about the library as a whole:
+# picobootx_vendor.c is only in the usb suite's build, and a gate that forgot it
+# when invoked from the core suite would pass while measuring two files out of
+# three.
+COV_LIB_SRC := \
+	$(ROOT)/src/picobootx.c \
+	$(ROOT)/src/picobootx_impl.c \
+	$(ROOT)/src/picobootx_vendor.c
 
 # The library files as lcov patterns rather than as paths, since lcov records
 # whatever absolute path the compiler saw.  Quoted, so the shell hands the
 # wildcard to lcov rather than trying to expand it here.
-COV_PATTERN := $(patsubst $(ROOT)/%,'*/%',$(LIB_SRC))
+COV_PATTERN := $(patsubst $(ROOT)/%,'*/%',$(COV_LIB_SRC))
 
-.PHONY: all build run clean cov cov-capture cov-html
+.PHONY: all build run clean cov cov-capture cov-html usb usb-build
 
 all: build
 
@@ -173,37 +290,68 @@ build: $(TARGET)
 run: $(TARGET)
 	./$(TARGET) $(FILTER)
 
-$(TARGET): $(OBJ)
+# The usb suite, from a core-suite invocation.  Re-enters make rather than
+# duplicating the rules, so both suites are built and run the same way.
+usb:
+	@$(MAKE) SUITE=usb run
+
+usb-build:
+	@$(MAKE) SUITE=usb build
+
+$(TINYUSB_DIR):
+	@echo "fetching tinyusb $(TINYUSB_COMMIT)"
+	@git init -q $@
+	@git -C $@ remote add origin $(TINYUSB_URL)
+	@git -C $@ fetch -q --depth 1 origin $(TINYUSB_COMMIT)
+	@git -C $@ checkout -q FETCH_HEAD
+
+$(TARGET): $(OBJ) $(TU_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $^
 
-$(BUILD)/%.o: %.c
+$(BUILD)/%.o: %.c $(TINYUSB_ORDER)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# tinyusb is vendored, so it is not held to picobootx's warning policy.  Its
+# own warnings are not this repository's to fix, and patching them would be a
+# change to a pinned dependency.
+$(BUILD)/tu/%.o: %.c $(TINYUSB_ORDER)
+	@mkdir -p $(dir $@)
+	$(CC) $(TINYUSB_CFLAGS) -c -o $@ $<
+
 cov-capture:
-	$(MAKE) COVERAGE=1 LOGGING=1 run
+	$(MAKE) SUITE=core COVERAGE=1 LOGGING=1 run
+	$(MAKE) SUITE=usb  COVERAGE=1 LOGGING=1 run
+	@mkdir -p $(COV_DIR)
 	lcov --version
 	@# lcov runs the reader as a single executable, so one that needs an
 	@# argument of its own — llvm-cov's gcov mode — reaches it through this.
-	@printf '#!/bin/sh\nexec %s "$$@"\n' '$(GCOV)' > $(COV_BUILD)/gcov-tool
-	@chmod +x $(COV_BUILD)/gcov-tool
-	lcov --gcov-tool $(COV_BUILD)/gcov-tool --capture --directory $(COV_BUILD) \
-	     --output-file $(COV_ALL) --rc branch_coverage=1
+	@printf '#!/bin/sh\nexec %s "$$@"\n' '$(GCOV)' > $(COV_DIR)/gcov-tool
+	@chmod +x $(COV_DIR)/gcov-tool
+	lcov --gcov-tool $(COV_DIR)/gcov-tool --capture --directory $(COV_CORE) \
+	     --output-file $(COV_DIR)/core.info --rc branch_coverage=1 $(COV_IGNORE)
+	lcov --gcov-tool $(COV_DIR)/gcov-tool --capture --directory $(COV_USB) \
+	     --output-file $(COV_DIR)/usb.info --rc branch_coverage=1 $(COV_IGNORE)
+	@# Merged, so a line one suite reaches counts however the other fares.  The
+	@# two share picobootx.c and picobootx_impl.c, and only the usb suite
+	@# compiles picobootx_vendor.c at all.
+	lcov --add-tracefile $(COV_DIR)/core.info --add-tracefile $(COV_DIR)/usb.info \
+	     --output-file $(COV_ALL) --rc branch_coverage=1 $(COV_IGNORE)
 	lcov --extract $(COV_ALL) $(COV_PATTERN) \
-	     --output-file $(COV_INFO) --rc branch_coverage=1
+	     --output-file $(COV_INFO) --rc branch_coverage=1 $(COV_IGNORE)
 	@test -s $(COV_INFO) || \
-	    (echo "no coverage data for $(LIB_SRC)" && exit 1)
+	    (echo "no coverage data for $(COV_LIB_SRC)" && exit 1)
 
 cov: cov-capture
-	lcov --list $(COV_INFO) --rc branch_coverage=1
+	lcov --list $(COV_INFO) --rc branch_coverage=1 $(COV_IGNORE)
 	@# The gate.  Every line and function of the library the suite is expected
 	@# to reach, with the rest marked unreachable in the source.  Branches are
 	@# listed but not gated, as epio does it: gcc and llvm-cov disagree on what
 	@# counts as a branch, so gating them would fail under one compiler and pass
 	@# under the other.  The file count is checked too, so a library file
 	@# dropping out of the report cannot pass as everything left being complete.
-	@lcov --list $(COV_INFO) --rc branch_coverage=1 | awk -F'|' '\
+	@lcov --list $(COV_INFO) --rc branch_coverage=1 $(COV_IGNORE) | awk -F'|' '\
 	    /\.c[ \t]*\|/ { \
 	        rows++; \
 	        for (i = 2; i <= 3; i++) { \
@@ -213,16 +361,18 @@ cov: cov-capture
 	        } \
 	    } \
 	    END { \
-	        if (rows != $(words $(LIB_SRC))) { \
-	            print "expected $(words $(LIB_SRC)) files in the report, found " rows+0; \
+	        if (rows != $(words $(COV_LIB_SRC))) { \
+	            print "expected $(words $(COV_LIB_SRC)) files in the report, found " rows+0; \
 	            bad = 1; \
 	        } \
 	        exit (bad ? 1 : 0); \
 	    }'
 
 cov-html: cov-capture
-	genhtml $(COV_INFO) --output-directory $(COV_HTML) --rc branch_coverage=1
+	genhtml $(COV_INFO) --output-directory $(COV_HTML) --rc branch_coverage=1 $(COV_IGNORE)
 	@echo "coverage report at $(COV_HTML)/index.html"
 
 clean:
 	rm -rf build
+
+-include $(OBJ:.o=.d) $(TU_OBJ:.o=.d)

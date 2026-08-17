@@ -60,9 +60,10 @@ shipped hardware.
 - `src/picobootx_vendor.c` — the tinyusb vendor device driver, replacing
   tinyusb's stock one.
 - `examples/tinyusb/` — a complete bare-metal example, and the only build that
-  compiles `picobootx_vendor.c`.  Its `tinyusb-repo` and `pico-sdkless-repo`
+  produces a binary for a device.  Its `tinyusb-repo` and `pico-sdkless-repo`
   are cloned, not committed.
-- `test/` — the conformance suite.
+- `test/` — the two conformance suites.  `test/tinyusb` is cloned at a pinned
+  commit, not committed.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
 
@@ -100,21 +101,42 @@ through a macro in `picobootx_impl.h`.
 
 From the repository root, which delegates to `test`:
 
-    make                    # build
-    make test               # build and run
-    make test FILTER=stall  # one suite
+    make                    # build both
+    make test               # build and run both
+    make test-core          # the core suite alone
+    make test-usb           # the usb suite alone
     make test LOGGING=1     # with picobootx's own logging
     make test SANITIZE=1    # under the address and undefined behaviour sanitizers
     make cov                # coverage of the library, listed per file and gated
     make cov-html           # the same, as a browsable report
 
-The same targets work from `test` itself, where `run` stands in for `test`.  A
-bare `make` builds without running in both places.
+The same targets work from `test` itself, where `run` stands in for `test` and
+`SUITE=usb` selects the second suite.  `FILTER=` runs the scenarios whose suite
+name contains a string.  A bare `make` builds without running in both places.
 
-It compiles the shipped `picobootx.c` and `picobootx_impl.c` for the host.  The
-harness supplies the wire (`test/src/pbt_wire.c`), the device model
+There are two suites, and which one a scenario belongs in is decided by what it
+needs to reach.
+
+**core** compiles the shipped `picobootx.c` and `picobootx_impl.c` for the host.
+The harness supplies the wire (`test/src/pbt_wire.c`), the device model
 (`test/src/pbt_device.c`), the callbacks and a sample custom command
-implementation (`test/src/pbt_ops.c`).  Scenarios live in `test/suites/`.
+implementation (`test/src/pbt_ops.c`).  Scenarios live in `test/suites/`.  There
+is no tinyusb in this build at all, which is what keeps it quick to run and free
+of a cloned dependency.
+
+**usb** adds the shipped `picobootx_vendor.c` and links real tinyusb, pinned to a
+commit and built with `CFG_TUSB_MCU = OPT_MCU_NONE`.  `test/usb/usbt_dcd.c` is
+the device controller tinyusb has no port for, and `test/usb/usbt_host.c` models
+the host that drives it.  Scenarios live in `test/usb/suites/` and speak in host
+actions.  This is the only build that runs the vendor driver — it is a tinyusb
+class driver, supplying `vendord_init`, `vendord_open`, `vendord_reset`,
+`vendord_deinit` and `vendord_xfer_cb` in place of tinyusb's own, so nothing
+below usbd can call it.
+
+Both share the runner and the assertions in `test/src/pbt_core.c`, and each
+names its own scenarios — `test/src/pbt_suites.c` and `test/usb/usbt_suites.c`.
+tinyusb is compiled without picobootx's `-Werror`: its warnings are not this
+repository's to fix, and patching a pinned dependency would be worse.
 
 Rules that keep it worth having:
 
@@ -135,8 +157,9 @@ Rules that keep it worth having:
 
 ## Coverage
 
-`make cov` measures `picobootx.c` and `picobootx_impl.c` and **fails below 100%**
-of lines and functions.  CI runs it.  It measures the `LOGGING=1` build, because
+`make cov` runs both suites, merges what each reached, measures `picobootx.c`,
+`picobootx_impl.c` and `picobootx_vendor.c`, and **fails below 100%** of lines
+and functions.  CI runs it.  It measures the `LOGGING=1` build, because
 `command_to_str` is called only from a log statement and is unreachable with
 logging off.  Branch counts are listed alongside and not gated — gcc and
 llvm-cov disagree on what counts as a branch, so a branch gate would hold under

@@ -46,39 +46,48 @@ The heart of picobootx should be USB stack agnostic, though and easy to port to 
 
 ## Testing
 
-[test](test) holds a conformance suite covering command framing, the stall and
-unstall protocol, packet boundaries, the device-to-host and host-to-device data
-phases, custom commands, what a transport that refuses or truncates a transfer
-gets, what an integrator's partial ops table does, how a bootrom routine that is
-absent or refuses is reported, and the picotool accommodations described under
-[picotool/tinyusb Quirks](#picotooltinyusb-quirks).
-
-It compiles picobootx's core and its default implementations for the machine you
-are on, with `PICOBOOTX_HOST_TEST` defined so the RP2350-specific parts of
-[picobootx_impl.c](src/picobootx_impl.c) resolve to a model of the chip rather
-than to hardware, and runs them against a stand-in for the USB transport.  The
-code under test is the shipped code.  It needs a C compiler and make, and runs
-on macOS and Linux:
+[test](test) holds two conformance suites.  Both compile picobootx for the
+machine you are on, with `PICOBOOTX_HOST_TEST` defined so the RP2350-specific
+parts of [picobootx_impl.c](src/picobootx_impl.c) resolve to a model of the chip
+rather than to hardware.  The code under test is the shipped code.  They need a
+C compiler and make, and run on macOS and Linux:
 
 ```bash
 make test
 ```
 
-`make` on its own builds the suite without running it.  `make test
-FILTER=stall` runs one suite.  `make test LOGGING=1` builds with picobootx's own
-logging turned on.  `make test SANITIZE=1` builds under the address and
-undefined behaviour sanitizers.
+The **core** suite drives [picobootx.c](src/picobootx.c) and
+[picobootx_impl.c](src/picobootx_impl.c) through a stand-in for the USB
+transport.  It covers command framing, the stall and unstall protocol, packet
+boundaries, the device-to-host and host-to-device data phases, custom commands,
+what a transport that refuses or truncates a transfer gets, what an integrator's
+partial ops table does, how a bootrom routine that is absent or refuses is
+reported, and the picotool accommodations described under
+[picotool/tinyusb Quirks](#picotooltinyusb-quirks).
 
-`make cov` runs the suite under coverage, reports how much of
-[picobootx.c](src/picobootx.c) and [picobootx_impl.c](src/picobootx_impl.c) it
-reached, and fails below every line and function of both.  Branches are reported
-but not gated, since gcc and llvm-cov do not agree on what counts as one.  The
-few arms the suite cannot reach are marked unreachable in the source with lcov
-exclusion comments, each saying which invariant makes it so.  `make cov-html`
-writes the same as a browsable report.  Both need lcov.
-[picobootx_vendor.c](src/picobootx_vendor.c) is not in this build and so is not
-in the figures — it is the tinyusb vendor driver the suite replaces with a
-stand-in, and it is compiled by [examples/tinyusb](examples/tinyusb).
+The **usb** suite adds [picobootx_vendor.c](src/picobootx_vendor.c) and runs the
+lot against real tinyusb, pinned to a commit and built for a machine with no USB
+hardware.  A device controller and a model of a USB host stand in for the
+silicon and the bus, so a scenario says what a host did — enumerate, issue a
+control request, send a bulk packet — and asserts what the device did in reply.
+This is the only way the vendor driver runs at all: it is a tinyusb class
+driver, and nothing below usbd can call it.  Enumeration, endpoint claiming, the
+descriptor content picotool insists on, and the driver's own stall, unstall and
+acknowledgement handling live here.
+
+`make` on its own builds both without running them.  `make test-core` and
+`make test-usb` run one.  Inside [test](test), `make SUITE=usb` selects the
+second suite, `FILTER=stall` runs the scenarios whose suite name contains a
+string, `LOGGING=1` builds with picobootx's own logging turned on, and
+`SANITIZE=1` builds under the address and undefined behaviour sanitizers.
+
+`make cov` runs both suites under coverage, merges what each reached, reports it
+per file for all three sources of the library, and fails below every line and
+function.  Branches are reported but not gated, since gcc and llvm-cov do not
+agree on what counts as one.  The few arms neither suite can reach are marked
+unreachable in the source with lcov exclusion comments, each saying which
+invariant makes it so.  `make cov-html` writes the same as a browsable report.
+Both need lcov.
 
 ## Limitations
 

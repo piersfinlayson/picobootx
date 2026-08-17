@@ -328,23 +328,3 @@ void pbt_args_exclusive_access(picoboot_cmd_t *cmd, uint8_t ea_type) {
 // Composite helpers
 // ---------------------------------------------------------------------------
 
-pb_status_t pbt_run_cmd(const picoboot_cmd_t *cmd) {
-    pbt_host_send_cmd(cmd);
-    pbt_pump();
-
-    // A device-to-host command leaves the device waiting for the host's
-    // completion packet, and the status block is not updated for the command
-    // until that arrives.  A host sends it, so the harness does too.
-    if (pbt_state()->state == PB_STATE_AWAIT_ACK) {
-        pbt_host_ack();
-        pbt_pump();
-    }
-
-    picoboot_status_t status;
-    if (!pbt_ctrl_get_status(&status)) {
-        pbt_fail(__FILE__, __LINE__,
-                 "the library declined GET_COMMAND_STATUS");
-        return PB_STATUS_UNKNOWN_ERROR;
-    }
-    return (pb_status_t)status.status_code;
-}

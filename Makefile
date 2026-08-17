@@ -21,19 +21,29 @@ EXAMPLE_DIR := examples/tinyusb
 # example has been built here — see clean-example.
 EXAMPLE_TINYUSB_DIR := tinyusb-repo
 
-.PHONY: all test build cov cov-html clean clean-test clean-example example
+.PHONY: all test test-core test-usb build cov cov-html clean clean-test \
+        clean-example example
 
 all: build
 
-# Build the conformance suite without running it.
+# Build both suites without running them.
 build:
 	@$(MAKE) -C $(TEST_DIR) build
+	@$(MAKE) -C $(TEST_DIR) SUITE=usb build
 
-# Build and run it.
-test:
+# Build and run both suites.  core drives picobootx through a stand-in for the
+# USB transport, usb drives it through real tinyusb and a model of a host, and
+# only the second reaches the vendor driver.
+test: test-core test-usb
+
+test-core:
 	@$(MAKE) -C $(TEST_DIR) run
 
-# Run it under coverage.  cov gates, cov-html writes a browsable report.
+test-usb:
+	@$(MAKE) -C $(TEST_DIR) SUITE=usb run
+
+# Run both under coverage, merged.  cov gates, cov-html writes a browsable
+# report.
 cov:
 	@$(MAKE) -C $(TEST_DIR) cov
 

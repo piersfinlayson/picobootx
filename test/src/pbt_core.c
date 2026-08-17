@@ -42,6 +42,10 @@ void pbt_log(const char *name, uint32_t a0, uint32_t a1, uint32_t a2,
 
 uint32_t pbt_event_count(void) { return s_event_count; }
 
+// Drop everything recorded so far.  The sequence log belongs to one scenario,
+// and whatever sets a scenario up empties it.
+void pbt_log_reset(void) { s_event_count = 0; s_seq = 0; }
+
 const pbt_event_t *pbt_event(uint32_t index) {
     return index < s_event_count ? &s_events[index] : NULL;
 }
@@ -209,90 +213,9 @@ bool                  pbt_use_flash_buf;
 // device's, where a pointer is four bytes wide.  This process's pointers are
 // wider, so the allocation is taken from sizeof and the constant is checked
 // against the device layout by the assertion in picobootx_private.h.
-static union {
-    uint32_t         words[PICOBOOT_STATE_SIZE / 4];
-    pb_state_block_t block;
-} s_state_buf;
-
-// The 256-byte page buffer WRITE accumulates into.
-static uint8_t s_flash_write_buf[256] __attribute__((aligned(4)));
-
-pb_state_block_t *pbt_state(void) {
-    return &s_state_buf.block;
-}
-
-// Defined in their own translation units.
-void pbt_device_reset(void);
-void pbt_wire_reset(void);
-void pbt_ops_reset(void);
-void pbt_custom_ops_reset(void);
-void pbt_token_reset(void);
-
-void pbt_begin(void) {
-    s_event_count = 0;
-    s_seq         = 0;
-
-    pbt_device_reset();
-    pbt_wire_reset();
-    pbt_ops_reset();
-    pbt_custom_ops_reset();
-    pbt_token_reset();
-
-    memset(s_flash_write_buf, 0, sizeof(s_flash_write_buf));
-
-    pbt_use_custom    = false;
-    pbt_use_flash_buf = true;
-}
-
-void pbt_start(void) {
-    picoboot_init(
-        pbt_state(),
-        &pbt_ops,
-        pbt_use_custom ? &pbt_custom_ops : NULL,
-        pbt_use_flash_buf ? s_flash_write_buf : NULL,
-        PBT_RHPORT,
-        PBT_EP_OUT,
-        PBT_EP_IN,
-        NULL
-    );
-}
-
-void pbt_recover(void) {
-    if (!pbt_ctrl_interface_reset()) {
-        pbt_fail(__FILE__, __LINE__,
-                 "the library declined INTERFACE RESET");
-        return;
-    }
-    pbt_pump();
-
-    if (pbt_ep_stalled(PBT_EP_OUT) || pbt_ep_stalled(PBT_EP_IN) ||
-        pbt_state()->state != PB_STATE_IDLE) {
-        pbt_fail(__FILE__, __LINE__,
-                 "INTERFACE RESET left the device in %s with OUT %s and IN %s",
-                 pbt_state_name(pbt_state()->state),
-                 pbt_ep_stalled(PBT_EP_OUT) ? "halted" : "running",
-                 pbt_ep_stalled(PBT_EP_IN) ? "halted" : "running");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The runner
 // ---------------------------------------------------------------------------
-
-static const pbt_suite_t *const k_suites[] = {
-    &pbt_suite_framing,
-    &pbt_suite_stall,
-    &pbt_suite_zlp,
-    &pbt_suite_data_in,
-    &pbt_suite_data_out,
-    &pbt_suite_custom,
-    &pbt_suite_transport,
-    &pbt_suite_ops,
-    &pbt_suite_bootrom,
-    &pbt_suite_quirks,
-};
-
-#define PBT_SUITE_COUNT (sizeof(k_suites) / sizeof(k_suites[0]))
 
 int main(int argc, char **argv) {
     // An argument selects the suites whose name contains it, for working on one
@@ -305,8 +228,8 @@ int main(int argc, char **argv) {
     printf("picobootx conformance suite, library version %s\n",
            PICOBOOTX_VERSION_STRING);
 
-    for (unsigned i = 0; i < PBT_SUITE_COUNT; i++) {
-        const pbt_suite_t *suite = k_suites[i];
+    for (unsigned i = 0; i < pbt_suite_count; i++) {
+        const pbt_suite_t *suite = pbt_suites[i];
         if (filter != NULL && strstr(suite->name, filter) == NULL) {
             continue;
         }

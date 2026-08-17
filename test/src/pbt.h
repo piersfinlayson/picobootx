@@ -103,6 +103,9 @@ void pbt_dump_log(void);
 // Record a failure against the running scenario.
 void pbt_fail(const char *file, int line, const char *fmt, ...);
 
+// Drop everything the sequence log holds.
+void pbt_log_reset(void);
+
 // True once the running scenario has recorded a failure.
 bool pbt_failed(void);
 
@@ -446,7 +449,15 @@ uint32_t              pbt_custom_fill_calls(void);
 
 // ---------------------------------------------------------------------------
 // The suites
+//
+// The runner in pbt_core.c takes its list from here rather than holding one, so
+// that the two binaries built from this directory — the core suite and the usb
+// suite — share a runner while each names its own scenarios.  Each supplies
+// these two symbols.
 // ---------------------------------------------------------------------------
+
+extern const pbt_suite_t *const pbt_suites[];
+extern const unsigned           pbt_suite_count;
 
 extern const pbt_suite_t pbt_suite_framing;
 extern const pbt_suite_t pbt_suite_stall;

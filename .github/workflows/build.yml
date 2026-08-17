@@ -61,15 +61,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and run the conformance suite
+      - name: Build and run the conformance suites
         env:
           CC: ${{ matrix.cc }}
         run: |
           make test SANITIZE=${{ matrix.sanitize }} LOGGING=${{ matrix.logging }}
 
-  # How much of the library the suite reaches.  The number is printed and then
-  # gated: every line and function of picobootx.c and picobootx_impl.c, with the
-  # handful that defend an invariant the state machine has already established
+  # How much of the library the suites reach, merged.  The number is printed and
+  # then gated: every line and function of picobootx.c, picobootx_impl.c and
+  # picobootx_vendor.c, with the handful that defend an invariant already
+  # established
   # marked unreachable in the source.  So a new line nothing reaches fails here,
   # and so does dropping the only test that reached an existing one.  Branches
   # are printed but not gated, since gcc and llvm-cov disagree on what one is.

@@ -26,7 +26,6 @@ pb_state_block_t *pbt_state(void) {
 }
 
 // Defined in their own translation units.
-void pbt_device_reset(void);
 void pbt_wire_reset(void);
 void pbt_ops_reset(void);
 void pbt_custom_ops_reset(void);

@@ -109,6 +109,14 @@ void pbt_log_reset(void);
 // True once the running scenario has recorded a failure.
 bool pbt_failed(void);
 
+// Forget the failures recorded against the running scenario.  The runner does
+// this between scenarios, so pbt_failed answers about the one that just ran.
+void pbt_fail_reset(void);
+
+// Failures recorded since the process started, which pbt_fail_reset does not
+// touch.  It is what the runner's closing tally counts.
+unsigned pbt_fail_total(void);
+
 // Check and carry on, so one run reports every problem it found.
 #define PBT_CHECK(cond)                                                       \
     do {                                                                      \
@@ -215,8 +223,25 @@ pb_state_block_t *pbt_state(void);
 // aborts with a message, because it means either the scenario or the address
 // validation is wrong and neither should pass quietly.
 #define PBT_ROM_MODELLED   RP2350_ROM_SIZE
-#define PBT_FLASH_MODELLED 0x00040000u  // 256KB
 #define PBT_SRAM_MODELLED  RP2350_SRAM_SIZE
+
+// Flash is modelled from its base for this much.  A scenario says which
+// addresses it uses, so the suites model a part's worth of it and no more, and
+// an address outside that is a scenario asking for something it did not set up.
+//
+// The usbip bridge overrides it, because on the other end of that bus is a real
+// tool choosing its own addresses.  picotool reads eight megabytes in while it
+// is working out what is already on the part, and refusing that would be the
+// harness deciding what a host may ask for.  It gives itself the whole window
+// picobootx admits, so anything the library will accept, the model can answer.
+#if !defined(PBT_FLASH_MODELLED)
+#define PBT_FLASH_MODELLED 0x00040000u  // 256KB
+#endif
+
+// Put the modelled part back to how a part comes out of its packaging: flash
+// erased, OTP blown nowhere, XIP up.  Whatever sets a scenario up calls this,
+// and so does anything else that starts a device.
+void pbt_device_reset(void);
 
 uint8_t *pbt_rom(void);
 uint8_t *pbt_flash(void);

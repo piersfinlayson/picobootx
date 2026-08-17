@@ -21,8 +21,8 @@ EXAMPLE_DIR := examples/tinyusb
 # example has been built here — see clean-example.
 EXAMPLE_TINYUSB_DIR := tinyusb-repo
 
-.PHONY: all test test-core test-usb build cov cov-html clean clean-test \
-        clean-example example
+.PHONY: all test test-core test-usb test-usbip build cov cov-html clean \
+        clean-test clean-example example
 
 all: build
 
@@ -33,7 +33,8 @@ build:
 
 # Build and run both suites.  core drives picobootx through a stand-in for the
 # USB transport, usb drives it through real tinyusb and a model of a host, and
-# only the second reaches the vendor driver.
+# only the second reaches the vendor driver.  test-usbip is not among them: it
+# needs Linux and root, and neither suite needs either.
 test: test-core test-usb
 
 test-core:
@@ -41,6 +42,12 @@ test-core:
 
 test-usb:
 	@$(MAKE) -C $(TEST_DIR) SUITE=usb run
+
+# Put the usb suite's device on this machine's own USB bus, through the kernel's
+# virtual host controller, and drive it with real picotool.  Linux only, and the
+# run needs root — building it does not, so only the run is handed to sudo.
+test-usbip:
+	@$(MAKE) -C $(TEST_DIR) usbip
 
 # Run both under coverage, merged.  cov gates, cov-html writes a browsable
 # report.

@@ -52,11 +52,31 @@ void usbt_begin(void);
 // let time-free background work settle.
 void usbt_settle(void);
 
+// Move the clock tinyusb reads.  It stands still otherwise, so a scenario that
+// depends on time says by how much.
+void usbt_advance_ms(uint32_t ms);
+
+// ---------------------------------------------------------------------------
+// The application carrying picobootx  (usbt_app.c)
+//
+// A device carrying picobootx owns the state block and turns the library's task
+// from its own loop, and the vendor driver calls it when the wire moves.  These
+// are that application, and they are separate from the host above because there
+// are two hosts — the model in usbt_host.c, and a real one reaching the same
+// device through the usbip bridge.
+// ---------------------------------------------------------------------------
+
+// Put the application back to before picoboot_init.  usbt_begin does this.
+void usbt_app_reset(void);
+
 // Initialise picobootx behind the vendor driver, with the shared default ops.
-// usbt_begin does this, so a scenario calls it only to start over.
 void usbt_start_picoboot(void);
 
-// Whether usbt_settle() turns picobootx's own task.  A device runs that task
+// Turn picobootx's own task once, as a device's main loop does.  Whatever pumps
+// tud_task pumps this alongside it — usbt_settle does both.
+void usbt_app_task(void);
+
+// Whether usbt_app_task turns picobootx's own task.  A device runs that task
 // from its application loop, so a packet reaching the vendor driver's FIFO and
 // the task reading it are two separate moments, and this is how a scenario
 // stands between them.  usbt_begin leaves the task running.
@@ -64,10 +84,6 @@ void usbt_run_picoboot_task(bool run);
 
 // The library's state block, for a scenario asserting what state it is in.
 pb_state_block_t *usbt_state(void);
-
-// Move the clock tinyusb reads.  It stands still otherwise, so a scenario that
-// depends on time says by how much.
-void usbt_advance_ms(uint32_t ms);
 
 // Signal a bus reset, as a host does before it addresses a device.
 void usbt_bus_reset(void);

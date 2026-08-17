@@ -46,11 +46,12 @@ The heart of picobootx should be USB stack agnostic, though and easy to port to 
 
 ## Testing
 
-[test](test) holds two conformance suites.  Both compile picobootx for the
+[test](test) holds two conformance suites, and a bridge that puts picobootx on a
+real USB bus so real picotool drives it.  All three compile picobootx for the
 machine you are on, with `PICOBOOTX_HOST_TEST` defined so the RP2350-specific
 parts of [picobootx_impl.c](src/picobootx_impl.c) resolve to a model of the chip
-rather than to hardware.  The code under test is the shipped code.  They need a
-C compiler and make, and run on macOS and Linux:
+rather than to hardware.  The code under test is the shipped code.  The two
+suites need a C compiler and make, and run on macOS and Linux:
 
 ```bash
 make test
@@ -75,11 +76,29 @@ driver, and nothing below usbd can call it.  Enumeration, endpoint claiming, the
 descriptor content picotool insists on, and the driver's own stall, unstall and
 acknowledgement handling live here.
 
-`make` on its own builds both without running them.  `make test-core` and
+The **usbip** bridge takes that same device — real tinyusb, the real vendor
+driver, the library, the modelled chip — and puts it on the machine's own USB
+bus, through the kernel's virtual host controller.  The bus is a socket on the
+loopback interface and the device exists nowhere, so picotool enumerates it,
+claims its interface and speaks PICOBOOT to it without knowing any of that.
+Released picotool, unmodified:
+
+```bash
+make test-usbip
+```
+
+It loads a program and reads it back byte for byte, loads a second over the
+first to show the erase happened, erases a range and finds ones, and blows and
+reads an OTP row.  Linux only, since `vhci-hcd` is a Linux driver, and the run
+needs root — loading the module and handing it a socket are both privileged.
+Building it does not, so only the run is handed to `sudo`.
+
+`make` on its own builds both suites without running them.  `make test-core` and
 `make test-usb` run one.  Inside [test](test), `make SUITE=usb` selects the
 second suite, `FILTER=stall` runs the scenarios whose suite name contains a
 string, `LOGGING=1` builds with picobootx's own logging turned on, and
 `SANITIZE=1` builds under the address and undefined behaviour sanitizers.
+`make usbip TRACE=1` runs the bridge with every transfer traced.
 
 `make cov` runs both suites under coverage, merges what each reached, reports it
 per file for all three sources of the library, and fails below every line and

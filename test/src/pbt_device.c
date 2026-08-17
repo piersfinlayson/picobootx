@@ -87,6 +87,27 @@ void pbt_bootrom_withhold(char a, char b) {
     s_withheld[s_withheld_count++] = PBT_ROM_CODE(a, b);
 }
 
+// ---------------------------------------------------------------------------
+// What says which part this is
+//
+// A host reading the low ROM finds three halfwords that identify the bootrom:
+// the characters 'M' and 'u', a word saying which family and revision, and a
+// pointer to the function table.  picotool reads them before it does anything
+// else, and a device whose ROM does not carry them is one it will not issue an
+// RP2350 command to, however the descriptors identify it.
+//
+// The table is present and empty.  Everything picobootx reaches in the bootrom
+// it reaches through the lookup seam rather than by walking this, so what the
+// table needs to be is terminated — a zero tag, which is what ends the walk.
+// ---------------------------------------------------------------------------
+
+#define PBT_BOOTROM_MAGIC_OFFS  0x10u
+#define PBT_BOOTROM_TABLE_OFFS  0x18u
+
+// 'M', 'u', then the family — 2 for RP2350 — and the revision, which a host
+// masks off.
+static const uint8_t k_bootrom_magic[4] = { 'M', 'u', 0x02u, 0x03u };
+
 // The divisor the model reports unless a scenario chooses another.  Non-zero
 // and not one of the values a mistake would produce by accident, so a scenario
 // asserting that the erase sequence carried it through cannot pass on a stray
@@ -150,6 +171,12 @@ void pbt_device_reset(void) {
     for (uint32_t i = 0; i < sizeof(s_rom); i++) {
         s_rom[i] = (uint8_t)(0x50u + (i & 0x0Fu));
     }
+    memcpy(s_rom + PBT_BOOTROM_MAGIC_OFFS, k_bootrom_magic,
+           sizeof(k_bootrom_magic));
+    s_rom[PBT_BOOTROM_MAGIC_OFFS + 4] = (uint8_t)(PBT_BOOTROM_TABLE_OFFS & 0xFFu);
+    s_rom[PBT_BOOTROM_MAGIC_OFFS + 5] = (uint8_t)(PBT_BOOTROM_TABLE_OFFS >> 8);
+    memset(s_rom + PBT_BOOTROM_TABLE_OFFS, 0, 4);
+
     memset(s_otp, 0, sizeof(s_otp));
 
     s_irq_disabled       = false;

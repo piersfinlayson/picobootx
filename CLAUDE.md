@@ -62,8 +62,9 @@ shipped hardware.
 - `examples/tinyusb/` — a complete bare-metal example, and the only build that
   produces a binary for a device.  Its `tinyusb-repo` and `pico-sdkless-repo`
   are cloned, not committed.
-- `test/` — the two conformance suites.  `test/tinyusb` is cloned at a pinned
-  commit, not committed.
+- `test/` — the two conformance suites, and `test/usbip/`, the bridge that puts
+  the device on a real USB bus for picotool.  `test/tinyusb` is cloned at a
+  pinned commit, not committed.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
 
@@ -105,6 +106,7 @@ From the repository root, which delegates to `test`:
     make test               # build and run both
     make test-core          # the core suite alone
     make test-usb           # the usb suite alone
+    make test-usbip         # the usbip bridge, driven by picotool
     make test LOGGING=1     # with picobootx's own logging
     make test SANITIZE=1    # under the address and undefined behaviour sanitizers
     make cov                # coverage of the library, listed per file and gated
@@ -115,7 +117,8 @@ The same targets work from `test` itself, where `run` stands in for `test` and
 name contains a string.  A bare `make` builds without running in both places.
 
 There are two suites, and which one a scenario belongs in is decided by what it
-needs to reach.
+needs to reach.  There is also a third build, `usbip`, which is a program rather
+than a suite — see below.
 
 **core** compiles the shipped `picobootx.c` and `picobootx_impl.c` for the host.
 The harness supplies the wire (`test/src/pbt_wire.c`), the device model
@@ -133,8 +136,22 @@ class driver, supplying `vendord_init`, `vendord_open`, `vendord_reset`,
 `vendord_deinit` and `vendord_xfer_cb` in place of tinyusb's own, so nothing
 below usbd can call it.
 
-Both share the runner and the assertions in `test/src/pbt_core.c`, and each
-names its own scenarios — `test/src/pbt_suites.c` and `test/usb/usbt_suites.c`.
+**usbip** is not a suite.  It is `test/usbip/`, a program that takes the usb
+suite's device — the same controller, descriptors, application and chip model —
+drops the model of a host, and hands the bus to the kernel's `vhci-hcd` instead,
+so real picotool drives picobootx over a real USB bus.  The bus is a loopback
+socket the program hands to the controller, which is why it attaches itself
+rather than calling `usbip(8)`: the kernel looks the descriptor up in the writing
+process's own table.  `test/usbip/picotool.sh` runs the checks and is where they
+live.  Linux only, and the run needs root.  It is not part of `make test`.
+
+Both suites share the runner in `test/src/pbt_main.c` and the recording and
+assertions in `test/src/pbt_core.c`, and each names its own scenarios —
+`test/src/pbt_suites.c` and `test/usb/usbt_suites.c`.  The usbip build links
+`pbt_core.c` without the runner, which is why the two are apart.  The application
+carrying picobootx is `test/usb/usbt_app.c`, shared by the usb suite and the
+bridge, because there are two hosts and only one application.
+
 tinyusb is compiled without picobootx's `-Werror`: its warnings are not this
 repository's to fix, and patching a pinned dependency would be worse.
 
@@ -197,9 +214,11 @@ device does not have.
 
 `.github/workflows/build.yml` cross-builds the tinyusb example for Arm, runs the
 suite on Linux under gcc and clang, on Linux under the sanitizers and with
-`LOGGING=1`, and on macOS, and measures the library's coverage on Linux.  The
-coverage job gates at 100% — see Coverage above.  All of it runs on
-GitHub-hosted runners, needing no privileges, no USB and no kernel modules.
+`LOGGING=1`, and on macOS, measures the library's coverage on Linux, and drives
+the usbip bridge with picotool built from a pinned release tag.  The coverage job
+gates at 100% — see Coverage above.  All of it runs on GitHub-hosted runners and
+needs no hardware.  Everything but the picotool job needs no privileges, no USB
+and no kernel modules either — that one loads `vhci-hcd` and runs as root.
 
 ## Gotchas
 

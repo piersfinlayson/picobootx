@@ -30,13 +30,6 @@
 
 static bool s_last_in_was_zlp;
 
-// Whether picoboot_init has been called.  Before it has, the state block holds
-// nothing, and handing it to the library would be worse than declining.
-static bool s_started;
-
-// Whether usbt_settle turns picobootx's task.  See usbt_run_picoboot_task.
-static bool s_run_task;
-
 // The clock tinyusb reads.  It moves only when a scenario moves it, so a
 // scenario that cares about elapsed time says so rather than depending on how
 // long the machine took.
@@ -55,14 +48,10 @@ void usbt_advance_ms(uint32_t ms) {
 // event at a time, and handling one can queue another — a transfer completing
 // makes the class driver start the next — so it is called until a pass changes
 // nothing that matters.
-// Forward-declared because the state block it needs is defined further down,
-// alongside the rest of what an application carrying picobootx supplies.
-static void usbt_picoboot_task(void);
-
 void usbt_settle(void) {
     for (unsigned i = 0; i < USBT_PUMP_MAX; i++) {
         tud_task();
-        usbt_picoboot_task();
+        usbt_app_task();
     }
 }
 
@@ -75,8 +64,8 @@ void usbt_begin(void) {
         tusb_deinit(USBT_RHPORT);
     }
 
-    s_started  = false;
-    s_run_task = true;
+    pbt_device_reset();
+    usbt_app_reset();
     usbt_two_interfaces(false);
     usbt_dcd_reset();
     s_last_in_was_zlp = false;
@@ -368,62 +357,3 @@ bool usbt_clear_halt(uint8_t ep_addr) {
     return r.ok;
 }
 
-// ---------------------------------------------------------------------------
-// picobootx, behind the vendor driver
-//
-// picobootx's vendor driver calls the application when the wire moves, exactly
-// as it does on a device, because the application is what holds the state
-// block.  These two are that application.
-// ---------------------------------------------------------------------------
-
-static union {
-    uint32_t         words[PICOBOOT_STATE_SIZE / 4];
-    pb_state_block_t block;
-} s_state_buf;
-
-static uint8_t s_flash_write_buf[256] __attribute__((aligned(4)));
-
-pb_state_block_t *usbt_state(void) {
-    return &s_state_buf.block;
-}
-
-void app_picoboot_rx_cb(uint32_t available_bytes) {
-    picoboot_rx_cb(&s_state_buf.block, available_bytes);
-}
-
-void app_picoboot_tx_cb(uint32_t sent_bytes) {
-    picoboot_tx_cb(&s_state_buf.block, sent_bytes);
-}
-
-// Defined in pbt_ops.c, which both suites share.
-void pbt_ops_reset(void);
-
-// picobootx's state machine runs from the application's loop, exactly as it
-// does on a device, so the host pumps it alongside tud_task.
-static void usbt_picoboot_task(void) {
-    if (s_started && s_run_task) {
-        picoboot_task(&s_state_buf.block);
-    }
-}
-
-void usbt_run_picoboot_task(bool run) {
-    s_run_task = run;
-}
-
-// A control transfer on the vendor interface belongs to picobootx.  tinyusb
-// hands it to the application, and the application passes it on — this is what
-// carries INTERFACE RESET and GET_COMMAND_STATUS.
-bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
-                                tusb_control_request_t const *request) {
-    if (!s_started) {
-        return false;
-    }
-    return picoboot_control_xfer_cb(&s_state_buf.block, rhport, stage, request);
-}
-
-void usbt_start_picoboot(void) {
-    pbt_ops_reset();
-    picoboot_init(&s_state_buf.block, &pbt_ops, NULL, s_flash_write_buf,
-                  USBT_RHPORT, USBT_EP_OUT, USBT_EP_IN, NULL);
-    s_started = true;
-}

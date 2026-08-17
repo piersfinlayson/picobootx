@@ -21,6 +21,9 @@
 #   make cov         run under coverage, list what the library reached, and
 #                    fail if it is not all of it
 #   make cov-html    the same, as a browsable report
+#   make usbip       put the device on this machine's USB bus and drive it with
+#                    picotool.  Linux only, and the run needs root
+#   make usbip TRACE=1  the same, with the bridge tracing every transfer
 #   make clean
 #
 # Coverage needs lcov, and a gcov that reads the counters the compiler wrote.
@@ -46,8 +49,12 @@ OPT     ?= -O1 -g
 #         host device controller and a model of a USB host.  This is the only
 #         way to reach the vendor driver, since it is a tinyusb class driver and
 #         nothing below usbd can call it.
+#   usbip the usb suite's device, without the model of a host and without any
+#         scenarios, put on the machine's own USB bus through vhci-hcd so a real
+#         host tool drives it.  A program rather than a suite.  Linux only, and
+#         it needs root.
 #
-# Both compile picobootx.c and picobootx_impl.c, with different headers and
+# All three compile picobootx.c and picobootx_impl.c, with different headers and
 # different flags, so each keeps its own object directory.
 SUITE ?= core
 
@@ -85,7 +92,7 @@ TINYUSB_DIR    := tinyusb
 TINYUSB_COMMIT := 8e4f5c1d269976d6c56660782a441a1d780845f0
 TINYUSB_URL    := https://github.com/piersfinlayson/tinyusb.git
 
-ifeq ($(SUITE),usb)
+ifneq ($(filter usb usbip,$(SUITE)),)
 # Fetched here, while the makefile is being read, rather than as a target.  The
 # tinyusb sources are found through VPATH, and make resolves VPATH as it builds
 # its dependency graph — before it would run any target.  A rule that fetched
@@ -98,9 +105,14 @@ $(shell [ -d $(TINYUSB_DIR) ] || ( \
 	git -C $(TINYUSB_DIR) fetch -q --depth 1 origin $(TINYUSB_COMMIT) && \
 	git -C $(TINYUSB_DIR) checkout -q FETCH_HEAD ))
 
-TARGET   := $(BUILD)/picobootx-usb-test
 INCLUDES := -Iusb -I$(TINYUSB_DIR)/src -I$(TINYUSB_DIR)/src/common \
             -I$(TINYUSB_DIR)/src/device -I$(ROOT)/include -Isrc
+ifeq ($(SUITE),usbip)
+TARGET   := $(BUILD)/picobootx-usbip
+INCLUDES += -Iusbip
+else
+TARGET   := $(BUILD)/picobootx-usb-test
+endif
 else
 TARGET   := $(BUILD)/picobootx-test
 INCLUDES := -Ishim -I$(ROOT)/include -Isrc
@@ -145,7 +157,7 @@ LDFLAGS += $(EXTRA_LDFLAGS)
 # picobootx holds itself to.
 TINYUSB_CFLAGS := $(filter-out -Werror,$(CFLAGS)) -Wno-unused-parameter
 
-ifeq ($(SUITE),usb)
+ifneq ($(filter usb usbip,$(SUITE)),)
 
 # picobootx_vendor.c joins the library here.  It defines vendord_init, _open,
 # _reset, _deinit and _xfer_cb — tinyusb's own vendor class driver hooks — so it
@@ -162,21 +174,52 @@ TINYUSB_SRC := \
 	$(TINYUSB_DIR)/src/device/usbd.c \
 	$(TINYUSB_DIR)/src/device/usbd_control.c
 
-HARNESS_SRC := \
+# The device both of these build is the same one, and it is everything but the
+# host: the controller, the descriptors, the application carrying picobootx, and
+# the model underneath.  What differs is who drives it.
+DEVICE_SRC := \
 	src/pbt_core.c \
 	src/pbt_device.c \
 	src/pbt_ops.c \
-	usb/usbt_suites.c \
 	usb/usbt_dcd.c \
-	usb/usbt_host.c \
+	usb/usbt_app.c \
 	usb/usbt_descriptors.c
+
+ifeq ($(SUITE),usbip)
+
+# The bridge: no scenarios, no runner, and no host inside the process.  The host
+# is the machine's own kernel, reaching the same device through vhci-hcd.
+HARNESS_SRC := $(DEVICE_SRC)
+
+SUITE_SRC := \
+	usbip/usbipt_main.c \
+	usbip/usbipt_device.c \
+	usbip/usbipt_vhci.c \
+	usbip/usbipt_urb.c
+
+# The bridge is sockets, poll and sysfs, none of which a strict C11 declares.
+CFLAGS += -D_DEFAULT_SOURCE
+
+# The whole flash window picobootx admits, rather than the part's worth the
+# suites model.  See PBT_FLASH_MODELLED in src/pbt.h.
+CFLAGS += -DPBT_FLASH_MODELLED=RP2350_FLASH_SIZE
+
+else
+
+HARNESS_SRC := \
+	$(DEVICE_SRC) \
+	src/pbt_main.c \
+	usb/usbt_suites.c \
+	usb/usbt_host.c
 
 SUITE_SRC := \
 	usb/suites/enumeration.c \
 	usb/suites/vendor.c
 
+endif
+
 SRC := $(LIB_SRC) $(HARNESS_SRC) $(SUITE_SRC)
-VPATH := $(ROOT)/src:src:usb:usb/suites:$(TINYUSB_DIR)/src:$(TINYUSB_DIR)/src/common:$(TINYUSB_DIR)/src/device
+VPATH := $(ROOT)/src:src:usb:usb/suites:usbip:$(TINYUSB_DIR)/src:$(TINYUSB_DIR)/src/common:$(TINYUSB_DIR)/src/device
 
 else
 
@@ -189,6 +232,7 @@ LIB_SRC := \
 
 HARNESS_SRC := \
 	src/pbt_core.c \
+	src/pbt_main.c \
 	src/pbt_flow.c \
 	src/pbt_suites.c \
 	src/pbt_device.c \
@@ -290,7 +334,8 @@ COV_LIB_SRC := \
 # wildcard to lcov rather than trying to expand it here.
 COV_PATTERN := $(patsubst $(ROOT)/%,'*/%',$(COV_LIB_SRC))
 
-.PHONY: all build run clean cov cov-capture cov-html usb usb-build
+.PHONY: all build run clean cov cov-capture cov-html usb usb-build \
+        usbip usbip-build
 
 all: build
 
@@ -306,6 +351,16 @@ usb:
 
 usb-build:
 	@$(MAKE) SUITE=usb build
+
+# The usbip bridge, driven by picotool.  Linux only.  Building it needs no more
+# than the suites do, and running it needs root — loading vhci-hcd and handing it
+# a socket are both privileged — so only the run is handed to sudo, and the
+# objects stay yours.
+usbip: usbip-build
+	sudo ./usbip/picotool.sh $(if $(filter 1,$(TRACE)),-v)
+
+usbip-build:
+	@$(MAKE) SUITE=usbip build
 
 $(TARGET): $(OBJ) $(TU_OBJ)
 	@mkdir -p $(dir $@)

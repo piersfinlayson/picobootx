@@ -4,6 +4,11 @@
 
 // The harness itself: the sequence log every other part records into, the
 // assertion machinery, and the setup a scenario starts from.
+//
+// The runner that walks the suites is in pbt_main.c, and so is main().  They
+// are apart because the device model and the ops record into this log, and a
+// program that drives the device without running scenarios — the usbip bridge —
+// needs the recording without a runner or a main of its own.
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -160,6 +165,10 @@ void pbt_fail(const char *file, int line, const char *fmt, ...) {
 
 bool pbt_failed(void) { return s_scenario_failures > 0; }
 
+void pbt_fail_reset(void) { s_scenario_failures = 0; }
+
+unsigned pbt_fail_total(void) { return s_total_failures; }
+
 const char *pbt_status_name(int status) {
     switch (status) {
         case PB_STATUS_OK:                   return "OK";
@@ -213,52 +222,3 @@ bool                  pbt_use_flash_buf;
 // device's, where a pointer is four bytes wide.  This process's pointers are
 // wider, so the allocation is taken from sizeof and the constant is checked
 // against the device layout by the assertion in picobootx_private.h.
-// ---------------------------------------------------------------------------
-// The runner
-// ---------------------------------------------------------------------------
-
-int main(int argc, char **argv) {
-    // An argument selects the suites whose name contains it, for working on one
-    // area without running the rest.
-    const char *filter = argc > 1 ? argv[1] : NULL;
-
-    unsigned scenarios_run    = 0;
-    unsigned scenarios_failed = 0;
-
-    printf("picobootx conformance suite, library version %s\n",
-           PICOBOOTX_VERSION_STRING);
-
-    for (unsigned i = 0; i < pbt_suite_count; i++) {
-        const pbt_suite_t *suite = pbt_suites[i];
-        if (filter != NULL && strstr(suite->name, filter) == NULL) {
-            continue;
-        }
-
-        printf("\n%s\n", suite->name);
-
-        for (unsigned j = 0; j < suite->count; j++) {
-            const pbt_scenario_t *scenario = &suite->scenarios[j];
-
-            s_scenario_failures = 0;
-            scenario->fn();
-            scenarios_run++;
-
-            if (s_scenario_failures > 0) {
-                scenarios_failed++;
-                printf("  FAIL  %s\n", scenario->name);
-                pbt_dump_log();
-            } else {
-                printf("  ok    %s\n", scenario->name);
-            }
-        }
-    }
-
-    printf("\n%u scenarios, %u failed, %u failed assertions\n", scenarios_run,
-           scenarios_failed, s_total_failures);
-
-    if (scenarios_run == 0) {
-        fprintf(stderr, "no scenarios ran\n");
-        return 2;
-    }
-    return scenarios_failed == 0 ? 0 : 1;
-}

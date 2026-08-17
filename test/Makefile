@@ -86,9 +86,18 @@ TINYUSB_COMMIT := 8e4f5c1d269976d6c56660782a441a1d780845f0
 TINYUSB_URL    := https://github.com/piersfinlayson/tinyusb.git
 
 ifeq ($(SUITE),usb)
-# Only this suite needs tinyusb, so only its objects wait on the fetch.  The
-# core suite stays buildable with nothing but a compiler and make.
-TINYUSB_ORDER := | $(TINYUSB_DIR)
+# Fetched here, while the makefile is being read, rather than as a target.  The
+# tinyusb sources are found through VPATH, and make resolves VPATH as it builds
+# its dependency graph — before it would run any target.  A rule that fetched
+# them would therefore be too late on a fresh checkout, where make stops with
+# "no rule to make target" instead.  Only this suite needs tinyusb, so the core
+# suite still builds with nothing but a compiler and make.
+$(shell [ -d $(TINYUSB_DIR) ] || ( \
+	git init -q $(TINYUSB_DIR) && \
+	git -C $(TINYUSB_DIR) remote add origin $(TINYUSB_URL) && \
+	git -C $(TINYUSB_DIR) fetch -q --depth 1 origin $(TINYUSB_COMMIT) && \
+	git -C $(TINYUSB_DIR) checkout -q FETCH_HEAD ))
+
 TARGET   := $(BUILD)/picobootx-usb-test
 INCLUDES := -Iusb -I$(TINYUSB_DIR)/src -I$(TINYUSB_DIR)/src/common \
             -I$(TINYUSB_DIR)/src/device -I$(ROOT)/include -Isrc
@@ -298,25 +307,18 @@ usb:
 usb-build:
 	@$(MAKE) SUITE=usb build
 
-$(TINYUSB_DIR):
-	@echo "fetching tinyusb $(TINYUSB_COMMIT)"
-	@git init -q $@
-	@git -C $@ remote add origin $(TINYUSB_URL)
-	@git -C $@ fetch -q --depth 1 origin $(TINYUSB_COMMIT)
-	@git -C $@ checkout -q FETCH_HEAD
-
 $(TARGET): $(OBJ) $(TU_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $^
 
-$(BUILD)/%.o: %.c $(TINYUSB_ORDER)
+$(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # tinyusb is vendored, so it is not held to picobootx's warning policy.  Its
 # own warnings are not this repository's to fix, and patching them would be a
 # change to a pinned dependency.
-$(BUILD)/tu/%.o: %.c $(TINYUSB_ORDER)
+$(BUILD)/tu/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(TINYUSB_CFLAGS) -c -o $@ $<
 

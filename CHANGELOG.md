@@ -8,7 +8,7 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
-## 0.2.0 - 2026-08-??
+## 0.2.0 - 2026-08-17
 
 The first tagged release.  Everything up to this point — the picoboot state
 machine, the tinyusb vendor device replacement, the default RP2350 command

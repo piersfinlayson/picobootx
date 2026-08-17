@@ -47,7 +47,7 @@ The heart of picobootx should be USB stack agnostic, though and easy to port to 
 ## Testing
 
 [test](test) holds two conformance suites, and a bridge that puts picobootx on a
-real USB bus so real picotool drives it.  All three compile picobootx for the
+real USB bus so real host tools drive it.  All three compile picobootx for the
 machine you are on, with `PICOBOOTX_HOST_TEST` defined so the RP2350-specific
 parts of [picobootx_impl.c](src/picobootx_impl.c) resolve to a model of the chip
 rather than to hardware.  The code under test is the shipped code.  The two
@@ -93,6 +93,22 @@ the erase happened, erases a range and finds ones, and blows and reads an OTP
 row.  Linux only, since `vhci-hcd` is a Linux driver, and the run
 needs root — loading the module and handing it a socket are both privileged.
 Building it does not, so only the run is handed to `sudo`.
+
+[rust](rust) drives the same device with
+[picoboot-rs](https://github.com/piersfinlayson/picoboot), the other
+implementation of the PICOBOOT protocol:
+
+```bash
+make test-rust
+```
+
+Its checks mirror picotool's, so both host tools are held to the same claims.
+The point is not the language — picotool reaches the kernel through libusb and
+picoboot-rs through nusb, so a claim the two agree on is a claim about picobootx
+rather than about either host.  It also reaches one thing picotool cannot: a
+write asking an OTP bit to go back, which picotool refuses before it leaves the
+host.  This is the only part of picobootx that needs a Rust toolchain, and
+nothing else refers to it.
 
 `make` on its own builds both suites without running them.  `make test-core` and
 `make test-usb` run one.  Inside [test](test), `make SUITE=usb` selects the

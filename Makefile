@@ -15,14 +15,15 @@
 # `make test SANITIZE=1` all do what the same invocation does in test.
 
 TEST_DIR    := test
+RUST_DIR    := rust
 EXAMPLE_DIR := examples/tinyusb
 
 # The example clones this alongside itself.  Its presence is what says the
 # example has been built here — see clean-example.
 EXAMPLE_TINYUSB_DIR := tinyusb-repo
 
-.PHONY: all test test-core test-usb test-usbip build cov cov-html clean \
-        clean-test clean-example example
+.PHONY: all test test-core test-usb test-usbip test-rust build cov cov-html \
+        clean clean-test clean-example clean-rust example
 
 all: build
 
@@ -49,6 +50,21 @@ test-usb:
 test-usbip:
 	@$(MAKE) -C $(TEST_DIR) usbip
 
+# The same device, driven by picoboot-rs instead of picotool — a second
+# implementation of the protocol, over a second USB stack.  Needs a Rust
+# toolchain, which nothing else here does, so it is its own target and is not
+# reached by anything above.
+test-rust:
+	@command -v cargo >/dev/null || \
+	    (echo "cargo is not on PATH, and test-rust is the only target needing it" \
+	     && exit 1)
+	@$(MAKE) -C $(TEST_DIR) usbip-build
+	@# Everything else this depends on is held still by Cargo.lock, so a run
+	@# reports what picoboot-rs did and not what some other crate released.
+	@# picoboot-rs itself is taken fresh, which is the whole point of it.
+	cd $(RUST_DIR) && cargo update -p picoboot && cargo build --release
+	sudo $(RUST_DIR)/interop.sh $(if $(filter 1,$(TRACE)),-v)
+
 # Run both under coverage, merged.  cov gates, cov-html writes a browsable
 # report.
 cov:
@@ -59,10 +75,19 @@ cov-html:
 
 # Both build outputs.  Neither clean removes a cloned repository — the example's
 # distclean does that, from its own directory.
-clean: clean-test clean-example
+clean: clean-test clean-rust clean-example
 
 clean-test:
 	@$(MAKE) -C $(TEST_DIR) clean
+
+# Nothing else here needs cargo, so a tree that never ran test-rust has nothing
+# to clean and must not be made to install a toolchain to find that out.
+clean-rust:
+	@if [ -d $(RUST_DIR)/target ]; then \
+	    cd $(RUST_DIR) && cargo clean; \
+	else \
+	    echo "$(RUST_DIR) has not been built, nothing to clean"; \
+	fi
 
 # The example's Makefile includes tinyusb.mk and pico-sdkless's common.mk, which
 # arrive with the repositories it clones as it is parsed.  So it cannot be

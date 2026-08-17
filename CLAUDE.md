@@ -63,8 +63,10 @@ shipped hardware.
   produces a binary for a device.  Its `tinyusb-repo` and `pico-sdkless-repo`
   are cloned, not committed.
 - `test/` — the two conformance suites, and `test/usbip/`, the bridge that puts
-  the device on a real USB bus for picotool.  `test/tinyusb` is cloned at a
+  the device on a real USB bus for a host tool.  `test/tinyusb` is cloned at a
   pinned commit, not committed.
+- `rust/` — the picoboot-rs interop driver.  The only cargo in the tree, reached
+  only by `make test-rust`, and tracking picoboot-rs rather than pinning it.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
 
@@ -107,6 +109,7 @@ From the repository root, which delegates to `test`:
     make test-core          # the core suite alone
     make test-usb           # the usb suite alone
     make test-usbip         # the usbip bridge, driven by picotool
+    make test-rust          # the same bridge, driven by picoboot-rs
     make test LOGGING=1     # with picobootx's own logging
     make test SANITIZE=1    # under the address and undefined behaviour sanitizers
     make cov                # coverage of the library, listed per file and gated
@@ -142,8 +145,12 @@ drops the model of a host, and hands the bus to the kernel's `vhci-hcd` instead,
 so real picotool drives picobootx over a real USB bus.  The bus is a loopback
 socket the program hands to the controller, which is why it attaches itself
 rather than calling `usbip(8)`: the kernel looks the descriptor up in the writing
-process's own table.  `test/usbip/picotool.sh` runs the checks and is where they
-live.  Linux only, and the run needs root.  It is not part of `make test`.
+process's own table.  `test/usbip/picotool.sh` runs the picotool checks, and
+`rust/` is a cargo package driving the same device with picoboot-rs — a second
+implementation of the protocol over a second USB stack, nusb rather than libusb.
+`test/usbip/bridge.sh` is what both runners source to put the device on the bus.
+Linux only, and the runs need root.  Neither is part of `make test`, and `rust/`
+is the only thing in the tree that needs cargo.
 
 Both suites share the runner in `test/src/pbt_main.c` and the recording and
 assertions in `test/src/pbt_core.c`, and each names its own scenarios —
@@ -215,7 +222,8 @@ device does not have.
 `.github/workflows/build.yml` cross-builds the tinyusb example for Arm, runs the
 suite on Linux under gcc and clang, on Linux under the sanitizers and with
 `LOGGING=1`, and on macOS, measures the library's coverage on Linux, and drives
-the usbip bridge with picotool built from a pinned release tag.  The coverage job
+the usbip bridge with picotool built from a pinned release tag and with
+picoboot-rs.  The coverage job
 gates at 100% — see Coverage above.  All of it runs on GitHub-hosted runners and
 needs no hardware.  Everything but the picotool job needs no privileges, no USB
 and no kernel modules either — that one loads `vhci-hcd` and runs as root.

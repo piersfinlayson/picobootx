@@ -136,3 +136,28 @@ jobs:
 
       - name: Drive it with picotool
         run: make test-usbip
+
+  # The same device, driven by picoboot-rs instead of picotool.  It reaches the
+  # kernel through nusb rather than libusb, so this is a second USB stack as well
+  # as a second implementation of the protocol, and it is the only job in this
+  # workflow that needs a Rust toolchain.
+  #
+  # picoboot-rs is tracked rather than pinned.  A break between it and picobootx
+  # is what this exists to report, and a pin would hide one until somebody moved
+  # it.
+  picoboot-rs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load vhci-hcd
+        run: |
+          sudo modprobe vhci-hcd || {
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe vhci-hcd
+          }
+          test -d /sys/devices/platform/vhci_hcd.0
+
+      - name: Drive it with picoboot-rs
+        run: make test-rust

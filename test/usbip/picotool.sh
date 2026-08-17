@@ -24,12 +24,9 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 test_dir=$(dirname "$here")
 
-bridge=$test_dir/build/usbip/picobootx-usbip
-work=$(mktemp -d)
-log=$work/bridge.log
-
-verbose=
-[ "${1:-}" = "-v" ] && verbose=-v
+# Putting the device on the bus, and taking it off again.  It sets $work and
+# $bridge_log, and tears down whichever way this exits.
+. "$test_dir/usbip/bridge.sh"
 
 passed=0
 failed=0
@@ -44,66 +41,11 @@ fail() {
     echo "  FAIL  $1"
 }
 
-# Everything below runs with a device on the bus, so the bridge is stopped
-# whichever way this exits — including the failures that stop it early.
-bridge_pid=
-cleanup() {
-    if [ -n "$bridge_pid" ]; then
-        kill "$bridge_pid" 2>/dev/null
-        wait "$bridge_pid" 2>/dev/null
-    fi
-    rm -rf "$work"
-}
-trap cleanup EXIT INT TERM
-
-die() {
-    echo "picotool.sh: $*" >&2
-    exit 2
-}
-
-# ---------------------------------------------------------------------------
-# What this needs before it can start
-# ---------------------------------------------------------------------------
-
-[ "$(uname -s)" = "Linux" ] || die "Linux only — vhci-hcd is a Linux driver"
-[ "$(id -u)" = "0" ] || die "needs root, for vhci-hcd and the socket it is given"
-command -v picotool >/dev/null || die "picotool is not on PATH"
-[ -x "$bridge" ] || die "$bridge has not been built: make usbip-build"
-
-modprobe vhci-hcd || die "cannot load vhci-hcd"
+command -v picotool >/dev/null || bridge_die "picotool is not on PATH"
 
 echo "picobootx against picotool: $(picotool version 2>/dev/null | head -1)"
 
-# ---------------------------------------------------------------------------
-# The device
-# ---------------------------------------------------------------------------
-
-"$bridge" $verbose >"$log" 2>&1 &
-bridge_pid=$!
-
-# The bridge says so once the controller has taken the bus.
-waited=0
-while ! grep -q "vhci-hcd port" "$log" 2>/dev/null; do
-    kill -0 "$bridge_pid" 2>/dev/null || {
-        cat "$log" >&2
-        die "the bridge stopped before it reached the bus"
-    }
-    waited=$((waited + 1))
-    [ "$waited" -lt 50 ] || die "the bridge never reached the bus"
-    sleep 0.1
-done
-
-# Enumeration is the kernel's, and happens after the bus is taken.  Waiting for
-# picotool to see the device is waiting for the whole of it to have worked.
-waited=0
-until picotool info >/dev/null 2>&1; do
-    waited=$((waited + 1))
-    [ "$waited" -lt 100 ] || {
-        cat "$log" >&2
-        die "picotool never saw the device"
-    }
-    sleep 0.1
-done
+bridge_start "$@"
 
 echo
 echo "picotool"

@@ -96,17 +96,36 @@ void pbt_bootrom_withhold(char a, char b) {
 // else, and a device whose ROM does not carry them is one it will not issue an
 // RP2350 command to, however the descriptors identify it.
 //
-// The table is present and empty.  Everything picobootx reaches in the bootrom
-// it reaches through the lookup seam rather than by walking this, so what the
-// table needs to be is terminated — a zero tag, which is what ends the walk.
+// The table carries the entries a host asks for and stops.  It is not a part's
+// table: picobootx reaches every bootrom routine through the lookup seam rather
+// than by walking this, so nothing in the library depends on what is here, and a
+// faithful one would be work in exchange for nothing.  An entry is a tag, a
+// flags word, and one halfword per flag set, and a zero tag ends the walk.
+//
+// One entry earns its place.  picotool reads the bootrom's revision for
+// `info -a`, and a walk that found nothing fails the whole command.
 // ---------------------------------------------------------------------------
 
 #define PBT_BOOTROM_MAGIC_OFFS  0x10u
 #define PBT_BOOTROM_TABLE_OFFS  0x18u
+#define PBT_BOOTROM_GITREV_OFFS 0x20u
 
 // 'M', 'u', then the family — 2 for RP2350 — and the revision, which a host
 // masks off.
 static const uint8_t k_bootrom_magic[4] = { 'M', 'u', 0x02u, 0x03u };
+
+// The entry says its value is data rather than a routine to call, which is what
+// picotool asks for when it looks the revision up.
+#define PBT_ROM_TABLE_FLAG_DATA 0x0040u
+
+// What the modelled bootrom answers when asked which revision it is.  Not any
+// released part's, so a host reporting it is plainly reporting this model.
+#define PBT_BOOTROM_GITREV 0xB007C0DEu
+
+static void pbt_rom_put16(uint32_t offs, uint16_t value) {
+    s_rom[offs]     = (uint8_t)(value & 0xFFu);
+    s_rom[offs + 1] = (uint8_t)(value >> 8);
+}
 
 // The divisor the model reports unless a scenario chooses another.  Non-zero
 // and not one of the values a mistake would produce by accident, so a scenario
@@ -173,9 +192,20 @@ void pbt_device_reset(void) {
     }
     memcpy(s_rom + PBT_BOOTROM_MAGIC_OFFS, k_bootrom_magic,
            sizeof(k_bootrom_magic));
-    s_rom[PBT_BOOTROM_MAGIC_OFFS + 4] = (uint8_t)(PBT_BOOTROM_TABLE_OFFS & 0xFFu);
-    s_rom[PBT_BOOTROM_MAGIC_OFFS + 5] = (uint8_t)(PBT_BOOTROM_TABLE_OFFS >> 8);
-    memset(s_rom + PBT_BOOTROM_TABLE_OFFS, 0, 4);
+    pbt_rom_put16(PBT_BOOTROM_MAGIC_OFFS + 4, PBT_BOOTROM_TABLE_OFFS);
+
+    // The revision entry, then the zero tag that ends the walk.  A tag is the
+    // two characters that name it, low byte first, as a bootrom code is
+    // everywhere else.
+    pbt_rom_put16(PBT_BOOTROM_TABLE_OFFS + 0, (uint16_t)PBT_ROM_CODE('G', 'R'));
+    pbt_rom_put16(PBT_BOOTROM_TABLE_OFFS + 2, PBT_ROM_TABLE_FLAG_DATA);
+    pbt_rom_put16(PBT_BOOTROM_TABLE_OFFS + 4, PBT_BOOTROM_GITREV_OFFS);
+    pbt_rom_put16(PBT_BOOTROM_TABLE_OFFS + 6, 0);
+
+    pbt_rom_put16(PBT_BOOTROM_GITREV_OFFS + 0,
+                  (uint16_t)(PBT_BOOTROM_GITREV & 0xFFFFu));
+    pbt_rom_put16(PBT_BOOTROM_GITREV_OFFS + 2,
+                  (uint16_t)(PBT_BOOTROM_GITREV >> 16));
 
     memset(s_otp, 0, sizeof(s_otp));
 

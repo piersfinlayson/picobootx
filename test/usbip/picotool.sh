@@ -122,6 +122,20 @@ else
     fail "picotool info reads the device"
 fi
 
+# info -a goes further and walks the bootrom's function table for the revision.
+# Both values named here come off the modelled ROM and are nowhere else: the part
+# it says it is comes from the magic at 0x10, and the revision from an entry the
+# walk has to find.  A table that ended before that entry fails the whole
+# command, which is what an empty one did.
+if picotool info -a >"$work/info_all.txt" 2>&1 &&
+    grep -q "type: *RP2350" "$work/info_all.txt" &&
+    grep -qi "rom gitrev: *0xb007c0de" "$work/info_all.txt"; then
+    ok "picotool info -a walks the bootrom table and reports what is in it"
+else
+    cat "$work/info_all.txt"
+    fail "picotool info -a walks the bootrom table and reports what is in it"
+fi
+
 # ---------------------------------------------------------------------------
 # Flash
 # ---------------------------------------------------------------------------

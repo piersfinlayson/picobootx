@@ -87,9 +87,10 @@ Released picotool, unmodified:
 make test-usbip
 ```
 
-It loads a program and reads it back byte for byte, loads a second over the
-first to show the erase happened, erases a range and finds ones, and blows and
-reads an OTP row.  Linux only, since `vhci-hcd` is a Linux driver, and the run
+It reads the device, walks the modelled bootrom's table for `info -a`, loads a
+program and reads it back byte for byte, loads a second over the first to show
+the erase happened, erases a range and finds ones, and blows and reads an OTP
+row.  Linux only, since `vhci-hcd` is a Linux driver, and the run
 needs root — loading the module and handing it a socket are both privileged.
 Building it does not, so only the run is handed to `sudo`.
 

@@ -15,7 +15,10 @@
 # There is one of these because there is more than one host tool driving the same
 # device, and only one way to put it there.
 
-bridge=$test_dir/build/usbip/picobootx-usbip
+# The makefile names the binary it built, so a configuration whose bridge lands
+# somewhere else cannot be driven by a stale one left on disk.  Falling back to
+# what usbip-build recorded lets the script be run by hand.
+bridge=${PBT_BRIDGE:-$(cat "$test_dir/build/usbip-bridge-path" 2>/dev/null)}
 work=$(mktemp -d)
 bridge_log=$work/bridge.log
 

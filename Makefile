@@ -16,6 +16,7 @@
 
 TEST_DIR    := test
 RUST_DIR    := rust
+INTEROP_DIR := $(RUST_DIR)/interop
 EXAMPLE_DIR := examples/tinyusb
 
 # The example clones this alongside itself.  Its presence is what says the
@@ -51,19 +52,17 @@ test-usbip:
 	@$(MAKE) -C $(TEST_DIR) usbip
 
 # The same device, driven by picoboot-rs instead of picotool — a second
-# implementation of the protocol, over a second USB stack.  Needs a Rust
-# toolchain, which nothing else here does, so it is its own target and is not
-# reached by anything above.
+# implementation of the protocol, over a second USB stack.  Needs Linux, root
+# and a network, so it is its own target and is not reached by anything above.
 test-rust:
 	@command -v cargo >/dev/null || \
-	    (echo "cargo is not on PATH, and test-rust is the only target needing it" \
-	     && exit 1)
+	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
 	@$(MAKE) -C $(TEST_DIR) usbip-build
 	@# Everything else this depends on is held still by Cargo.lock, so a run
 	@# reports what picoboot-rs did and not what some other crate released.
 	@# picoboot-rs itself is taken fresh, which is the whole point of it.
-	cd $(RUST_DIR) && cargo update -p picoboot && cargo build --release
-	sudo $(RUST_DIR)/interop.sh $(if $(filter 1,$(TRACE)),-v)
+	cd $(INTEROP_DIR) && cargo update -p picoboot && cargo build --release
+	sudo $(INTEROP_DIR)/interop.sh $(if $(filter 1,$(TRACE)),-v)
 
 # Run both under coverage, merged.  cov gates, cov-html writes a browsable
 # report.
@@ -80,14 +79,17 @@ clean: clean-test clean-rust clean-example
 clean-test:
 	@$(MAKE) -C $(TEST_DIR) clean
 
-# Nothing else here needs cargo, so a tree that never ran test-rust has nothing
-# to clean and must not be made to install a toolchain to find that out.
+# A tree that has built neither the library nor the interop driver has nothing
+# to clean, and must not be made to install a toolchain to find that out.  The
+# two are separate workspaces, so each is asked separately.
 clean-rust:
-	@if [ -d $(RUST_DIR)/target ]; then \
-	    cd $(RUST_DIR) && cargo clean; \
-	else \
-	    echo "$(RUST_DIR) has not been built, nothing to clean"; \
-	fi
+	@for d in $(RUST_DIR) $(INTEROP_DIR); do \
+	    if [ -d $$d/target ]; then \
+	        (cd $$d && cargo clean); \
+	    else \
+	        echo "$$d has not been built, nothing to clean"; \
+	    fi; \
+	done
 
 # The example's Makefile includes tinyusb.mk and pico-sdkless's common.mk, which
 # arrive with the repositories it clones as it is parsed.  So it cannot be

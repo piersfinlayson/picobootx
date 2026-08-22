@@ -23,6 +23,7 @@
 #define PICOBOOTX_TEST_PBT_LIB_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "picobootx.h"
 #include "picobootx_private.h"
@@ -42,5 +43,34 @@ pb_state_t pbt_lib_state_of(const pb_state_block_t *state);
 // The library's own name for a state, so a failure message and a log line say
 // the same word.  NULL for a value that is not a state.
 const char *pbt_lib_state_name(pb_state_t state);
+
+// What the library's own wire types measure, in the order pbt_layout_t names.
+//
+// The scenarios read the layouts in picobootx.h, which are compiled into the
+// test binary whichever library is linked, so they say nothing about a library
+// that declares its own.  This is where a library states what it actually
+// built, and the suite checks that against the header.
+//
+// Writes min(len, PBT_LAYOUT_COUNT) values and returns how many there are.
+typedef enum {
+    PBT_LAYOUT_STATUS_SIZE,
+    PBT_LAYOUT_CMD_SIZE,
+    PBT_LAYOUT_CMD_ALIGN,
+    PBT_LAYOUT_CMD_OFF_MAGIC,
+    PBT_LAYOUT_CMD_OFF_TOKEN,
+    PBT_LAYOUT_CMD_OFF_CMD_ID,
+    PBT_LAYOUT_CMD_OFF_CMD_SIZE,
+    PBT_LAYOUT_CMD_OFF_TRANSFER_LEN,
+    PBT_LAYOUT_CMD_OFF_ARGS,
+    PBT_LAYOUT_STATUS_PACKET_SIZE,
+    PBT_LAYOUT_OPS_SIZE,
+    PBT_LAYOUT_OPS_OFF_OTP_WRITE,
+    PBT_LAYOUT_CUSTOM_OPS_SIZE,
+    PBT_LAYOUT_CUSTOM_OPS_OFF_FILL,
+    PBT_LAYOUT_CTRL_REQUEST_SIZE,
+    PBT_LAYOUT_COUNT
+} pbt_layout_t;
+
+uint32_t pbt_lib_layout(uint32_t *out, uint32_t len);
 
 #endif // PICOBOOTX_TEST_PBT_LIB_H

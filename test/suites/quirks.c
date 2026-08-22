@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "pbt.h"
+#include "pbt_lib.h"
 
 static uint32_t payload_word(uint32_t index) {
     uint32_t word = 0;
@@ -269,6 +270,48 @@ static void scenario_the_serial_without_a_bootrom_routine(void) {
     PBT_CHECK_EQ(serial[0], 0u);
 }
 
+// ---------------------------------------------------------------------------
+// The library's own types
+// ---------------------------------------------------------------------------
+
+static void scenario_the_library_built_the_wire_it_was_given(void) {
+    // Everything above measures picobootx.h, which is compiled into this binary
+    // whichever library is linked, so it says nothing about a library that
+    // declares its own copies of these types.  This asks the library what it
+    // built, and holds it to the header.
+    //
+    // The C library is built from that header and so agrees by construction.
+    // For any other, this is the only thing standing between a status of the
+    // wrong width and every operation reading a different byte — a
+    // disagreement no linker can see.
+    uint32_t got[PBT_LAYOUT_COUNT];
+    uint32_t count = pbt_lib_layout(got, PBT_LAYOUT_COUNT);
+    PBT_REQUIRE(count == PBT_LAYOUT_COUNT);
+
+    PBT_CHECK_EQ(got[PBT_LAYOUT_STATUS_SIZE], sizeof(pb_status_t));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_SIZE], sizeof(picoboot_cmd_t));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_ALIGN], _Alignof(picoboot_cmd_t));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_OFF_MAGIC], offsetof(picoboot_cmd_t, magic));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_OFF_TOKEN], offsetof(picoboot_cmd_t, token));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_OFF_CMD_ID], offsetof(picoboot_cmd_t, cmd_id));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_OFF_CMD_SIZE], offsetof(picoboot_cmd_t, cmd_size));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_OFF_TRANSFER_LEN],
+                 offsetof(picoboot_cmd_t, transfer_len));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CMD_OFF_ARGS], offsetof(picoboot_cmd_t, args));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_STATUS_PACKET_SIZE], sizeof(picoboot_status_t));
+
+    // The two callback tables and the setup packet.  A member inserted into
+    // the middle of one of these still compiles on both sides and reads a
+    // different function pointer at run time, which is the quietest way this
+    // could go wrong.
+    PBT_CHECK_EQ(got[PBT_LAYOUT_OPS_SIZE], sizeof(picoboot_ops_t));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_OPS_OFF_OTP_WRITE], offsetof(picoboot_ops_t, otp_write));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CUSTOM_OPS_SIZE], sizeof(picoboot_custom_ops_t));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CUSTOM_OPS_OFF_FILL],
+                 offsetof(picoboot_custom_ops_t, fill));
+    PBT_CHECK_EQ(got[PBT_LAYOUT_CTRL_REQUEST_SIZE], sizeof(tusb_control_request_t));
+}
+
 static const pbt_scenario_t k_scenarios[] = {
     { "GET_INFO accepts the 256-byte transfer picotool asks for",
       scenario_get_info_accepts_a_256_byte_transfer },
@@ -292,6 +335,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_the_serial_refuses_a_buffer_that_is_too_small },
     { "the serial without a bootrom routine",
       scenario_the_serial_without_a_bootrom_routine },
+    { "the library built the wire it was given",
+      scenario_the_library_built_the_wire_it_was_given },
 };
 
 PBT_SUITE(pbt_suite_quirks, "quirks", k_scenarios);

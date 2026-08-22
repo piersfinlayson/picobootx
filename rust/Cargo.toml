@@ -2,21 +2,39 @@
 #
 # MIT License
 
-[package]
-name = "picobootx-interop"
-version = "0.1.0"
+# picobootx's Rust: the library, the shim the conformance suite links against,
+# and the interop driver that puts a real host on the other end of a USB bus.
+
+[workspace]
+resolver = "3"
+members = [
+    "picobootx",
+    "picobootx-ffi",
+]
+
+# interop is a workspace of its own.  It takes picoboot-rs from git, and the
+# archive the conformance suite links has no business needing the network to
+# build.
+exclude = ["interop"]
+
+[workspace.package]
 edition = "2024"
 license = "MIT"
-publish = false
+authors = ["Piers Finlayson <piers@piers.rocks>"]
+repository = "https://github.com/piersfinlayson/picobootx"
 
-[[bin]]
-name = "picobootx-interop"
-path = "src/main.rs"
+[workspace.dependencies]
+picobootx = { path = "picobootx" }
 
-[dependencies]
-# picoboot-rs, tracking its main branch rather than pinned.  Piers maintains both
-# this and picobootx, and a break between them is the thing this exists to
-# report — a pin would hide it until somebody moved the pin.  tinyusb is pinned
-# for the opposite reason: nobody here can fix it if it moves.
-picoboot = { git = "https://github.com/piersfinlayson/picoboot.git", branch = "main" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The shim is linked into a C test binary, which has no unwinder.
+#
+# Arithmetic is checked even in release, because every wrap this library
+# intends is written as a wrapping_ call, so anything left is a defect and the
+# conformance suite builds this profile.  A downstream crate's own profile
+# governs its build, not this one.
+[profile.release]
+panic = "abort"
+overflow-checks = true
+
+[profile.dev]
+panic = "abort"

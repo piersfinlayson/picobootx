@@ -16,6 +16,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "tusb.h"
 #include "usbt.h"
@@ -48,6 +49,10 @@ pb_state_block_t *usbt_state(void) {
                             "alignment for the state block\n", size, align);
             abort();
         }
+        // Zeroed, so a read before picoboot_init has a defined answer rather
+        // than whatever the allocator last held.  Every library here starts in
+        // the state numbered zero.
+        memset(s_state, 0, size);
     }
     return s_state;
 }

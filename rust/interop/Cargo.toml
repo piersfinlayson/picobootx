@@ -1,0 +1,27 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# Its own workspace: see the exclude in ../Cargo.toml.
+[workspace]
+
+[package]
+name = "picobootx-interop"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Piers Finlayson <piers@piers.rocks>"]
+repository = "https://github.com/piersfinlayson/picobootx"
+publish = false
+
+[[bin]]
+name = "picobootx-interop"
+path = "src/main.rs"
+
+[dependencies]
+# picoboot-rs, tracking its main branch rather than pinned.  Piers maintains both
+# this and picobootx, and a break between them is the thing this exists to
+# report — a pin would hide it until somebody moved the pin.  tinyusb is pinned
+# for the opposite reason: nobody here can fix it if it moves.
+picoboot = { git = "https://github.com/piersfinlayson/picoboot.git", branch = "main" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

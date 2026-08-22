@@ -65,8 +65,12 @@ shipped hardware.
 - `test/` — the two conformance suites, and `test/usbip/`, the bridge that puts
   the device on a real USB bus for a host tool.  `test/tinyusb` is cloned at a
   pinned commit, not committed.
-- `rust/` — the picoboot-rs interop driver.  The only cargo in the tree, reached
-  only by `make test-rust`, and tracking picoboot-rs rather than pinning it.
+- `rust/` — the Rust picobootx.  `picobootx` is the library, `picobootx-ffi` the
+  C ABI `picobootx.h` describes, which is how the conformance suite drives it.
+  `rust/interop` is a workspace of its own holding the picoboot-rs interop
+  driver, which tracks picoboot-rs rather than pinning it and is reached only by
+  `make test-rust`.  It is separate so the archive the suite links does not need
+  the network to build.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
 
@@ -112,12 +116,21 @@ From the repository root, which delegates to `test`:
     make test-rust          # the same bridge, driven by picoboot-rs
     make test LOGGING=1     # with picobootx's own logging
     make test SANITIZE=1    # under the address and undefined behaviour sanitizers
+    make test LIB=rust      # against the Rust library rather than the C one
     make cov                # coverage of the library, listed per file and gated
     make cov-html           # the same, as a browsable report
 
 The same targets work from `test` itself, where `run` stands in for `test` and
 `SUITE=usb` selects the second suite.  `FILTER=` runs the scenarios whose suite
 name contains a string.  A bare `make` builds without running in both places.
+
+`LIB=` chooses which implementation of picobootx is under test.  `LIB=c` is the
+C in `src/`.  `LIB=rust` takes the protocol from the Rust library and links the
+archive `rust/picobootx-ffi` builds, keeping the default RP2350 implementations
+in `src/picobootx_impl.c` and the tinyusb vendor driver in
+`src/picobootx_vendor.c`.  Both pass every scenario, and the harness reaches the
+library only through `test/src/pbt_lib.h`, which each implementation answers in
+its own `pbt_lib_<lib>.c`.
 
 There are two suites, and which one a scenario belongs in is decided by what it
 needs to reach.  There is also a third build, `usbip`, which is a program rather
@@ -146,11 +159,12 @@ so real picotool drives picobootx over a real USB bus.  The bus is a loopback
 socket the program hands to the controller, which is why it attaches itself
 rather than calling `usbip(8)`: the kernel looks the descriptor up in the writing
 process's own table.  `test/usbip/picotool.sh` runs the picotool checks, and
-`rust/` is a cargo package driving the same device with picoboot-rs — a second
-implementation of the protocol over a second USB stack, nusb rather than libusb.
-`test/usbip/bridge.sh` is what both runners source to put the device on the bus.
-Linux only, and the runs need root.  Neither is part of `make test`, and `rust/`
-is the only thing in the tree that needs cargo.
+`rust/interop` is a cargo package driving the same device with picoboot-rs — a
+second implementation of the protocol over a second USB stack, nusb rather than
+libusb.  `test/usbip/bridge.sh` is what both runners source to put the device on
+the bus, and the makefile hands it the binary it built rather than the script
+assembling a path, so a configuration cannot be driven by a stale bridge.
+Linux only, and the runs need root.  Neither is part of `make test`.
 
 Both suites share the runner in `test/src/pbt_main.c` and the recording and
 assertions in `test/src/pbt_core.c`, and each names its own scenarios —

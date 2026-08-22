@@ -18,7 +18,7 @@
 #   make FILTER=zlp  run only the suites whose name contains this
 #   make LOGGING=1   build with picobootx's own logging turned on
 #   make SANITIZE=1  build with the address and undefined behaviour sanitizers
-#   make LIB=c       the implementation of picobootx under test
+#   make LIB=c|rust  which implementation of picobootx is under test
 #   make cov         run under coverage, list what the library reached, and
 #                    fail if it is not all of it
 #   make cov-html    the same, as a browsable report
@@ -62,8 +62,8 @@ SUITE ?= core
 # Names the file answering src/pbt_lib.h, which is where the harness asks the
 # few things picobootx.h does not tell it about the library in front of it.
 LIB ?= c
-ifneq ($(LIB),c)
-$(error LIB=$(LIB) is not a library this makefile knows.  LIB=c selects the C implementation in ../src)
+ifeq ($(filter $(LIB),c rust),)
+$(error LIB=$(LIB) is not a library this makefile knows.  LIB=c selects the C implementation in ../src, LIB=rust the Rust one in ../rust)
 endif
 
 # Each configuration keeps its own object directory.  They differ only in
@@ -79,10 +79,25 @@ endif
 ifeq ($(COVERAGE),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-coverage
 endif
+ifeq ($(LIB),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-rust
+endif
 
 BUILD   ?= build/$(BUILD_VARIANT)
 
 ROOT    := ..
+
+# Where the usbip bridge this configuration builds ends up.  The scripts that
+# put it on the bus are handed this rather than assembling it themselves, so a
+# configuration that lands somewhere else cannot be driven by a stale one.
+BRIDGE  := build/usbip$(if $(filter rust,$(LIB)),-rust)/picobootx-usbip
+
+# The Rust library is an archive cargo builds.  It carries the protocol only:
+# the default RP2350 implementations beside it are still the C ones.
+ifeq ($(LIB),rust)
+RUST_DIR := $(ROOT)/rust
+RUST_A   := $(RUST_DIR)/target/release/libpicobootx_ffi.a
+endif
 
 # ---------------------------------------------------------------------------
 # tinyusb, for the usb suite
@@ -172,7 +187,7 @@ ifneq ($(filter usb usbip,$(SUITE)),)
 # stands in for class/vendor/vendor_device.c, which is why that file is not
 # among the tinyusb sources below.
 LIB_SRC := \
-	$(ROOT)/src/picobootx.c \
+	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c) \
 	$(ROOT)/src/picobootx_impl.c \
 	$(ROOT)/src/picobootx_vendor.c
 
@@ -236,7 +251,7 @@ else
 # tinyusb vendor driver, and the harness supplies its own implementation of the
 # picoboot_vendor_* API it provides.  The usb suite covers it.
 LIB_SRC := \
-	$(ROOT)/src/picobootx.c \
+	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c) \
 	$(ROOT)/src/picobootx_impl.c
 
 HARNESS_SRC := \
@@ -319,6 +334,9 @@ ifeq ($(SANITIZE),1)
 COV_SUFFIX := $(COV_SUFFIX)-sanitize
 endif
 COV_SUFFIX := $(COV_SUFFIX)-coverage
+ifeq ($(LIB),rust)
+COV_SUFFIX := $(COV_SUFFIX)-rust
+endif
 
 COV_CORE := build/core$(COV_SUFFIX)
 COV_USB  := build/usb$(COV_SUFFIX)
@@ -335,7 +353,7 @@ COV_HTML := $(COV_DIR)/html
 # when invoked from the core suite would pass while measuring two files out of
 # three.
 COV_LIB_SRC := \
-	$(ROOT)/src/picobootx.c \
+	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c) \
 	$(ROOT)/src/picobootx_impl.c \
 	$(ROOT)/src/picobootx_vendor.c
 
@@ -367,14 +385,22 @@ usb-build:
 # a socket are both privileged — so only the run is handed to sudo, and the
 # objects stay yours.
 usbip: usbip-build
-	sudo ./usbip/picotool.sh $(if $(filter 1,$(TRACE)),-v)
+	sudo PBT_BRIDGE=$(abspath $(BRIDGE)) ./usbip/picotool.sh \
+	    $(if $(filter 1,$(TRACE)),-v)
 
 usbip-build:
 	@$(MAKE) SUITE=usbip build
+	@echo $(abspath $(BRIDGE)) > build/usbip-bridge-path
 
-$(TARGET): $(OBJ) $(TU_OBJ)
+$(TARGET): $(OBJ) $(TU_OBJ) $(RUST_A)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $^
+
+ifeq ($(LIB),rust)
+.PHONY: $(RUST_A)
+$(RUST_A):
+	@cd $(RUST_DIR) && cargo build --release -p picobootx-ffi
+endif
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)

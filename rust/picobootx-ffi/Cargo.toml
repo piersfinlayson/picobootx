@@ -1,0 +1,21 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# The C ABI picobootx.h describes, in front of the Rust library, so the
+# conformance suite in test/ can drive either implementation.
+
+[package]
+name = "picobootx-ffi"
+version = "0.2.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+picobootx = { workspace = true }

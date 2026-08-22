@@ -29,6 +29,10 @@ jobs:
   # The logging entry builds picobootx's own log statements in.  They are
   # variadic calls the ordinary build compiles away entirely, so nothing else
   # here would notice a format string that no longer matches its arguments.
+  #
+  # Both implementations are run.  LIB=c is the C in src, LIB=rust the Rust
+  # library in rust, and the scenarios are the same either way — see the
+  # conformance suite section of CLAUDE.md.
   test:
     strategy:
       fail-fast: false
@@ -36,36 +40,89 @@ jobs:
         include:
           - os: ubuntu-latest
             cc: gcc
+            lib: c
             sanitize: '0'
             logging: '0'
           - os: ubuntu-latest
             cc: clang
+            lib: c
             sanitize: '0'
             logging: '0'
           - os: ubuntu-latest
             cc: clang
+            lib: c
             sanitize: '1'
             logging: '0'
           - os: ubuntu-latest
             cc: clang
+            lib: c
             sanitize: '0'
             logging: '1'
           - os: macos-latest
             cc: clang
+            lib: c
+            sanitize: '0'
+            logging: '0'
+          - os: ubuntu-latest
+            cc: gcc
+            lib: rust
+            sanitize: '0'
+            logging: '0'
+          - os: ubuntu-latest
+            cc: clang
+            lib: rust
+            sanitize: '1'
+            logging: '0'
+          - os: ubuntu-latest
+            cc: clang
+            lib: rust
+            sanitize: '0'
+            logging: '1'
+          - os: macos-latest
+            cc: clang
+            lib: rust
             sanitize: '0'
             logging: '0'
     runs-on: ${{ matrix.os }}
     name: >-
-      test (${{ matrix.os }}, ${{ matrix.cc }},
+      test (${{ matrix.os }}, ${{ matrix.cc }}, ${{ matrix.lib }},
       sanitize ${{ matrix.sanitize }}, logging ${{ matrix.logging }})
     steps:
       - uses: actions/checkout@v4
+
+      # Pinned to stable rather than taken from the image, so a runner update
+      # cannot change which compiler built the library under test.
+      - name: Install the Rust toolchain
+        if: matrix.lib == 'rust'
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build and run the conformance suites
         env:
           CC: ${{ matrix.cc }}
         run: |
-          make test SANITIZE=${{ matrix.sanitize }} LOGGING=${{ matrix.logging }}
+          make test LIB=${{ matrix.lib }} \
+              SANITIZE=${{ matrix.sanitize }} LOGGING=${{ matrix.logging }}
+
+  # The Rust library on its own terms.  The suite above says it behaves
+  # correctly, and says nothing about whether it is well formed Rust.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: |
+          cd rust && cargo fmt --all -- --check
+          cd interop && cargo fmt -- --check
+
+      - name: Lint
+        run: |
+          cd rust && cargo clippy --workspace --all-targets --release -- -D warnings
+          cd interop && cargo clippy --all-targets --release -- -D warnings
 
   # How much of the library the suites reach, merged.  The number is printed and
   # then gated: every line and function of picobootx.c, picobootx_impl.c and
@@ -139,8 +196,7 @@ jobs:
 
   # The same device, driven by picoboot-rs instead of picotool.  It reaches the
   # kernel through nusb rather than libusb, so this is a second USB stack as well
-  # as a second implementation of the protocol, and it is the only job in this
-  # workflow that needs a Rust toolchain.
+  # as a second implementation of the protocol.
   #
   # picoboot-rs is tracked rather than pinned.  A break between it and picobootx
   # is what this exists to report, and a pin would hide one until somebody moved

@@ -150,7 +150,11 @@ async fn main() -> ExitCode {
         Err(e) => {
             report.check("picoboot-rs claims the interface", Err(e.to_string()));
             println!();
-            println!("{} checks, {} failed", report.passed + report.failed, report.failed);
+            println!(
+                "{} checks, {} failed",
+                report.passed + report.failed,
+                report.failed
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -240,32 +244,38 @@ async fn main() -> ExitCode {
     // clear a bit, because it reads the row first and refuses one itself — so
     // this is the half of the rule its checks cannot reach.  The device is asked
     // for it directly, and what comes back has to be the two values together.
-    report.check("a write that would clear an OTP bit sets bits and clears none", {
-        let outcome = async {
-            otp_write(conn, 0x4100).await?;
-            otp_read(conn).await
-        }
-        .await;
-        match outcome {
-            Err(e) => Err(e),
-            Ok(0x5334) => Ok(()),
-            Ok(0x4100) => Err("the row was replaced rather than blown further".into()),
-            Ok(v) => Err(format!("the row reads 0x{v:04x}")),
-        }
-    });
+    report.check(
+        "a write that would clear an OTP bit sets bits and clears none",
+        {
+            let outcome = async {
+                otp_write(conn, 0x4100).await?;
+                otp_read(conn).await
+            }
+            .await;
+            match outcome {
+                Err(e) => Err(e),
+                Ok(0x5334) => Ok(()),
+                Ok(0x4100) => Err("the row was replaced rather than blown further".into()),
+                Ok(v) => Err(format!("the row reads 0x{v:04x}")),
+            }
+        },
+    );
 
     // INTERFACE RESET, the other vendor control request, and the one a host
     // issues when it wants the device back in a known state.  Doing it last
     // leaves nothing after it to be disturbed by it, and the status read
     // afterwards is what says the device is still answering.
-    report.check("the device answers INTERFACE RESET and still talks afterwards", {
-        let outcome = async {
-            why(conn.reset_interface().await)?;
-            why(conn.get_command_status().await)
-        }
-        .await;
-        outcome.map(|_| ())
-    });
+    report.check(
+        "the device answers INTERFACE RESET and still talks afterwards",
+        {
+            let outcome = async {
+                why(conn.reset_interface().await)?;
+                why(conn.get_command_status().await)
+            }
+            .await;
+            outcome.map(|_| ())
+        },
+    );
 
     println!();
     println!(

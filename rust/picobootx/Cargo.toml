@@ -1,0 +1,24 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+[package]
+name = "picobootx"
+version = "0.2.0"
+description = "Device-side PICOBOOT protocol, for firmware that is not a bootloader"
+keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
+categories = ["embedded", "no-std"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

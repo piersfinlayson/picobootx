@@ -34,6 +34,21 @@
 #define OTP_ACCESS_FLAG_WRITE 0x00010000u
 #define OTP_ACCESS_FLAG_ECC   0x00020000u
 
+// Whether addr through addr + size lies inside the region at base.
+//
+// The end is taken in 64 bits, so a range that would wrap the address space is
+// outside every region rather than inside whichever one its wrapped end lands
+// in.
+static bool pb_range_within(
+    uint32_t addr,
+    uint32_t size,
+    uint32_t base,
+    uint32_t len
+) {
+    uint64_t end = (uint64_t)addr + (uint64_t)size;
+    return addr >= base && end <= (uint64_t)base + (uint64_t)len;
+}
+
 pb_status_t pb_status_from_bootrom(int ret) {
     switch (ret) {
         case 0:                                    return PB_STATUS_OK;
@@ -217,15 +232,13 @@ pb_status_t picoboot_default_read_prepare(
 ) {
     (void)ctx;
 
-    // Validate entire range lies within a single valid region.
-    // GCC dislikes >= ROM_BASE as it's 0, so always true
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wtype-limits"
+    // Validate entire range lies within a single valid region.  A range
+    // spanning two of them is refused, since the gap between them is not
+    // memory.
     bool valid =
-        (addr >= RP2350_ROM_BASE   && (addr + size) <= (RP2350_ROM_BASE   + RP2350_ROM_SIZE))   ||
-        (addr >= RP2350_FLASH_BASE && (addr + size) <= (RP2350_FLASH_BASE + RP2350_FLASH_SIZE)) ||
-        (addr >= RP2350_SRAM_BASE  && (addr + size) <= (RP2350_SRAM_BASE  + RP2350_SRAM_SIZE));
-#pragma GCC diagnostic pop
+        pb_range_within(addr, size, RP2350_ROM_BASE,   RP2350_ROM_SIZE)   ||
+        pb_range_within(addr, size, RP2350_FLASH_BASE, RP2350_FLASH_SIZE) ||
+        pb_range_within(addr, size, RP2350_SRAM_BASE,  RP2350_SRAM_SIZE);
 
     if (!valid) {
         LOG("Invalid read request: addr=0x%08x size=%u", addr, size);
@@ -261,15 +274,10 @@ pb_status_t picoboot_default_write_prepare(
 ) {
     (void)ctx;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wtype-limits"
     bool is_sram =
-        (addr >= RP2350_SRAM_BASE &&
-         (addr + size) <= (RP2350_SRAM_BASE + RP2350_SRAM_SIZE));
+        pb_range_within(addr, size, RP2350_SRAM_BASE, RP2350_SRAM_SIZE);
     bool is_flash_region =
-        (addr >= RP2350_FLASH_BASE &&
-         (addr + size) <= (RP2350_FLASH_BASE + RP2350_FLASH_SIZE));
-#pragma GCC diagnostic pop
+        pb_range_within(addr, size, RP2350_FLASH_BASE, RP2350_FLASH_SIZE);
 
     if (!is_sram && !is_flash_region) {
         LOG("Invalid write request: addr=0x%08x size=%u", addr, size);
@@ -320,8 +328,8 @@ pb_status_t picoboot_default_flash_erase_prepare(
 ) {
     (void)ctx;
 
-    if (args->addr < RP2350_FLASH_BASE ||
-        (args->addr + args->size) > (RP2350_FLASH_BASE + RP2350_FLASH_SIZE)) {
+    if (!pb_range_within(args->addr, args->size,
+                         RP2350_FLASH_BASE, RP2350_FLASH_SIZE)) {
         ERR("flash_erase_prepare: address out of range: addr=0x%08x size=%u", args->addr, args->size);
         return PB_STATUS_INVALID_ADDRESS;
     }
@@ -451,11 +459,14 @@ pb_status_t picoboot_default_get_info_sys(
         return PB_STATUS_NOT_FOUND;
     }
 
-    uint32_t wc = buf_size / sizeof(uint32_t);
-    if (wc > PB_INFO_MAX_WORDS) {
+    // Judged in bytes, not in words: the whole of buf is filled from the words
+    // after the leading one, so a size that is a whole number of words and a
+    // part of another would read past the end of tmp.
+    if (buf_size > PB_INFO_MAX_WORDS * sizeof(uint32_t)) {
         ERR("Buffer too large for get_info_sys: %u bytes", buf_size);
         return PB_STATUS_UNKNOWN_ERROR;
     }
+    uint32_t wc = buf_size / sizeof(uint32_t);
     uint32_t tmp[PB_INFO_MAX_WORDS + 1];
 
     int ret = get_sys_info(tmp, wc + 1, flag);

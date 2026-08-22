@@ -8,6 +8,18 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
+## Unreleased
+
+- `picoboot_default_get_info_sys` read past its own buffer for a request of 17
+  to 19 bytes.  It sized its bounds check in words and then copied in bytes, so
+  a length the check admitted could be four bytes longer than the data.  Only an
+  integrator calling it directly could reach it — the protocol asks in whole
+  words.
+- `picoboot_default_read_prepare`, `picoboot_default_write_prepare` and
+  `picoboot_default_flash_erase_prepare` accepted a range that wrapped the
+  address space, because each added its address and size in 32 bits.  A read of
+  0xF0000000 bytes from 0x20000000 wrapped into flash and was admitted as SRAM.
+
 ## 0.2.0 - 2026-08-17
 
 The first tagged release.  Everything up to this point — the picoboot state

@@ -357,6 +357,116 @@ static void scenario_get_info_sys_reports_a_flag_the_chip_will_not_take(void) {
     PBT_CHECK_EQ(written, 4u);
 }
 
+static void scenario_get_info_sys_refuses_a_part_word_past_the_largest_flag(void) {
+    pbt_begin();
+    pbt_start();
+
+    // The temporary the bootrom answers into holds one leading word and then
+    // the largest flag's four, and the whole of the caller's buffer is filled
+    // from those four.  A size that is not a whole number of words therefore
+    // has to be judged in bytes: seventeen through nineteen are four words and
+    // a part of a fifth, so a check counting words alone lets them through and
+    // fills the tail from whatever follows the temporary.
+    uint8_t buf[64];
+    const uint32_t sizes[] = { 17u, 18u, 19u };
+
+    for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        uint32_t written = 0xFFFFFFFFu;
+        pb_status_t got =
+            picoboot_default_get_info_sys(0x0040u, buf, sizes[i], &written, NULL);
+        if (got != PB_STATUS_UNKNOWN_ERROR) {
+            pbt_fail(__FILE__, __LINE__,
+                     "get_info_sys of %u bytes: expected %s, got %s",
+                     sizes[i], pbt_status_name((int)PB_STATUS_UNKNOWN_ERROR),
+                     pbt_status_name((int)got));
+        }
+    }
+
+    // Refused before the chip was asked, so nothing was read on the way to the
+    // refusal.
+    PBT_CHECK_EQ(pbt_count("rom_get_sys_info"), 0);
+
+    // Sixteen bytes is those same four words exactly, and is served — so what
+    // was refused was the seventeenth byte and not the flag.
+    uint32_t written = 0xFFFFFFFFu;
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info_sys(0x0040u, buf, 16u, &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, 16u);
+    PBT_CHECK_EQ(pbt_count("rom_get_sys_info"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Ranges that wrap the address space
+// ---------------------------------------------------------------------------
+
+static void scenario_a_read_range_that_wraps_is_refused(void) {
+    pbt_begin();
+    pbt_start();
+
+    // A region check adds the size to the address, and a 32-bit sum wraps.  The
+    // first of these starts in SRAM and its end lands back in the flash window,
+    // the second starts in flash and its end lands on the top of the ROM
+    // window, so each looks like a range inside a region it does not touch a
+    // byte of.
+    PBT_CHECK_STATUS(picoboot_default_read_prepare(0x20000000u, 0xF0000000u, NULL),
+                     PB_STATUS_INVALID_ARG);
+    PBT_CHECK_STATUS(picoboot_default_read_prepare(0x10000000u, 0xF0008000u, NULL),
+                     PB_STATUS_INVALID_ARG);
+
+    // The same two addresses with a size that stays inside the region are
+    // accepted, so what was refused was the wrap and not the address.
+    PBT_CHECK_STATUS(picoboot_default_read_prepare(0x20000000u, 0x1000u, NULL),
+                     PB_STATUS_OK);
+    PBT_CHECK_STATUS(picoboot_default_read_prepare(0x10000000u, 0x1000u, NULL),
+                     PB_STATUS_OK);
+}
+
+static void scenario_a_write_range_that_wraps_is_refused(void) {
+    pbt_begin();
+    pbt_start();
+
+    // Same wrap, and a write reaching it would be handed a pointer for an
+    // address the part does not answer.
+    bool is_flash = true;
+    PBT_CHECK_STATUS(
+        picoboot_default_write_prepare(0x20000000u, 0xF0000000u, &is_flash, NULL),
+        PB_STATUS_INVALID_ARG);
+    PBT_CHECK_STATUS(
+        picoboot_default_write_prepare(0x10000000u, 0xF0000000u, &is_flash, NULL),
+        PB_STATUS_INVALID_ARG);
+
+    // Inside the region both are accepted, and each is reported as the kind of
+    // storage it is.
+    is_flash = true;
+    PBT_CHECK_STATUS(
+        picoboot_default_write_prepare(0x20000000u, 0x1000u, &is_flash, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK(!is_flash);
+    PBT_CHECK_STATUS(
+        picoboot_default_write_prepare(0x10000000u, 0x1000u, &is_flash, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK(is_flash);
+}
+
+static void scenario_an_erase_range_that_wraps_is_refused(void) {
+    pbt_begin();
+    pbt_start();
+
+    // The whole of flash and then some.  The sum wraps to zero, which is below
+    // the top of the flash window, and the size is a whole number of sectors,
+    // so neither of the two checks an erase makes sees anything wrong with it.
+    pb_addr_size_args_t wrapping = { .addr = 0x10000000u, .size = 0xF0000000u };
+    PBT_CHECK_STATUS(picoboot_default_flash_erase_prepare(&wrapping, NULL),
+                     PB_STATUS_INVALID_ADDRESS);
+
+    // A sector at that same address is accepted, so what was refused was the
+    // size.
+    pb_addr_size_args_t sector = { .addr = 0x10000000u, .size = 4096u };
+    PBT_CHECK_STATUS(picoboot_default_flash_erase_prepare(&sector, NULL),
+                     PB_STATUS_OK);
+}
+
 static const pbt_scenario_t k_scenarios[] = {
     { "every bootrom error code maps to a status",
       scenario_every_bootrom_code_maps_to_a_status },
@@ -378,6 +488,14 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_get_info_sys_refuses_a_buffer_no_flag_fills },
     { "get_info_sys reports a flag the chip will not take",
       scenario_get_info_sys_reports_a_flag_the_chip_will_not_take },
+    { "get_info_sys refuses a buffer a part word past the largest flag",
+      scenario_get_info_sys_refuses_a_part_word_past_the_largest_flag },
+    { "a read range that wraps the address space is refused",
+      scenario_a_read_range_that_wraps_is_refused },
+    { "a write range that wraps the address space is refused",
+      scenario_a_write_range_that_wraps_is_refused },
+    { "an erase range that wraps the address space is refused",
+      scenario_an_erase_range_that_wraps_is_refused },
 };
 
 PBT_SUITE(pbt_suite_bootrom, "bootrom", k_scenarios);

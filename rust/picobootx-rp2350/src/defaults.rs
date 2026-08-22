@@ -194,12 +194,64 @@ pub fn flash_erase_prepare(addr: u32, size: u32) -> Result {
     Ok(())
 }
 
+/// Placed with [`erase_critical`], and read before it is called.
+///
+/// An address in SRAM says the linker script put the section in RAM.  It does
+/// not say the bytes arrived, since a script can place a section in RAM and
+/// leave the startup with nothing that copies it.  SRAM does not power up
+/// holding this word, so reading it back says a copy ran and reached this
+/// word.
+///
+/// It says no more than that.  Where in the section the word sits is decided
+/// by the order the linker takes the input sections in, which nothing here or
+/// in `picobootx.x` states, so a copy that stopped short of the section's end
+/// may or may not have stopped short of this.  Whether the copy covers the
+/// whole section is a property of the link, and `ci/check-ramfunc.sh` is what
+/// asks it of one.
+#[cfg(target_os = "none")]
+#[unsafe(link_section = ".ramfunc")]
+static RAMFUNC_MARK: u32 = RAMFUNC_MARK_VALUE;
+
+/// What [`RAMFUNC_MARK`] holds once it has been copied.
+#[cfg(target_os = "none")]
+const RAMFUNC_MARK_VALUE: u32 = 0x7062_785f;
+
+/// Whether the erase's critical part can be run.
+///
+/// It has to be resident in SRAM and it has to hold what was linked, and
+/// neither follows from the `.ramfunc` section name alone — that names a
+/// section, and the consumer's linker script and startup are what decide where
+/// the section goes and whether its bytes are carried there.  A project that
+/// has not done both links clean, and what an erase then jumps into is either
+/// flash that has stopped answering or RAM nothing filled, so this is checked
+/// while flash still answers rather than discovered by a fetch that never
+/// completes.
+#[cfg(target_os = "none")]
+fn erase_critical_resident() -> bool {
+    let addr = erase_critical as *const () as usize;
+    let sram = (SRAM_BASE as usize)..(SRAM_BASE as usize + SRAM_SIZE as usize);
+    if !sram.contains(&addr) {
+        return false;
+    }
+
+    // SAFETY: the address is this crate's own static, aligned and initialised
+    // by the link.  Volatile because what is wanted is what SRAM holds now,
+    // and the value the compiler knows was linked is the answer only once the
+    // startup copy has put it there.
+    let mark = unsafe { core::ptr::read_volatile(&raw const RAMFUNC_MARK) };
+    mark == RAMFUNC_MARK_VALUE
+}
+
 /// The part of an erase that runs while flash cannot be read.
 ///
 /// It runs from RAM, because a function fetched from flash cannot be executed
 /// while flash is answering serial commands instead of reads, and with
 /// interrupts off, because a handler taken here would be fetched from that same
 /// flash.
+///
+/// `.ramfunc` is a name, not a placement.  What puts the section in RAM and
+/// carries its bytes there is the consumer's linker script and startup —
+/// `picobootx.x`, which this crate ships, is one that does.
 #[cfg_attr(target_os = "none", unsafe(link_section = ".ramfunc"))]
 #[inline(never)]
 fn erase_critical(
@@ -243,8 +295,17 @@ fn erase_critical(
 /// Serves a range [`flash_erase_prepare`] accepted, and checks nothing itself.
 ///
 /// Every routine the sequence needs is looked up before any of it runs, since
-/// stopping part way through would leave flash out of execute-in-place.
+/// stopping part way through would leave flash out of execute-in-place.  For
+/// the same reason the part that runs while flash is unreadable is checked to
+/// be in RAM first — see [the crate documentation](crate) for the linker
+/// script and startup that put it there.  A build that has not done that is
+/// refused with [`Status::PreconditionNotMet`].
 pub fn flash_erase(addr: u32, size: u32) -> Result {
+    #[cfg(target_os = "none")]
+    if !erase_critical_resident() {
+        return Err(Status::PreconditionNotMet);
+    }
+
     let connect_internal_flash = bootrom::connect_internal_flash().ok_or(Status::NotFound)?;
     let exit_xip = bootrom::flash_exit_xip().ok_or(Status::NotFound)?;
     let range_erase = bootrom::flash_range_erase().ok_or(Status::NotFound)?;

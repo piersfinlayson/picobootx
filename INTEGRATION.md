@@ -13,7 +13,8 @@ Steps:
 5. Call the picoboot task function regularly in your main loop
 6. Call picobootx's USB event callbacks from the appropriate places in your application
 7. Add picobootx's files to your build system
-8. Build and run
+8. Place the `.ramfunc` section in RAM, and copy it at startup
+9. Build and run
 
 ## 1. Include the Header
 
@@ -177,7 +178,36 @@ bool tud_vendor_control_xfer_cb(
 
 The Makefile fragment [picobootx.mk](picobootx.mk) contains definitions of the source files and include path that are required to build picobootx.  Include this in your build system as appropriate and link the object files into your final binary.
 
-## 8. Build and Run
+## 8. Place `.ramfunc` in RAM
+
+An erase takes flash out of execute-in-place, so the part of the sequence that runs while flash is unreadable is placed in the `.ramfunc` section.  A section name places nothing on its own — your linker script decides where `.ramfunc` lands, and your startup decides whether its bytes are carried there.  A build missing either links without a warning, and what the erase jumps into is a flash that has stopped answering or a RAM nothing filled.
+
+Your linker script needs an output section for it, in RAM and loaded from flash.  This is [the example's](examples/tinyusb/pico-sdkless-repo/examples/common/common.ld):
+
+```text
+.ramfunc ORIGIN(RAM) : AT(__text_end) {
+    __ramfunc_start = .;
+    *(.ramfunc*)
+    . = ALIGN(4);
+    __ramfunc_end = .;
+}
+__ramfunc_load = LOADADDR(.ramfunc);
+```
+
+and your reset handler needs to copy it, before anything erases flash:
+
+```c
+extern uint32_t __ramfunc_start;  // Start of .ramfunc in RAM
+extern uint32_t __ramfunc_end;    // End of .ramfunc in RAM
+extern uint32_t __ramfunc_load;   // Where its bytes are loaded from
+
+memcpy(&__ramfunc_start, &__ramfunc_load,
+       (unsigned int)((char *)&__ramfunc_end - (char *)&__ramfunc_start));
+```
+
+The two casts are what makes the length a count of bytes.  A linker symbol declared `extern uint32_t` — which is how these are usually written, and how the section addresses in your `.data` and `.bss` copies are written too — subtracts to a count of **words**, so a `memcpy` handed that copies a quarter of the section and leaves the rest of the erase routine as whatever RAM held at reset.  That is a working boot and a flash erase that runs into rubbish, so nothing points at the copy when it goes wrong.
+
+## 9. Build and Run
 
 Assuming your device is exposing VID/PID 2e8a:000f (the default RP2350 VID/PID), you can test using `picotool` as follows:
 

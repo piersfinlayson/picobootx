@@ -20,7 +20,9 @@
 //! at the function it applies to, as
 //! `#[cfg_attr(target_os = "none", unsafe(link_section = ".ramfunc"))]`, since
 //! an attribute cannot be handed out from here without a macro crate to carry
-//! it.
+//! it.  The attribute names a section and nothing more — the linker script
+//! `picobootx.x` is what places that section in RAM, and `defaults` checks
+//! that it landed there before it runs the function.
 
 /// The bootrom publishes its function table through a lookup routine whose own
 /// address is stored, as a 16-bit value, at this fixed address low in the

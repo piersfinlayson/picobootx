@@ -10,15 +10,16 @@ release.
 
 ## Unreleased
 
+- The Rust `picobootx-rp2350` needs `-C link-arg=-Tpicobootx.x` beside
+  `-Tlink.x` to place its flash erase routine in RAM.  Without it the routine
+  linked into flash and stopped part way through an erase.
+- [INTEGRATION.md](INTEGRATION.md) now says a C integrator's linker script and
+  reset handler have to place and copy `.ramfunc`.
 - `picoboot_default_get_info_sys` read past its own buffer for a request of 17
-  to 19 bytes.  It sized its bounds check in words and then copied in bytes, so
-  a length the check admitted could be four bytes longer than the data.  Only an
-  integrator calling it directly could reach it — the protocol asks in whole
-  words.
+  to 19 bytes, reachable only by an integrator calling it directly.
 - `picoboot_default_read_prepare`, `picoboot_default_write_prepare` and
   `picoboot_default_flash_erase_prepare` accepted a range that wrapped the
-  address space, because each added its address and size in 32 bits.  A read of
-  0xF0000000 bytes from 0x20000000 wrapped into flash and was admitted as SRAM.
+  address space.
 
 ## 0.2.0 - 2026-08-17
 

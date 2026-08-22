@@ -117,13 +117,19 @@ string, `LOGGING=1` builds with picobootx's own logging turned on, and
 `SANITIZE=1` builds under the address and undefined behaviour sanitizers.
 `make usbip TRACE=1` runs the bridge with every transfer traced.
 
-`make cov` runs both suites under coverage, merges what each reached, reports it
-per file for all three sources of the library, and fails below every line and
-function.  Branches are reported but not gated, since gcc and llvm-cov do not
-agree on what counts as one.  The few arms neither suite can reach are marked
-unreachable in the source with lcov exclusion comments, each saying which
-invariant makes it so.  `make cov-html` writes the same as a browsable report.
-Both need lcov.
+`make cov` runs both suites under coverage, under both implementations, and
+reports what they reached per file in one table — the C's three sources and the
+Rust's eleven.  It gates twice.  The C fails below every line and every
+function, and the few arms neither suite can reach are marked unreachable in the
+source with lcov exclusion comments, each saying which invariant makes it so.
+The Rust fails below the per-file floor in
+[ci/coverage-baseline.txt](ci/coverage-baseline.txt), which `make cov-raise`
+moves up and nothing moves down.  Branches are reported but not gated, since gcc
+and llvm-cov do not agree on what counts as one.
+
+`make cov-uncovered` lists the lines nothing reached, `make cov-html` writes the
+C's figures as a browsable report.  Coverage needs lcov, and the Rust half needs
+rustup's `llvm-tools` component for llvm-profdata and llvm-cov.
 
 ## Limitations
 

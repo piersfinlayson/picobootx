@@ -1,0 +1,21 @@
+# Per-file coverage floors.  A file may not drop below its floor.
+# Raised by ci/coverage-report.sh --raise.  Never lowered by hand
+# without saying why in the commit.
+#
+# The C library sits at 100.0 because test/Makefile gates it there
+# outright, on functions as well as lines.  A floor below 100.0 on
+# one of those three files means the gate has been let go.
+src/picobootx.c                              100.0
+src/picobootx_impl.c                         100.0
+src/picobootx_vendor.c                       100.0
+rust/picobootx-ffi/src/defaults.rs            95.9
+rust/picobootx-ffi/src/lib.rs                 91.3
+rust/picobootx-ffi/src/ops.rs                 96.5
+rust/picobootx-ffi/src/transport.rs          100.0
+rust/picobootx-rp2350/src/bootrom.rs         100.0
+rust/picobootx-rp2350/src/chip.rs            100.0
+rust/picobootx-rp2350/src/defaults.rs        100.0
+rust/picobootx-rp2350/src/ops.rs               0.0
+rust/picobootx/src/ops.rs                     21.6
+rust/picobootx/src/state.rs                   96.2
+rust/picobootx/src/wire.rs                    81.0

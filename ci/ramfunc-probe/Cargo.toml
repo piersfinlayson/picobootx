@@ -1,0 +1,29 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# A bare-metal binary whose only reason to exist is to be linked.
+#
+# Where .ramfunc lands is decided by a link, and picobootx-rp2350 is an rlib -
+# building it says nothing about where its RAM function ends up.  This is the
+# smallest thing that answers the question: a cortex-m-rt program that calls
+# flash_erase, linked exactly as the crate documentation tells a consumer to
+# link it.  ci/check-ramfunc.sh builds it and reads the addresses back.
+#
+# Its own workspace, so it is not a member of rust/ - the conformance suite
+# builds that workspace and has no business fetching cortex-m-rt.
+
+[package]
+name = "ramfunc-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+picobootx-rp2350 = { path = "../../rust/picobootx-rp2350" }
+cortex-m-rt = "0.7"
+
+[profile.release]
+panic = "abort"

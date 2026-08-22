@@ -6,8 +6,16 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Cross-builds the tinyusb example, which is the only build that exercises
-  # picobootx_vendor.c and the linker placement the flash erase routine needs.
+  # The builds that produce a binary for the part.  Everything else here runs on
+  # this machine, and where a section lands is a property of a link for the
+  # part, so nothing else can see it.
+  #
+  # The tinyusb example is the C's: the only build that exercises
+  # picobootx_vendor.c and the linker placement its flash erase needs.
+  # ci/ramfunc-probe is the Rust's, a cortex-m-rt program that calls
+  # flash_erase and is linked the way the crate tells a consumer to link it.
+  # The rust job's cross-target lint compiles that code and links none of it,
+  # so a .ramfunc placed nowhere passes it — see ci/check-ramfunc.sh.
   device:
     runs-on: ubuntu-latest
     steps:
@@ -18,8 +26,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-arm-none-eabi
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabi
+
       - name: Build tinyusb example
         run: make example
+
+      - name: Check where the Rust RAM function landed
+        run: ci/check-ramfunc.sh
 
   # The conformance suite needs a C compiler and make, and nothing else — no
   # USB, no kernel modules, no privileges — so it runs on hosted runners.  Both
@@ -134,13 +149,19 @@ jobs:
           cd rust && cargo clippy -p picobootx-rp2350 \
               --target thumbv8m.main-none-eabi --release -- -D warnings
 
-  # How much of the library the suites reach, merged.  The number is printed and
-  # then gated: every line and function of picobootx.c, picobootx_impl.c and
-  # picobootx_vendor.c, with the handful that defend an invariant already
-  # established
-  # marked unreachable in the source.  So a new line nothing reaches fails here,
-  # and so does dropping the only test that reached an existing one.  Branches
-  # are printed but not gated, since gcc and llvm-cov disagree on what one is.
+  # How much of the library the suites reach, in both languages, merged.
+  #
+  # The C is gated outright: every line and every function of picobootx.c,
+  # picobootx_impl.c and picobootx_vendor.c, with the handful that defend an
+  # invariant already established marked unreachable in the source.  So a new
+  # line nothing reaches fails here, and so does dropping the only test that
+  # reached an existing one.  Branches are printed but not gated, since gcc and
+  # llvm-cov disagree on what one is.
+  #
+  # The Rust is gated against the per-file floors in ci/coverage-baseline.txt,
+  # which may go up and not down.  Those floors are raised from this job's
+  # figures: a different machine measures differently, and a floor taken from
+  # one is not a floor this can meet.
   coverage:
     runs-on: ubuntu-latest
     steps:
@@ -159,10 +180,60 @@ jobs:
           make install PREFIX=$HOME/lcov-install
           echo "$HOME/lcov-install/bin" >> $GITHUB_PATH
 
+      # llvm-tools carries llvm-profdata and llvm-cov, which read what
+      # -C instrument-coverage wrote.  Taken from the toolchain that wrote it,
+      # so a system LLVM of some other vintage cannot answer instead.
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+
       - name: Measure coverage
         env:
           CC: gcc
         run: make cov
+
+      # tee, so the figures reach the run page as well as the log.  pipefail, or
+      # tee's exit status hides a failing gate.
+      - name: Coverage figures
+        if: always()
+        run: |
+          set -o pipefail
+          ci/coverage-report.sh | tee coverage-figures.txt
+
+      - name: Check the floors
+        if: always()
+        run: |
+          set -o pipefail
+          ci/coverage-report.sh --check | tee coverage-check.txt
+
+      # The numbers are the point of the job, and a log needs an account to
+      # read.  This puts them on the run page instead, readable by anyone who
+      # can see the repository.  always(), so a failed gate is shown rather than
+      # hidden.
+      - name: Figures on the run page
+        if: always()
+        run: |
+          {
+            echo '## Coverage'
+            echo
+            echo '```'
+            cat coverage-figures.txt 2>/dev/null || echo "(the run did not get this far)"
+            echo '```'
+            echo
+            echo '### Floors'
+            echo
+            echo '```'
+            cat coverage-check.txt 2>/dev/null || echo "(the check did not run)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload tracefiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-tracefiles
+          path: test/build/coverage/*.info
 
   # picobootx on a real USB bus, driven by real picotool.  The kernel's virtual
   # host controller is the host and a socket is the bus, so nothing here needs

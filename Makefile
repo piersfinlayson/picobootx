@@ -19,12 +19,17 @@ RUST_DIR    := rust
 INTEROP_DIR := $(RUST_DIR)/interop
 EXAMPLE_DIR := examples/tinyusb
 
+# Where the sub-make writes its tracefiles, and what ci/coverage-report.sh
+# reads.  Named here as well because cov empties it — see there.
+COV_DIR     := $(TEST_DIR)/build/coverage
+
 # The example clones this alongside itself.  Its presence is what says the
 # example has been built here — see clean-example.
 EXAMPLE_TINYUSB_DIR := tinyusb-repo
 
 .PHONY: all test test-core test-usb test-usbip test-rust build cov cov-html \
-        clean clean-test clean-example clean-rust example
+        cov-raise cov-uncovered clean clean-test clean-example clean-rust \
+        example
 
 all: build
 
@@ -64,10 +69,37 @@ test-rust:
 	cd $(INTEROP_DIR) && cargo update -p picoboot && cargo build --release
 	sudo $(INTEROP_DIR)/interop.sh $(if $(filter 1,$(TRACE)),-v)
 
-# Run both under coverage, merged.  cov gates, cov-html writes a browsable
-# report.
+# Both suites under coverage, under both implementations, merged.  Every line
+# of both languages is measured by this one target: the C only carries counters
+# where it is the library under test, and the Rust only where it is, so a run
+# under one LIB alone measures half the library and cannot say so.
+#
+# Three gates, and each has to hold.  test/Makefile's own gate wants every line
+# and every function of the C, under each LIB in turn.  ci/coverage-report.sh
+# --check wants every file at or above the floor in ci/coverage-baseline.txt,
+# which is where the Rust is held.
 cov:
-	@$(MAKE) -C $(TEST_DIR) cov
+	@# Emptied first, so every tracefile the report reads was written by this
+	@# run.  A LIB= run of its own writes one of the three and leaves the
+	@# others where they are, and both the report and the check would take
+	@# those as current.  With the directory cleared, what is missing is
+	@# missing, and the check says so.
+	rm -rf $(COV_DIR)
+	@$(MAKE) -C $(TEST_DIR) cov LIB=c
+	@$(MAKE) -C $(TEST_DIR) cov LIB=rust
+	@echo
+	@ci/coverage-report.sh
+	@echo
+	@ci/coverage-report.sh --check
+
+# Raise the floors to what the last `make cov` measured.  Up only — a floor
+# that has to come down is a hand edit, and the commit says why.
+cov-raise:
+	@ci/coverage-report.sh --raise
+
+# The lines nothing reached, which is where a floor that is not 100 comes from.
+cov-uncovered:
+	@ci/coverage-report.sh --uncovered $(FILE)
 
 cov-html:
 	@$(MAKE) -C $(TEST_DIR) cov-html

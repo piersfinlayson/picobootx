@@ -73,6 +73,13 @@ shipped hardware.
   driver, which tracks picoboot-rs rather than pinning it and is reached only by
   `make test-rust`.  It is separate so the archive the suite links does not need
   the network to build.
+- `ci/` — what the workflows call that is longer than a step.
+  `coverage-report.sh` turns tracefiles into a table, a line list or a gate,
+  `coverage-baseline.txt` holds the per-file floor each Rust source may not drop
+  below, and `coverage-unmeasured.txt` names the sources that carry no
+  executable line, each with the reason.  `check-ramfunc.sh` and
+  `ramfunc-probe/` link `picobootx-rp2350` into a bare-metal binary and check
+  where `.ramfunc` landed.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
 
@@ -112,8 +119,29 @@ In C, `picobootx_impl.c` goes through a macro in `picobootx_impl.h`.
 In Rust, `rust/picobootx-rp2350/src/chip.rs` holds both halves of all five, one
 `#[cfg(target_os = "none")]` and one `#[cfg(not(...))]`, so a bare-metal target
 reaches the chip and every other target reaches the harness.  Placing a function
-in RAM is the one seam that is not a call: it is a `#[cfg_attr]` written at
-`erase_critical` in `defaults.rs`.
+in RAM is the one seam that is not a call, and it is not one thing either.  It
+is three:
+
+- The `#[cfg_attr]` at `erase_critical` in `defaults.rs`, which names the
+  `.ramfunc` section.  A name places nothing — the consumer's linker script
+  decides where the section lands and the startup decides whether its bytes are
+  carried there.
+- `rust/picobootx-rp2350/picobootx.x`, the linker fragment that answers for it.
+  It gives `.ramfunc` an address in RAM and a load address in flash and hooks
+  itself on with `INSERT AFTER .data`, so cortex-m-rt's own `.data` copy carries
+  it.  `build.rs` puts the fragment in `OUT_DIR` and the directory on the
+  linker's search path, and the consumer adds one flag,
+  `-C link-arg=-Tpicobootx.x`, beside `-Tlink.x`.  cargo does not carry a
+  dependency's link arguments to the binary, which is why the flag is theirs.
+  That flag is a rust-lld arrangement: GNU ld resolves `INSERT AFTER` only
+  within the script it is processing, so a second `-T` fails the link with
+  `.data not found for insert`, and the crate's documentation gives that
+  consumer the same `SECTIONS` block to paste into their own `memory.x`, which
+  `link.x` includes.
+- The residency check in `flash_erase`, which reads back the routine's address
+  and a marker word placed beside it while flash still answers, and refuses with
+  `PRECONDITION_NOT_MET` rather than jumping into a bus that has stopped
+  answering.
 
 - What the objdump check protects is that `erase_critical` really can run while
   flash is unreadable, which means it must reach nothing that is fetched from
@@ -123,6 +151,13 @@ in RAM is the one seam that is not a call: it is a `#[cfg_attr]` written at
   `cargo build -p picobootx-rp2350 --target thumbv8m.main-none-eabi --release`
   and then `arm-none-eabi-readelf -S` on the rlib for the section, and
   `arm-none-eabi-objdump -r` on it for the absence of relocations against it.
+- Where the section ends up is a property of a **link**, and an rlib is not one.
+  `ci/check-ramfunc.sh` builds `ci/ramfunc-probe`, a bare-metal binary whose
+  only reason to exist is to call `flash_erase`, and reads `.ramfunc`'s
+  addresses out of it: VMA in SRAM, LMA in flash, and `__edata` past the
+  section's end, since the startup copy fills `__sdata..__edata` and a section
+  outside that span is placed, loaded and never filled.  CI runs it, and it is
+  what would have caught a fragment that places nothing.
 - The default implementations are Arm-only — the bootrom entries they ask for
   are the Arm secure ones and the interrupt mask is `cpsid i` — so a bare-metal
   build for anything else is refused by a `compile_error!` rather than failing
@@ -141,8 +176,10 @@ From the repository root, which delegates to `test`:
     make test LOGGING=1     # with picobootx's own logging
     make test SANITIZE=1    # under the address and undefined behaviour sanitizers
     make test LIB=rust      # against the Rust library rather than the C one
-    make cov                # coverage of the library, listed per file and gated
-    make cov-html           # the same, as a browsable report
+    make cov                # coverage of both languages, per file and gated
+    make cov-raise          # raise the Rust floors to what cov measured
+    make cov-uncovered      # the lines nothing reached
+    make cov-html           # the C's figures, as a browsable report
 
 The same targets work from `test` itself, where `run` stands in for `test` and
 `SUITE=usb` selects the second suite.  `FILTER=` runs the scenarios whose suite
@@ -225,22 +262,62 @@ Rules that keep it worth having:
 
 ## Coverage
 
-`make cov` runs both suites, merges what each reached, and **fails below 100%**
-of lines and functions.  What it measures depends on `LIB`, since it counts the
-C the suites drive: `picobootx.c`, `picobootx_impl.c` and `picobootx_vendor.c`
-under `LIB=c`, and `picobootx_vendor.c` alone under `LIB=rust`, where the other
-two are the Rust archive's and carry no counters.  CI runs the `LIB=c` figure,
-which is the one that covers the whole of the C.  It measures the `LOGGING=1`
-build, because `command_to_str` is called only from a log statement and is
-unreachable with logging off.  Branch counts are listed alongside and not gated — gcc and
-llvm-cov disagree on what counts as a branch, so a branch gate would hold under
-one compiler and fail under the other.
+`make cov` measures **both languages**, from the repository root.  It runs both
+suites under `LIB=c` and again under `LIB=rust`, then prints one table over the
+C's three sources and the Rust's eleven and gates twice.  Neither `LIB` on its
+own measures the library: the C only carries counters where it is the
+implementation under test, and the Rust only where it is.
 
-The remainder is marked in the library itself with `LCOV_EXCL_START` /
-`LCOV_EXCL_STOP` pairs.  Every one of them is an
-arm defending an invariant the state machine has already established — a
-category the command table cannot hold, a callback a routed row cannot be
-missing — and each carries a comment saying why it cannot be reached.
+It measures the `LOGGING=1` build, because `command_to_str` is called only from
+a log statement and is unreachable with logging off.  Branch counts are listed
+alongside and not gated — gcc and llvm-cov disagree on what counts as a branch,
+so a branch gate would hold under one compiler and fail under the other.
+
+### How each half is measured
+
+The C is gcov, read by lcov, exactly as before — `--coverage` on the whole
+build, narrowed afterwards to `picobootx.c`, `picobootx_impl.c` and
+`picobootx_vendor.c` so the harness exercising itself never counts towards what
+the library reached.
+
+The Rust is LLVM's own instrumentation: the archive is built with
+`-C instrument-coverage` into a target directory of its own, the binaries write
+one raw profile per process, and llvm-profdata and llvm-cov turn those into
+lcov.  Three things that build have to keep, each of which would otherwise read
+as coverage that was never measured:
+
+- **A staticlib is linked without the profiler runtime**, so nothing in the
+  archive defines the writer that turns the counters into a file.  On ELF
+  nothing names `__llvm_profile_runtime` either, so the link succeeds, the
+  binary carries its coverage map and no writer, and every run exits having
+  written nothing.  `-Wl,-u,__llvm_profile_runtime` is what asks for it by name
+  and pulls the definition in, and rustc's own `libprofiler_builtins-*.rlib`
+  from the sysroot is what defines it — matched to the compiler that
+  instrumented the code by construction.  Deleting that `-u` is silent, and
+  reads as a suite that ran and reached nothing.  The symbol carries a leading
+  underscore in Mach-O's table and none in ELF's, which is why
+  `test/Makefile` picks the spelling by platform.
+- **An archive member the linker leaves behind takes its coverage map with it**,
+  so an untested function reads as one that does not exist rather than one
+  nothing reached, and the total agrees.  `-force_load` on Mach-O and
+  `--whole-archive` on ELF are what stop that.
+- **llvm-profdata and llvm-cov come from the rustup sysroot**, not from PATH, so
+  a system LLVM of some other vintage cannot answer instead.  `rustup component
+  add llvm-tools` is what puts them there.
+
+The raw profiles and gcov's counters are both **deleted** before a run rather
+than left to accumulate.  gcov's runtime adds to what it finds, so a counter
+file left in place would keep crediting a line the deleted test was the only
+thing reaching — and the gate that exists to fail when a test goes would say
+nothing.
+
+### The two gates
+
+**The C fails below 100%** of lines and functions.  The remainder is marked in
+the library itself with `LCOV_EXCL_START` / `LCOV_EXCL_STOP` pairs.  Every one
+of them is an arm defending an invariant the state machine has already
+established — a category the command table cannot hold, a callback a routed row
+cannot be missing — and each carries a comment saying why it cannot be reached.
 
 - **Any change that adds, removes or alters an `LCOV_EXCL` marker goes to Piers
   for review, without exception.**  Propose it and wait, the way a design change
@@ -250,6 +327,57 @@ missing — and each carries a comment saying why it cannot be reached.
   the marker is the wrong move, and reaching for it quietly is worse.
 - The gate cuts both ways.  It fails on a new branch nothing reaches, and it
   fails when the only test reaching an existing branch is deleted.
+
+**The Rust fails below a per-file floor**, held in `ci/coverage-baseline.txt`.
+`ci/coverage-report.sh --check` is the gate and `--raise` moves floors **up**,
+never down — lowering one is a hand edit and the commit says why.  The floors
+belong to the whole set of runs, so `--check` refuses unless the three the
+floors are built from are present, and `--raise` refuses tracefile arguments
+altogether: it rewrites every floor, and a subset would rewrite floors it never
+measured.
+
+Four ways a file can fail the check, because a gate that can report a false
+green is worth nothing:
+
+- `NEW` — measured, with no floor.  A new source cannot arrive untested.
+- `DROP` — below its floor.
+- `GONE` — a floor with no measured file behind it.  A lost `--whole-archive`,
+  a module removed by a `cfg`, a crate dropped from the measured set and a path
+  filter that stopped matching all look like this, and every one of them would
+  otherwise leave the gate passing over what was left.
+- `UNMEASURED` — a source in the tree that reached no tracefile at all.  Which
+  files reach llvm-cov and lcov is decided by hand-kept lists in `test/Makefile`,
+  so a new crate is measured by nothing and has no floor to be missing either.
+  The check walks `src/*.c` and every `.rs` under a crate's `src/` in `rust/`
+  and requires each to be in the measured set or named, with its reason, in
+  `ci/coverage-unmeasured.txt`.  An entry there that names a file which has gone
+  — or one that turns out to be measured after all — fails as `STALE`.
+
+`make cov` empties `test/build/coverage` before it captures, so every tracefile
+the report reads was written by that run.  Without that, a `make -C test cov
+LIB=c` on its own leaves the previous run's `rust.info` in place and both the
+report and the check take it as current.
+
+The C's three files carry a floor of 100.0 in the same file.  That is the same
+gate said twice, deliberately: the exact one in `test/Makefile` catches a lost
+line whatever the file's size, and the floor says in writing where the C stands.
+
+**The floors are CI's figures.**  A different machine measures differently, and
+a floor raised from one is not a floor another can meet.  Raise them from the
+coverage job's own output.
+
+Nothing is excluded from the Rust figures.  The device-only half of
+`picobootx-rp2350` — the `#[cfg(target_os = "none")]` side of `chip.rs`, the
+`compile_error!` guard in its `lib.rs`, the `.ramfunc` attribute at
+`erase_critical`, and the residency check that guards it, its marker word and
+the call to it in `flash_erase` — is removed by `cfg` before codegen on a host
+build, so it never enters the denominator and needs no marker.  It is also why
+a floor cannot speak for that code, and why `ci/check-ramfunc.sh` exists.  An exclusion added to make a
+number work turns the figure into a lie, here as in the C.
+
+`make cov-uncovered` lists the lines nothing reached, which is where a floor
+below 100 comes from.  `make cov-html` writes the C's figures as a browsable
+report.
 
 `test/shim/tusb.h` reproduces tinyusb's declarations byte for byte and value for
 value.  Anything added there must match tinyusb, or the suite pins behaviour the
@@ -266,13 +394,16 @@ device does not have.
 
 ## CI
 
-`.github/workflows/build.yml` cross-builds the tinyusb example for Arm, runs the
+`.github/workflows/build.yml` cross-builds the tinyusb example for Arm and links
+`ci/ramfunc-probe` to check where `.ramfunc` landed, runs the
 suite on Linux under gcc and clang, on Linux under the sanitizers and with
-`LOGGING=1`, and on macOS, measures the library's coverage on Linux, and drives
-the usbip bridge with picotool built from a pinned release tag and with
-picoboot-rs.  The coverage job
-gates at 100% — see Coverage above.  All of it runs on GitHub-hosted runners and
-needs no hardware.  Everything but the picotool job needs no privileges, no USB
+`LOGGING=1`, and on macOS, measures both languages' coverage on Linux, and
+drives the usbip bridge with picotool built from a pinned release tag and with
+picoboot-rs.  The coverage job holds the C at 100% and the Rust to its floors —
+see Coverage above — and writes the figures to the run summary page, so the
+numbers are readable by anyone who can see the repository rather than only by
+someone with an account who opens the log.  All of it runs on GitHub-hosted
+runners and needs no hardware.  Everything but the picotool job needs no privileges, no USB
 and no kernel modules either — that one loads `vhci-hcd` and runs as root.
 
 ## Gotchas

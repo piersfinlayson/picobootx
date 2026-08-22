@@ -1,0 +1,17 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# The two link flags picobootx-rp2350's documentation tells a consumer to add.
+# -Tlink.x reaches cortex-m-rt's script and -Tpicobootx.x the fragment that
+# places .ramfunc.  This file is the consumer's half of the arrangement, so it
+# is written here the way it is written there.
+
+[build]
+target = "thumbv8m.main-none-eabi"
+
+[target.thumbv8m.main-none-eabi]
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tpicobootx.x",
+]

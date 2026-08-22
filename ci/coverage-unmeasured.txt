@@ -1,0 +1,23 @@
+# Sources with nothing to measure.
+#
+# Every .c under src/ and every .rs under a crate's src/ in rust/ has to appear
+# in the coverage tables.  A file that does not, and is not named here, fails
+# ci/coverage-report.sh --check as UNMEASURED - which is how a new crate, or a
+# directory none of test/Makefile's lists names, is caught rather than being
+# quietly measured by nothing.
+#
+# A file belongs here only when it carries no executable line at all: module
+# declarations, re-exports, type and trait definitions, constants, and extern
+# blocks compile to nothing that can be reached, so llvm-cov emits no record
+# for them.  A file that carries a function belongs in the floors instead.  The
+# check keeps this honest both ways: an entry naming a file that has gone, or
+# one that turns out to be measured after all, fails as STALE.
+#
+# The reason is part of the entry.  Everything after the path is read by people.
+
+rust/picobootx/src/lib.rs           module declarations and re-exports
+rust/picobootx/src/control.rs       the control endpoint's types
+rust/picobootx/src/status.rs        the status enum and the Result alias
+rust/picobootx/src/transport.rs     the two transport traits
+rust/picobootx-ffi/src/cabi.rs      the C types and the extern declarations
+rust/picobootx-rp2350/src/lib.rs    declarations, re-exports and the part's addresses

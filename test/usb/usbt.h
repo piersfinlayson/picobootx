@@ -82,8 +82,11 @@ void usbt_app_task(void);
 // stands between them.  usbt_begin leaves the task running.
 void usbt_run_picoboot_task(bool run);
 
-// The library's state block, for a scenario asserting what state it is in.
+// The library's state block.  See pbt.h.
 pb_state_block_t *usbt_state(void);
+
+// What the library is doing, for a scenario asserting it.
+pb_state_t usbt_cur_state(void);
 
 // Signal a bus reset, as a host does before it addresses a device.
 void usbt_bus_reset(void);

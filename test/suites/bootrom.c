@@ -143,7 +143,7 @@ static void scenario_an_otp_write_the_chip_refuses_carries_its_reason(void) {
     picoboot_status_t status;
     PBT_REQUIRE(pbt_ctrl_get_status(&status));
     PBT_CHECK_STATUS(status.status_code, PB_STATUS_NOT_PERMITTED);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 
     // A refused write blows nothing, so the row is still clear.
     PBT_CHECK_EQ(pbt_otp()[6], 0u);
@@ -246,7 +246,7 @@ static void scenario_a_reboot_the_part_no_longer_offers_does_not_happen(void) {
     pbt_host_send_cmd(&cmd);
     pbt_task();
 
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_AWAIT_ZLP);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_AWAIT_ZLP);
     PBT_REQUIRE(pbt_count("op_reboot2_prepare") == 1);
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
 
@@ -257,7 +257,7 @@ static void scenario_a_reboot_the_part_no_longer_offers_does_not_happen(void) {
 
     PBT_CHECK_EQ(pbt_count("op_reboot2_execute"), 1);
     PBT_CHECK_EQ(pbt_count("rom_reboot"), 0);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 
     // Without the withdrawal the same sequence reboots, so what stopped it was
     // the missing routine.

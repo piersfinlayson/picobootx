@@ -18,6 +18,7 @@
 #   make FILTER=zlp  run only the suites whose name contains this
 #   make LOGGING=1   build with picobootx's own logging turned on
 #   make SANITIZE=1  build with the address and undefined behaviour sanitizers
+#   make LIB=c       the implementation of picobootx under test
 #   make cov         run under coverage, list what the library reached, and
 #                    fail if it is not all of it
 #   make cov-html    the same, as a browsable report
@@ -57,6 +58,13 @@ OPT     ?= -O1 -g
 # All three compile picobootx.c and picobootx_impl.c, with different headers and
 # different flags, so each keeps its own object directory.
 SUITE ?= core
+
+# Names the file answering src/pbt_lib.h, which is where the harness asks the
+# few things picobootx.h does not tell it about the library in front of it.
+LIB ?= c
+ifneq ($(LIB),c)
+$(error LIB=$(LIB) is not a library this makefile knows.  LIB=c selects the C implementation in ../src)
+endif
 
 # Each configuration keeps its own object directory.  They differ only in
 # compiler flags, which make cannot see, so sharing one directory would leave
@@ -180,6 +188,7 @@ TINYUSB_SRC := \
 DEVICE_SRC := \
 	src/pbt_core.c \
 	src/pbt_device.c \
+	src/pbt_lib_$(LIB).c \
 	src/pbt_ops.c \
 	usb/usbt_dcd.c \
 	usb/usbt_app.c \
@@ -232,6 +241,7 @@ LIB_SRC := \
 
 HARNESS_SRC := \
 	src/pbt_core.c \
+	src/pbt_lib_$(LIB).c \
 	src/pbt_main.c \
 	src/pbt_flow.c \
 	src/pbt_suites.c \

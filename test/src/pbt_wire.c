@@ -436,20 +436,20 @@ void pbt_pump(void) {
     for (unsigned i = 0; i < PBT_PUMP_MAX; i++) {
         uint32_t   events  = pbt_event_count();
         uint32_t   packets = s_packet_count;
-        pb_state_t state   = pbt_state()->state;
+        pb_state_t state   = pbt_cur_state();
 
         picoboot_task(pbt_state());
         pbt_complete_tx();
 
         if (pbt_event_count() == events && s_packet_count == packets &&
-            pbt_state()->state == state) {
+            pbt_cur_state() == state) {
             return;
         }
     }
 
     pbt_fail(__FILE__, __LINE__,
              "device had not settled after %u task calls — state %s",
-             PBT_PUMP_MAX, pbt_state_name(pbt_state()->state));
+             PBT_PUMP_MAX, pbt_state_name(pbt_cur_state()));
 }
 
 uint32_t pbt_packet_count(void) { return s_packet_count; }

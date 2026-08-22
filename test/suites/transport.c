@@ -56,7 +56,7 @@ static void scenario_a_refused_acknowledgement_stalls(void) {
     // to the host like a pipe that had stopped answering, so it halts instead.
     PBT_CHECK_EQ(pbt_count("op_exit_xip"), 1);
     PBT_CHECK_EQ(pbt_count("zlp_refused"), 1);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
     PBT_CHECK(pbt_ep_stalled(PBT_EP_OUT));
     PBT_CHECK(pbt_ep_stalled(PBT_EP_IN));
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
@@ -98,7 +98,7 @@ static void scenario_a_short_read_of_a_command_stalls(void) {
     pbt_pump();
 
     PBT_CHECK_EQ(pbt_count("short_read"), 1);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
     PBT_CHECK_EQ(pbt_count("op_read_prepare"), 0);
 
     picoboot_status_t status;
@@ -139,7 +139,7 @@ static void scenario_a_read_that_returns_nothing_is_retried(void) {
     pbt_args_addr_size(&cmd, RP2350_SRAM_BASE + 0x40u, sizeof(data));
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_DATA_OUT);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_DATA_OUT);
 
     // The data arrives, and the transport then says it has none of it.  Inside
     // a data phase there is nothing wrong with that — the bytes are still
@@ -151,14 +151,14 @@ static void scenario_a_read_that_returns_nothing_is_retried(void) {
 
     PBT_CHECK_EQ(pbt_count("short_read"), 1);
     PBT_CHECK_EQ(pbt_count("op_write"), 0);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_DATA_OUT);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_DATA_OUT);
     PBT_CHECK_EQ(picoboot_vendor_available(), sizeof(data));
     PBT_CHECK(!pbt_ep_stalled(PBT_EP_OUT));
 
     // Asked again, the transport answers and the transfer finishes with all of
     // the data, in order — nothing was dropped and nothing was doubled.
     pbt_pump();
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(pbt_count("op_write"), 1);
     PBT_CHECK_EQ(memcmp(pbt_sram() + 0x40u, data, sizeof(data)), 0);
 }
@@ -178,7 +178,7 @@ static void scenario_a_short_write_stalls_the_transfer(void) {
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_UNKNOWN_ERROR);
 
     PBT_CHECK_EQ(pbt_count("short_write"), 1);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
 
     picoboot_status_t status;

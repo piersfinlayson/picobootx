@@ -51,11 +51,11 @@ static void scenario_write_to_sram_lands_in_memory(void) {
 
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_DATA_OUT);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_DATA_OUT);
 
     send_data(data, sizeof(data));
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(memcmp(pbt_sram() + 0x400u, data, sizeof(data)), 0);
 
     // Acknowledged once, at the end, and not once per packet.
@@ -118,7 +118,7 @@ static void scenario_status_names_a_write_still_taking_data(void) {
     pbt_host_send_cmd(&cmd);
     pbt_pump();
     send_data(data, PBT_PACKET_MAX);
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_DATA_OUT);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_DATA_OUT);
 
     // The data phase has started and not finished, so this is the command a
     // host asking about the transfer means.
@@ -134,7 +134,7 @@ static void scenario_status_names_a_write_still_taking_data(void) {
     // The rest of the data finishes it, and the same command is then reported
     // as done rather than running.
     send_data(data + PBT_PACKET_MAX, sizeof(data) - PBT_PACKET_MAX);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(memcmp(pbt_sram() + 0xC00u, data, sizeof(data)), 0);
 
     PBT_REQUIRE(pbt_ctrl_get_status(&status));
@@ -192,7 +192,7 @@ static void scenario_a_write_that_fails_partway_stalls(void) {
     PBT_REQUIRE(pbt_ctrl_get_status(&status));
     PBT_CHECK_STATUS(status.status_code, WRITE_REFUSAL_STATUS);
     PBT_CHECK_EQ(status.token, cmd.token);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
     PBT_CHECK_EQ(pbt_count("op_write"), 2);
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
 
@@ -227,16 +227,16 @@ static void scenario_a_lone_byte_during_a_data_phase_is_data(void) {
     pbt_args_addr_size(&cmd, RP2350_SRAM_BASE + 0x1400u, sizeof(data));
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_DATA_OUT);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_DATA_OUT);
 
     pbt_host_send(data, 1u);
     pbt_pump();
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_DATA_OUT);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_DATA_OUT);
 
     pbt_host_send(data + 1u, sizeof(data) - 1u);
     pbt_pump();
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(memcmp(pbt_sram() + 0x1400u, data, sizeof(data)), 0);
 
     // Both parts reached the callback, the first as a one-byte write.
@@ -277,7 +277,7 @@ static void scenario_write_running_off_the_end_of_memory_is_refused(void) {
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_INVALID_ARG);
     PBT_CHECK_EQ(pbt_count("op_write"), 0);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 
     // The same length wholly inside SRAM is accepted and lands, so what was
     // refused was the overrun.
@@ -314,7 +314,7 @@ static void scenario_write_to_flash_programs_whole_pages(void) {
     pbt_pump();
     send_data(data, sizeof(data));
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 
     // Two pages, at consecutive page addresses.
     PBT_CHECK_EQ(pbt_count("op_flash_page_write"), 2);
@@ -445,7 +445,7 @@ static void scenario_unaligned_flash_write_is_refused(void) {
     pbt_args_addr_size(&aligned, RP2350_FLASH_BASE + FLASH_PAGE_SIZE, 16u);
     pbt_host_send_cmd(&aligned);
     pbt_pump();
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_DATA_OUT);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_DATA_OUT);
 }
 
 static void scenario_flash_write_without_a_bootrom_routine_is_refused(void) {
@@ -673,11 +673,11 @@ static void scenario_otp_write_sets_rows(void) {
 
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_DATA_OUT);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_DATA_OUT);
 
     send_data((const uint8_t *)rows, sizeof(rows));
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(pbt_otp()[8], rows[0]);
     PBT_CHECK_EQ(pbt_otp()[9], rows[1]);
 
@@ -728,7 +728,7 @@ static void scenario_otp_write_needs_no_flash_page_buffer(void) {
     send_data((const uint8_t *)&row, sizeof(row));
 
     PBT_CHECK_EQ(pbt_otp()[2], row);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 }
 
 static void scenario_otp_write_through_the_ecc_view(void) {
@@ -746,7 +746,7 @@ static void scenario_otp_write_through_the_ecc_view(void) {
     pbt_pump();
     send_data((const uint8_t *)halves, sizeof(halves));
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     for (unsigned i = 0; i < 4u; i++) {
         PBT_CHECK_EQ(pbt_otp()[16u + i], halves[i]);
     }
@@ -791,7 +791,7 @@ static void scenario_otp_write_carries_its_row_cursor_across_packets(void) {
     pbt_pump();
     send_data((const uint8_t *)rows, sizeof(rows));
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     for (unsigned i = 0; i < 32u; i++) {
         PBT_CHECK_EQ(pbt_otp()[64u + i], rows[i]);
     }
@@ -822,7 +822,7 @@ static void scenario_a_packet_too_short_to_be_a_row_is_discarded(void) {
 
     pbt_host_send(runt, sizeof(runt));
     pbt_pump();
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_DATA_OUT);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_DATA_OUT);
     PBT_CHECK_EQ(pbt_count("op_otp_write"), 0);
 
     pbt_host_send(&row, sizeof(row));
@@ -830,7 +830,7 @@ static void scenario_a_packet_too_short_to_be_a_row_is_discarded(void) {
 
     // The row holds what the whole packet carried, with none of the fragment
     // in it — a fragment kept and prepended would have blown different fuses.
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(pbt_otp()[12], row);
     PBT_CHECK_EQ(pbt_count("op_otp_write"), 1);
     PBT_REQUIRE(pbt_nth("op_otp_write", 0) != NULL);

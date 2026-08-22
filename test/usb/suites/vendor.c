@@ -181,7 +181,7 @@ static void scenario_interface_reset_recovers(void) {
 
     PBT_CHECK(!usbt_ep_halted(USBT_EP_OUT));
     PBT_CHECK(!usbt_ep_halted(USBT_EP_IN));
-    PBT_CHECK_EQ(usbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(usbt_cur_state(), PB_STATE_IDLE);
 
     // Discriminate against a reset that merely cleared the flags: a command
     // sent afterwards has to be accepted and answered.

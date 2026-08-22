@@ -28,7 +28,7 @@ static void scenario_valid_command_dispatches(void) {
 
     PBT_CHECK_EQ(pbt_count("op_exclusive_access"), 1);
     PBT_CHECK_EQ(pbt_nth("op_exclusive_access", 0)->a0, PB_EA_EXCL);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK(!pbt_ep_stalled(PBT_EP_OUT));
     PBT_CHECK(!pbt_ep_stalled(PBT_EP_IN));
 }
@@ -45,7 +45,7 @@ static void scenario_cmd_size_mismatch_stalls(void) {
 
     // The rejection has to happen before the command is acted on, not after.
     PBT_CHECK_EQ(pbt_count("op_exclusive_access"), 0);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 }
 
 static void scenario_action_rejects_non_zero_transfer_len(void) {
@@ -226,7 +226,7 @@ static void scenario_short_packet_is_discarded(void) {
 
     // A partial command is dropped rather than stalled, and the endpoints stay
     // running.
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK(!pbt_ep_stalled(PBT_EP_OUT));
     PBT_CHECK_EQ(pbt_count("rx_clear"), 1);
     PBT_CHECK_EQ(picoboot_vendor_available(), 0u);
@@ -249,7 +249,7 @@ static void scenario_single_byte_in_idle_is_consumed(void) {
     // A lone byte is the acknowledgement form the protocol also accepts, and in
     // idle it is swallowed rather than treated as the start of a command.
     PBT_CHECK_EQ(picoboot_vendor_available(), 0u);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(pbt_count("rx_clear"), 0);
 
     picoboot_cmd_t cmd = valid_command();

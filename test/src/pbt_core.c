@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "pbt.h"
+#include "pbt_lib.h"
 
 // Generous: the longest scenario records a few hundred actions.
 #define PBT_EVENT_MAX 4096u
@@ -194,18 +195,8 @@ const char *pbt_status_name(int status) {
 }
 
 const char *pbt_state_name(pb_state_t state) {
-    switch (state) {
-        case PB_STATE_IDLE:
-        case PB_STATE_DATA_OUT:
-        case PB_STATE_DATA_IN:
-        case PB_STATE_CUSTOM_IN:
-        case PB_STATE_AWAIT_ZLP:
-        case PB_STATE_AWAIT_ACK:
-        case PB_STATE_STALLED:
-            return pb_state_to_str[state];
-        default:
-            return "<not a state>";
-    }
+    const char *name = pbt_lib_state_name(state);
+    return name ? name : "<not a state>";
 }
 
 // ---------------------------------------------------------------------------
@@ -217,8 +208,6 @@ picoboot_custom_ops_t pbt_custom_ops;
 bool                  pbt_use_custom;
 bool                  pbt_use_flash_buf;
 
-// The library's state block.  INTEGRATION.md tells an integrator to allocate
-// PICOBOOT_STATE_SIZE bytes at four-byte alignment, and that constant is the
-// device's, where a pointer is four bytes wide.  This process's pointers are
-// wider, so the allocation is taken from sizeof and the constant is checked
-// against the device layout by the assertion in picobootx_private.h.
+// The library's state block is allocated where the entry points are called
+// from — pbt_flow.c for the core suite, usb/usbt_app.c for the other two — and
+// sized from what the implementation under test asks for.  See src/pbt_lib.h.

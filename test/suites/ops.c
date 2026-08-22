@@ -89,7 +89,7 @@ static void scenario_an_action_callback_that_refuses_stalls(void) {
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_INVALID_ARG);
     PBT_CHECK_EQ(pbt_count("op_exclusive_access"), 1);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
 
     // Each defined type is accepted, so what was refused was the value and not
@@ -154,7 +154,7 @@ static void scenario_reboot2_without_execute_still_acknowledges(void) {
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
     PBT_REQUIRE(pbt_packet(0) != NULL);
     PBT_CHECK_EQ(pbt_packet(0)->len, 1u);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 
     // With the callback in place the same command reboots after the same
     // acknowledgement, so what was missing was the reboot and not the reply.
@@ -184,7 +184,7 @@ static void scenario_write_without_prepare_is_refused(void) {
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_UNKNOWN_CMD);
     PBT_CHECK_EQ(pbt_count("op_write"), 0);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 
     // The same write with the callback present is accepted and reaches memory.
     pbt_begin();

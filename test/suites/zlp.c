@@ -40,7 +40,7 @@ static void scenario_acknowledgement_is_one_zero_byte(void) {
     PBT_CHECK_EQ(pbt_packet(0)->len, 1u);
     PBT_CHECK_EQ(pbt_packet(0)->data[0], 0u);
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 }
 
 static void scenario_acknowledgement_precedes_the_return_to_idle(void) {
@@ -54,10 +54,10 @@ static void scenario_acknowledgement_precedes_the_return_to_idle(void) {
     // gone, the device is still waiting on it.
     pbt_task();
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_AWAIT_ZLP);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_AWAIT_ZLP);
 
     pbt_complete_tx();
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 }
 
 static void scenario_a_full_endpoint_gets_no_trailing_packet(void) {
@@ -74,7 +74,7 @@ static void scenario_a_full_endpoint_gets_no_trailing_packet(void) {
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
     PBT_REQUIRE(pbt_packet(0) != NULL);
     PBT_CHECK_EQ(pbt_packet(0)->len, 64u);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_AWAIT_ACK);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_AWAIT_ACK);
 }
 
 static void scenario_two_full_endpoints_get_no_trailing_packet(void) {
@@ -114,10 +114,10 @@ static void scenario_zero_length_acknowledgement_ends_a_transfer(void) {
     picoboot_cmd_t cmd = sram_read(32u);
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_AWAIT_ACK);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_AWAIT_ACK);
 
     pbt_host_ack();
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 
     picoboot_status_t status;
     PBT_REQUIRE(pbt_ctrl_get_status(&status));
@@ -132,12 +132,12 @@ static void scenario_single_byte_acknowledgement_ends_a_transfer(void) {
     picoboot_cmd_t cmd = sram_read(32u);
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_AWAIT_ACK);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_AWAIT_ACK);
 
     // A host stack that cannot send a true zero-length packet sends one byte,
     // and that is accepted as the same thing.
     pbt_host_ack_byte();
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 
     // And the byte is swallowed rather than left in front of the next command.
     PBT_CHECK_EQ(picoboot_vendor_available(), 0u);
@@ -150,7 +150,7 @@ static void scenario_the_next_command_also_ends_a_transfer(void) {
     picoboot_cmd_t read = sram_read(32u);
     pbt_host_send_cmd(&read);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_AWAIT_ACK);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_AWAIT_ACK);
 
     // A host that goes straight on to its next command rather than
     // acknowledging is taken to have acknowledged, and the command it sent is
@@ -181,7 +181,7 @@ static void scenario_reboot_runs_only_once_the_ack_has_gone(void) {
     pbt_task();
     PBT_CHECK_EQ(pbt_count("op_reboot2_prepare"), 1);
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_AWAIT_ZLP);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_AWAIT_ZLP);
 
     // Queued, not yet gone — and the reboot has not happened.
     PBT_CHECK_EQ(pbt_count("op_reboot2_execute"), 0);

@@ -14,14 +14,14 @@
 // usbip bridge lets a real one drive it from outside the process.  Both link
 // this, unchanged.
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "tusb.h"
 #include "usbt.h"
+#include "pbt_lib.h"
 #include "usbt_dcd.h"
 
-static union {
-    uint32_t         words[PICOBOOT_STATE_SIZE / 4];
-    pb_state_block_t block;
-} s_state_buf;
 
 static uint8_t s_flash_write_buf[256] __attribute__((aligned(4)));
 
@@ -32,8 +32,28 @@ static bool s_started;
 // Whether usbt_app_task turns picobootx's task.  See usbt_run_picoboot_task.
 static bool s_run_task = true;
 
+// The library's state block, allocated to exactly the size and alignment the
+// implementation under test asks for.  Exact rather than a fixed buffer with
+// room to spare, because the slack in a buffer is somewhere a write past the
+// end of the block lands without the sanitiser seeing it.
+static pb_state_block_t *s_state;
+
 pb_state_block_t *usbt_state(void) {
-    return &s_state_buf.block;
+    if (!s_state) {
+        size_t align = pbt_lib_state_align();
+        size_t size  = (pbt_lib_state_size() + align - 1u) / align * align;
+        s_state = aligned_alloc(align, size);
+        if (!s_state) {
+            fprintf(stderr, "could not allocate %zu bytes at %zu-byte "
+                            "alignment for the state block\n", size, align);
+            abort();
+        }
+    }
+    return s_state;
+}
+
+pb_state_t usbt_cur_state(void) {
+    return pbt_lib_state_of(usbt_state());
 }
 
 // Put the application back to before picoboot_init, which is where a device is
@@ -44,11 +64,11 @@ void usbt_app_reset(void) {
 }
 
 void app_picoboot_rx_cb(uint32_t available_bytes) {
-    picoboot_rx_cb(&s_state_buf.block, available_bytes);
+    picoboot_rx_cb(usbt_state(), available_bytes);
 }
 
 void app_picoboot_tx_cb(uint32_t sent_bytes) {
-    picoboot_tx_cb(&s_state_buf.block, sent_bytes);
+    picoboot_tx_cb(usbt_state(), sent_bytes);
 }
 
 // Defined in pbt_ops.c, which every suite shares.
@@ -58,7 +78,7 @@ void pbt_ops_reset(void);
 // on a device, so whatever pumps tud_task pumps this alongside it.
 void usbt_app_task(void) {
     if (s_started && s_run_task) {
-        picoboot_task(&s_state_buf.block);
+        picoboot_task(usbt_state());
     }
 }
 
@@ -74,12 +94,13 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     if (!s_started) {
         return false;
     }
-    return picoboot_control_xfer_cb(&s_state_buf.block, rhport, stage, request);
+    return picoboot_control_xfer_cb(usbt_state(), rhport, stage, request);
 }
 
 void usbt_start_picoboot(void) {
     pbt_ops_reset();
-    picoboot_init(&s_state_buf.block, &pbt_ops, NULL, s_flash_write_buf,
+
+    picoboot_init(usbt_state(), &pbt_ops, NULL, s_flash_write_buf,
                   USBT_RHPORT, USBT_EP_OUT, USBT_EP_IN, NULL);
     s_started = true;
 }

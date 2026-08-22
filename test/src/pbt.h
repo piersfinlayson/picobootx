@@ -210,8 +210,13 @@ extern bool pbt_use_flash_buf;
 // Initialise the library with the above.  Call once, after any overrides.
 void pbt_start(void);
 
-// The library's state block.
+// The library's state block.  picobootx.h declares the type without its
+// layout, so this says which pointer it is without the harness knowing what is
+// inside one.  What the state machine is doing is pbt_cur_state's answer.
 pb_state_block_t *pbt_state(void);
+
+// What the library is doing.
+pb_state_t pbt_cur_state(void);
 
 // ---------------------------------------------------------------------------
 // The device model

@@ -224,7 +224,7 @@ static void scenario_a_read_that_fails_partway_stalls(void) {
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), READ_REFUSAL_STATUS);
 
     PBT_CHECK_EQ(pbt_count("op_read"), 2);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 
     // The host is left holding the packet it already had, and the halt is what
     // tells it no more is coming.  A device that returned silently here would
@@ -426,7 +426,7 @@ static void scenario_get_info_sys_that_fills_the_wrong_amount_is_refused(void) {
     // The leading count had been produced and is discarded with the rest, so
     // the host is not handed the beginning of an answer that has no end.
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 
     // The same request against a callback that fills what it says it filled is
     // answered, so what was refused was the disagreement.
@@ -620,7 +620,7 @@ static void scenario_status_names_the_command_in_flight(void) {
     pbt_args_addr_size(&second, RP2350_SRAM_BASE, 32u);
     pbt_host_send_cmd(&second);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_AWAIT_ACK);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_AWAIT_ACK);
 
     // GET_COMMAND_STATUS answers for the command still in progress, which is
     // what the picoboot specification asks of it.  A host that asks mid-transfer

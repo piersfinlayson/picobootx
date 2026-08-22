@@ -31,7 +31,7 @@ static void scenario_stall_halts_both_endpoints(void) {
     PBT_CHECK_EQ(pbt_nth("stall", 0)->a0, PBT_EP_OUT);
     PBT_CHECK_EQ(pbt_nth("stall", 1)->a0, PBT_EP_IN);
 
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 }
 
 static void scenario_a_halt_stops_the_host_being_heard(void) {
@@ -113,7 +113,7 @@ static void scenario_status_explains_an_unattributed_halt(void) {
     picoboot_status_t status;
     PBT_REQUIRE(pbt_ctrl_get_status(&status));
     PBT_CHECK_STATUS(status.status_code, PB_STATUS_UNKNOWN_ERROR);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 }
 
 static void scenario_status_does_not_overwrite_a_known_failure(void) {
@@ -144,13 +144,13 @@ static void scenario_interface_reset_clears_everything(void) {
     picoboot_cmd_t cmd = stalling_command();
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_STALLED);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_STALLED);
 
     PBT_REQUIRE(pbt_ctrl_interface_reset());
 
     PBT_CHECK(!pbt_ep_stalled(PBT_EP_OUT));
     PBT_CHECK(!pbt_ep_stalled(PBT_EP_IN));
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
     PBT_CHECK_EQ(pbt_count("unstall"), 2);
 
     // Answered with a status stage only — there is no data to return.
@@ -169,7 +169,7 @@ static void scenario_clear_halt_rearms_the_out_endpoint(void) {
     picoboot_cmd_t cmd = stalling_command();
     pbt_host_send_cmd(&cmd);
     pbt_pump();
-    PBT_REQUIRE(pbt_state()->state == PB_STATE_STALLED);
+    PBT_REQUIRE(pbt_cur_state() == PB_STATE_STALLED);
 
     PBT_CHECK(pbt_ctrl_clear_ep_halt(PBT_EP_OUT));
 
@@ -182,7 +182,7 @@ static void scenario_clear_halt_rearms_the_out_endpoint(void) {
     // The state machine is deliberately left alone: clearing a halt is the
     // host's business with the endpoint, and says nothing about the command
     // that failed.  Only INTERFACE RESET returns the device to idle.
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 }
 
 static void scenario_clear_halt_resets_the_in_endpoint(void) {
@@ -197,7 +197,7 @@ static void scenario_clear_halt_resets_the_in_endpoint(void) {
 
     PBT_CHECK_EQ(pbt_count("tx_clear"), 1);
     PBT_CHECK_EQ(pbt_count("rx_clear"), 0);
-    PBT_CHECK_EQ(pbt_state()->state, PB_STATE_STALLED);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
 }
 
 static void scenario_clear_halt_of_another_endpoint_is_declined(void) {
@@ -277,7 +277,7 @@ static void scenario_the_later_stages_of_a_transfer_are_claimed(void) {
             picoboot_cmd_t cmd = stalling_command();
             pbt_host_send_cmd(&cmd);
             pbt_pump();
-            PBT_REQUIRE(pbt_state()->state == PB_STATE_STALLED);
+            PBT_REQUIRE(pbt_cur_state() == PB_STATE_STALLED);
 
             bool claimed = pbt_ctrl_at_stage(
                 stages[s], requests[i].type, requests[i].recipient,
@@ -294,7 +294,7 @@ static void scenario_the_later_stages_of_a_transfer_are_claimed(void) {
                          "%s at stage %u answered the host a second time",
                          requests[i].name, stages[s]);
             }
-            if (pbt_state()->state != PB_STATE_STALLED ||
+            if (pbt_cur_state() != PB_STATE_STALLED ||
                 pbt_count("rx_clear") != 0 || pbt_count("tx_clear") != 0 ||
                 pbt_count("unstall") != 0) {
                 pbt_fail(__FILE__, __LINE__,

@@ -9,7 +9,7 @@ use crate::control::{Control, Recipient, Request, RequestType, Stage};
 use crate::control::{REQUEST_GET_CMD_STATUS, REQUEST_INTERFACE_RESET};
 use crate::ops::{Custom, Ecc, Exclusive, Filled, Ops, Reboot, Target};
 use crate::transport::{Direction, Transport};
-use crate::wire::{CMD_LEN, Command, DIR_IN, FLASH_PAGE_SIZE, MAGIC, StatusBlock};
+use crate::wire::{CMD_LEN, Command, DIR_IN, FLASH_PAGE_SIZE, INFO_FLAGS, MAGIC, StatusBlock};
 use crate::{Result, Status};
 
 /// What the state machine is doing.
@@ -61,16 +61,6 @@ const CMD_OTP_READ: u8 = 0x8c;
 
 const INFO_SYS: u8 = 0x01;
 const INFO_PARTITION: u8 = 0x02;
-
-// Which system info flags exist, and how many words each carries.
-const INFO_FLAGS: [(u32, u32); 6] = [
-    (0x0001, 3), // chip info
-    (0x0002, 1), // critical
-    (0x0004, 1), // cpu info
-    (0x0008, 1), // flash device info
-    (0x0010, 4), // boot random
-    (0x0040, 4), // boot info
-];
 
 // The partition info type answers with this, whatever the device is.
 const PARTITION_DATA: [u32; 5] = [

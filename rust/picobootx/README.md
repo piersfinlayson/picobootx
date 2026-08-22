@@ -84,7 +84,6 @@ gets it wrong.
 ## Companion crates
 
 - `picobootx-rp2350` — the RP2350 operations, ready to use or to start from
-- `picobootx-embassy` — [`Transport`] over embassy-usb, and a task to drive it
 
 ## Licence
 

@@ -25,6 +25,40 @@ pub const FLASH_PAGE_SIZE: usize = 256;
 /// One flash block, the unit a bulk erase works in.
 pub const FLASH_BLOCK_SIZE: u32 = 65536;
 
+/// Which system information flags exist, and how many words each carries.
+///
+/// The protocol names the flags and the device answers whichever of them it was
+/// asked for, one after another, so the word counts are what a host reads the
+/// answer apart by.
+pub(crate) const INFO_FLAGS: [(u32, u32); 6] = [
+    (0x0001, 3), // chip info
+    (0x0002, 1), // critical
+    (0x0004, 1), // cpu info
+    (0x0008, 1), // flash device info
+    (0x0010, 4), // boot random
+    (0x0040, 4), // boot info
+];
+
+/// The most words any one system information flag carries.
+///
+/// This is what a buffer serving one flag has to be able to hold, and it is
+/// taken from the table above rather than written out beside it, so a flag with
+/// a longer answer widens the buffers that carry it instead of being quietly
+/// refused by them.
+pub const INFO_MAX_WORDS: usize = info_max_words();
+
+const fn info_max_words() -> usize {
+    let mut max = 0;
+    let mut i = 0;
+    while i < INFO_FLAGS.len() {
+        if INFO_FLAGS[i].1 as usize > max {
+            max = INFO_FLAGS[i].1 as usize;
+        }
+        i += 1;
+    }
+    max
+}
+
 /// The 32 bytes a host sends to start a command.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]

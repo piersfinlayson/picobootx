@@ -113,6 +113,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: thumbv8m.main-none-eabi
 
       - name: Check formatting
         run: |
@@ -123,6 +124,15 @@ jobs:
         run: |
           cd rust && cargo clippy --workspace --all-targets --release -- -D warnings
           cd interop && cargo clippy --all-targets --release -- -D warnings
+
+      # The default RP2350 implementations again, for the part.  The lint above
+      # runs on this machine, where the host half of the seam is selected and
+      # the device half — absolute addresses, a transmute, two asm blocks and
+      # the .ramfunc placement — is compiled by nobody.
+      - name: Lint the default implementations for the part
+        run: |
+          cd rust && cargo clippy -p picobootx-rp2350 \
+              --target thumbv8m.main-none-eabi --release -- -D warnings
 
   # How much of the library the suites reach, merged.  The number is printed and
   # then gated: every line and function of picobootx.c, picobootx_impl.c and

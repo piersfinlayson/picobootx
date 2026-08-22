@@ -19,3 +19,4 @@ crate-type = ["staticlib"]
 
 [dependencies]
 picobootx = { workspace = true }
+picobootx-rp2350 = { workspace = true }

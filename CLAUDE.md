@@ -65,8 +65,10 @@ shipped hardware.
 - `test/` — the two conformance suites, and `test/usbip/`, the bridge that puts
   the device on a real USB bus for a host tool.  `test/tinyusb` is cloned at a
   pinned commit, not committed.
-- `rust/` — the Rust picobootx.  `picobootx` is the library, `picobootx-ffi` the
-  C ABI `picobootx.h` describes, which is how the conformance suite drives it.
+- `rust/` — the Rust picobootx.  `picobootx` is the library, `picobootx-rp2350`
+  the default RP2350 implementations — the port of `src/picobootx_impl.c`, with
+  its own copy of the host-test seam — and `picobootx-ffi` the C ABI
+  `picobootx.h` describes, which is how the conformance suite drives them.
   `rust/interop` is a workspace of its own holding the picoboot-rs interop
   driver, which tracks picoboot-rs rather than pinning it and is reached only by
   `make test-rust`.  It is separate so the archive the suite links does not need
@@ -90,10 +92,13 @@ picobootx reaches the outside world in two places, and they are not alike.
 
 ## The host-test seam
 
-`picobootx_impl.c` reaches past the protocol to the chip: a bootrom table at
-absolute address 0x16, a QMI register, the interrupt-enable bit, placing a
-function in RAM, and reads and writes of arbitrary device addresses.  Each goes
-through a macro in `picobootx_impl.h`.
+The default implementations reach past the protocol to the chip: a bootrom table
+at absolute address 0x16, a QMI register, the interrupt-enable bit, placing a
+function in RAM, and reads and writes of arbitrary device addresses.  Both
+implementations put each of the five behind a seam, and one harness answers
+both, since the `picobootx_host_test_*` names are the same either side.
+
+In C, `picobootx_impl.c` goes through a macro in `picobootx_impl.h`.
 
 - Defining `PICOBOOTX_HOST_TEST` selects the host expansion, which calls a
   `picobootx_host_test_*` function the harness supplies.
@@ -103,6 +108,25 @@ through a macro in `picobootx_impl.h`.
   `arm-none-eabi-objdump -d examples/tinyusb/build/picobootx.elf`.
 - A new chip access needs a new seam.  Do not reach for `#ifdef` at the call
   site.
+
+In Rust, `rust/picobootx-rp2350/src/chip.rs` holds both halves of all five, one
+`#[cfg(target_os = "none")]` and one `#[cfg(not(...))]`, so a bare-metal target
+reaches the chip and every other target reaches the harness.  Placing a function
+in RAM is the one seam that is not a call: it is a `#[cfg_attr]` written at
+`erase_critical` in `defaults.rs`.
+
+- What the objdump check protects is that `erase_critical` really can run while
+  flash is unreadable, which means it must reach nothing that is fetched from
+  flash.  In Rust that is `.ramfunc` carrying **no `.rel.ramfunc`** — no
+  outbound calls at all, with the bootrom routines arriving as arguments and
+  called through a register.  Check with, from `rust`,
+  `cargo build -p picobootx-rp2350 --target thumbv8m.main-none-eabi --release`
+  and then `arm-none-eabi-readelf -S` on the rlib for the section, and
+  `arm-none-eabi-objdump -r` on it for the absence of relocations against it.
+- The default implementations are Arm-only — the bootrom entries they ask for
+  are the Arm secure ones and the interrupt mask is `cpsid i` — so a bare-metal
+  build for anything else is refused by a `compile_error!` rather than failing
+  in the assembler.
 
 ## The conformance suite
 
@@ -125,20 +149,26 @@ The same targets work from `test` itself, where `run` stands in for `test` and
 name contains a string.  A bare `make` builds without running in both places.
 
 `LIB=` chooses which implementation of picobootx is under test.  `LIB=c` is the
-C in `src/`.  `LIB=rust` takes the protocol from the Rust library and links the
-archive `rust/picobootx-ffi` builds, keeping the default RP2350 implementations
-in `src/picobootx_impl.c` and the tinyusb vendor driver in
-`src/picobootx_vendor.c`.  Both pass every scenario, and the harness reaches the
-library only through `test/src/pbt_lib.h`, which each implementation answers in
-its own `pbt_lib_<lib>.c`.
+C in `src/`.  `LIB=rust` takes both the protocol and the default RP2350
+implementations from the Rust crates, linking the archive `rust/picobootx-ffi`
+builds, and leaves only the tinyusb vendor driver in `src/picobootx_vendor.c` as
+C.  Both pass every scenario, and the harness reaches the library only through
+`test/src/pbt_lib.h`, which each implementation answers in its own
+`pbt_lib_<lib>.c`.
+
+Every scenario runs under both, which is what makes the two agree rather than
+merely both pass.  A defect in one that the other does not have shows up as a
+scenario that fails under one `LIB` and passes under the other, and that
+asymmetry is the proof a new scenario bites.
 
 There are two suites, and which one a scenario belongs in is decided by what it
 needs to reach.  There is also a third build, `usbip`, which is a program rather
 than a suite — see below.
 
-**core** compiles the shipped `picobootx.c` and `picobootx_impl.c` for the host.
-The harness supplies the wire (`test/src/pbt_wire.c`), the device model
-(`test/src/pbt_device.c`), the callbacks and a sample custom command
+**core** builds the protocol and the default implementations for the host —
+`picobootx.c` and `picobootx_impl.c` under `LIB=c`, the Rust archive under
+`LIB=rust`.  The harness supplies the wire (`test/src/pbt_wire.c`), the device
+model (`test/src/pbt_device.c`), the callbacks and a sample custom command
 implementation (`test/src/pbt_ops.c`).  Scenarios live in `test/suites/`.  There
 is no tinyusb in this build at all, which is what keeps it quick to run and free
 of a cloned dependency.
@@ -195,11 +225,14 @@ Rules that keep it worth having:
 
 ## Coverage
 
-`make cov` runs both suites, merges what each reached, measures `picobootx.c`,
-`picobootx_impl.c` and `picobootx_vendor.c`, and **fails below 100%** of lines
-and functions.  CI runs it.  It measures the `LOGGING=1` build, because
-`command_to_str` is called only from a log statement and is unreachable with
-logging off.  Branch counts are listed alongside and not gated — gcc and
+`make cov` runs both suites, merges what each reached, and **fails below 100%**
+of lines and functions.  What it measures depends on `LIB`, since it counts the
+C the suites drive: `picobootx.c`, `picobootx_impl.c` and `picobootx_vendor.c`
+under `LIB=c`, and `picobootx_vendor.c` alone under `LIB=rust`, where the other
+two are the Rust archive's and carry no counters.  CI runs the `LIB=c` figure,
+which is the one that covers the whole of the C.  It measures the `LOGGING=1`
+build, because `command_to_str` is called only from a log statement and is
+unreachable with logging off.  Branch counts are listed alongside and not gated — gcc and
 llvm-cov disagree on what counts as a branch, so a branch gate would hold under
 one compiler and fail under the other.
 

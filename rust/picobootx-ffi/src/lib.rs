@@ -12,6 +12,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod cabi;
+mod defaults;
 mod ops;
 mod transport;
 

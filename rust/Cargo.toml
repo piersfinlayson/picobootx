@@ -2,14 +2,16 @@
 #
 # MIT License
 
-# picobootx's Rust: the library, the shim the conformance suite links against,
-# and the interop driver that puts a real host on the other end of a USB bus.
+# picobootx's Rust: the library, the default RP2350 implementations, the shim
+# the conformance suite links against, and the interop driver that puts a real
+# host on the other end of a USB bus.
 
 [workspace]
 resolver = "3"
 members = [
     "picobootx",
     "picobootx-ffi",
+    "picobootx-rp2350",
 ]
 
 # interop is a workspace of its own.  It takes picoboot-rs from git, and the
@@ -23,8 +25,12 @@ license = "MIT"
 authors = ["Piers Finlayson <piers@piers.rocks>"]
 repository = "https://github.com/piersfinlayson/picobootx"
 
+# Both a path and a version.  cargo builds against the path, and publishing
+# refuses a dependency with no version, so a crate here cannot reach crates.io
+# without one.
 [workspace.dependencies]
-picobootx = { path = "picobootx" }
+picobootx = { path = "picobootx", version = "0.2.0" }
+picobootx-rp2350 = { path = "picobootx-rp2350", version = "0.2.0" }
 
 # The shim is linked into a C test binary, which has no unwinder.
 #

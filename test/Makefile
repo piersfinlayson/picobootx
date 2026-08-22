@@ -55,8 +55,8 @@ OPT     ?= -O1 -g
 #         host tool drives it.  A program rather than a suite.  Linux only, and
 #         it needs root.
 #
-# All three compile picobootx.c and picobootx_impl.c, with different headers and
-# different flags, so each keeps its own object directory.
+# All three build the same library, with different headers and different flags,
+# so each keeps its own object directory.
 SUITE ?= core
 
 # Names the file answering src/pbt_lib.h, which is where the harness asks the
@@ -92,8 +92,9 @@ ROOT    := ..
 # configuration that lands somewhere else cannot be driven by a stale one.
 BRIDGE  := build/usbip$(if $(filter rust,$(LIB)),-rust)/picobootx-usbip
 
-# The Rust library is an archive cargo builds.  It carries the protocol only:
-# the default RP2350 implementations beside it are still the C ones.
+# The Rust library is an archive cargo builds.  It carries the protocol and the
+# default RP2350 implementations, so nothing in ../src is compiled for it but
+# the tinyusb vendor driver.
 ifeq ($(LIB),rust)
 RUST_DIR := $(ROOT)/rust
 RUST_A   := $(RUST_DIR)/target/release/libpicobootx_ffi.a
@@ -187,8 +188,7 @@ ifneq ($(filter usb usbip,$(SUITE)),)
 # stands in for class/vendor/vendor_device.c, which is why that file is not
 # among the tinyusb sources below.
 LIB_SRC := \
-	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c) \
-	$(ROOT)/src/picobootx_impl.c \
+	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c $(ROOT)/src/picobootx_impl.c) \
 	$(ROOT)/src/picobootx_vendor.c
 
 TINYUSB_SRC := \
@@ -251,8 +251,7 @@ else
 # tinyusb vendor driver, and the harness supplies its own implementation of the
 # picoboot_vendor_* API it provides.  The usb suite covers it.
 LIB_SRC := \
-	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c) \
-	$(ROOT)/src/picobootx_impl.c
+	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c $(ROOT)/src/picobootx_impl.c)
 
 HARNESS_SRC := \
 	src/pbt_core.c \
@@ -352,9 +351,12 @@ COV_HTML := $(COV_DIR)/html
 # picobootx_vendor.c is only in the usb suite's build, and a gate that forgot it
 # when invoked from the core suite would pass while measuring two files out of
 # three.
+#
+# Under LIB=rust the only C left is picobootx_vendor.c, and that is all this
+# measures: the protocol and the default implementations are then the Rust
+# archive's, which carries no gcov counters.
 COV_LIB_SRC := \
-	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c) \
-	$(ROOT)/src/picobootx_impl.c \
+	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c $(ROOT)/src/picobootx_impl.c) \
 	$(ROOT)/src/picobootx_vendor.c
 
 # The library files as lcov patterns rather than as paths, since lcov records
@@ -427,8 +429,8 @@ cov-capture:
 	lcov --gcov-tool $(COV_DIR)/gcov-tool --capture --directory $(COV_USB) \
 	     --output-file $(COV_DIR)/usb.info --rc branch_coverage=1 $(COV_IGNORE)
 	@# Merged, so a line one suite reaches counts however the other fares.  The
-	@# two share picobootx.c and picobootx_impl.c, and only the usb suite
-	@# compiles picobootx_vendor.c at all.
+	@# two share whichever of the library's C files this LIB builds, and only
+	@# the usb suite compiles picobootx_vendor.c at all.
 	lcov --add-tracefile $(COV_DIR)/core.info --add-tracefile $(COV_DIR)/usb.info \
 	     --output-file $(COV_ALL) --rc branch_coverage=1 $(COV_IGNORE)
 	lcov --extract $(COV_ALL) $(COV_PATTERN) \

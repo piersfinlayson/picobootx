@@ -1,0 +1,32 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# The default RP2350 implementations of what picobootx asks a device to do.
+
+[package]
+name = "picobootx-rp2350"
+version = "0.2.0"
+description = "Default RP2350 implementations of the picobootx device operations"
+keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
+categories = ["embedded", "no-std"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# picobootx alone, so the two speak one vocabulary of statuses and sizes rather
+# than each declaring its own copy.  Everything below it reaches the chip
+# through raw pointers, which is what leaves room for the host-test seam and
+# what keeps a bootrom routine the part does not publish answerable rather than
+# a jump through a null pointer.
+[dependencies]
+picobootx = { workspace = true }
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

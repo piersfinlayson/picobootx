@@ -156,7 +156,15 @@ fn is_bridge_device(bus: &str) -> bool {
 /// The bus entry is a symlink into the device tree, and the controller that owns
 /// it is a component of what it resolves to.
 fn bus_is_virtual(devices_root: &Path, bus: &str) -> bool {
-    std::fs::canonicalize(devices_root.join(format!("usb{bus}")))
+    // nusb reports the bus zero padded to three digits, and sysfs names the root
+    // hub without the padding, so "003" here is "usb3" there.  Going through a
+    // number rather than trimming characters means either spelling arrives at
+    // the same entry, and anything that is not a number is refused.
+    let Ok(number) = bus.trim().parse::<u32>() else {
+        return false;
+    };
+
+    std::fs::canonicalize(devices_root.join(format!("usb{number}")))
         .map(|p| {
             p.components()
                 .any(|c| c.as_os_str().to_string_lossy().starts_with(VHCI_DRIVER))
@@ -185,6 +193,7 @@ async fn main() -> ExitCode {
         }
     };
 
+    let seen = candidates.len();
     let mut bridged: Vec<_> = candidates
         .into_iter()
         .filter(|info| is_bridge_device(info.bus_id()))
@@ -193,9 +202,12 @@ async fn main() -> ExitCode {
     let device = match bridged.len() {
         1 => bridged.remove(0),
         0 => {
+            // Said apart, because "the bridge is not running" and "the bridge is
+            // running and this refused it" are different faults and the second
+            // is this tool's own.
             println!(
-                "  FAIL  picoboot-rs finds the bridge's device: none behind {VHCI_DRIVER}, so \
-                 there is nothing here this may touch.  Start the bridge with \
+                "  FAIL  picoboot-rs finds the bridge's device: {seen} PICOBOOT devices on the \
+                 bus, none behind {VHCI_DRIVER}.  Start the bridge with \
                  rust/interop/interop.sh, which is the only supported way to run this."
             );
             println!();
@@ -404,16 +416,36 @@ mod tests {
         devices
     }
 
+    /// The spelling nusb actually hands over, which is zero padded to three
+    /// digits.  This is the case the tests missed once, and the padding made the
+    /// tool refuse every device including the bridge's.
+    #[test]
+    fn the_bridges_bus_is_taken_as_virtual_as_nusb_spells_it() {
+        let devices = tree("vhci-padded", "3", "vhci_hcd.0");
+        assert!(bus_is_virtual(&devices, "003"));
+    }
+
     #[test]
     fn the_bridges_bus_is_taken_as_virtual() {
         let devices = tree("vhci", "3", "vhci_hcd.0");
         assert!(bus_is_virtual(&devices, "3"));
     }
 
+    /// A bus that is not a number cannot name an entry, so it is refused rather
+    /// than reaching the filesystem as whatever it happens to say.
+    #[test]
+    fn a_bus_that_is_not_a_number_is_not() {
+        let devices = tree("nonnumeric", "3", "vhci_hcd.0");
+        assert!(!bus_is_virtual(
+            &devices,
+            "../../../devices/platform/vhci_hcd.0"
+        ));
+    }
+
     #[test]
     fn a_real_controllers_bus_is_not() {
         let devices = tree("xhci", "1", "xhci-hcd.0");
-        assert!(!bus_is_virtual(&devices, "1"));
+        assert!(!bus_is_virtual(&devices, "001"));
     }
 
     /// A controller whose name merely contains the driver's is not it.  The

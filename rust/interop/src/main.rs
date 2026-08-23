@@ -19,9 +19,22 @@
 //! Checks run in order against one device and print as they go, the way the C
 //! suites and picotool.sh do, rather than as cargo tests — several of them only
 //! mean anything in sequence, and there is one device for them to share.
+//!
+//! # This never touches a board
+//!
+//! The checks erase flash and blow an OTP row. Behind the bridge those are a few
+//! bytes of a model that starts again on the next run. On a real part the flash
+//! erase takes out whatever was running and the OTP row is gone for good, since
+//! a fuse goes one way only.
+//!
+//! So this refuses to open anything that is not behind the usbip virtual host
+//! controller. The bridge's device is, a board on a real controller cannot be,
+//! and a machine that cannot answer the question at all is refused too.
 
+use std::path::Path;
 use std::process::ExitCode;
 
+use nusb::DeviceInfo;
 use picoboot::{Access, Connection, Picoboot, PicobootCmd, PicobootCmdId, Target};
 
 /// Where the checks work, and how much they move.  The flash model behind the
@@ -114,6 +127,44 @@ async fn otp_read(conn: &mut Connection) -> Result<u16, String> {
     Ok(u16::from_le_bytes([data[0], data[1]]))
 }
 
+/// The controller usbip attaches through.  A device behind it was made by the
+/// bridge, and real silicon, which sits behind a real host controller, can never
+/// be behind it.
+const VHCI_DRIVER: &str = "vhci_hcd";
+
+/// Whether this device is the bridge's rather than a board somebody has plugged
+/// in.  The checks below erase flash and blow an OTP row, which the model behind
+/// the bridge forgets on the next run and a real part keeps for good, so the
+/// question is asked of every candidate before one is opened.
+///
+/// It is asked of the kernel rather than of the descriptors, because the bridge
+/// presents the same 2e8a:000f a real part does — that is the point of it — so
+/// nothing the device says about itself can separate the two.  The bus a device
+/// is on is not the device's to claim.
+///
+/// Anything other than a clear yes is a no, so a system that cannot answer at
+/// all, such as one that is not Linux, refuses rather than proceeds.
+fn is_bridge_device(info: &DeviceInfo) -> bool {
+    bus_is_virtual(Path::new("/sys/bus/usb/devices"), info.bus_id())
+}
+
+/// Whether one bus is the virtual controller's, given where the USB device tree
+/// is rooted.  Split from `is_bridge_device` so the discrimination can be tested
+/// against a tree that is not the running kernel's — the answer this gives is
+/// the only thing standing between these checks and somebody's board, so it is
+/// worth testing rather than assuming.
+///
+/// The bus entry is a symlink into the device tree, and the controller that owns
+/// it is a component of what it resolves to.
+fn bus_is_virtual(devices_root: &Path, bus: &str) -> bool {
+    std::fs::canonicalize(devices_root.join(format!("usb{bus}")))
+        .map(|p| {
+            p.components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with(VHCI_DRIVER))
+        })
+        .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     println!("picobootx against picoboot-rs, through nusb");
@@ -122,7 +173,45 @@ async fn main() -> ExitCode {
 
     let mut report = Report::new();
 
-    let mut picoboot = match Picoboot::from_first(None).await {
+    // The device is found rather than chosen: the first PICOBOOT device on the
+    // bus is whatever happens to be plugged in, and these checks would take a
+    // board apart.
+    let candidates = match Picoboot::list_devices(None).await {
+        Ok(d) => d,
+        Err(e) => {
+            println!("  FAIL  picoboot-rs lists the bus: {e}");
+            println!();
+            println!("1 checks, 1 failed");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut bridged: Vec<DeviceInfo> = candidates.into_iter().filter(is_bridge_device).collect();
+
+    let device = match bridged.len() {
+        1 => bridged.remove(0),
+        0 => {
+            println!(
+                "  FAIL  picoboot-rs finds the bridge's device: none behind {VHCI_DRIVER}, so \
+                 there is nothing here this may touch.  Start the bridge with \
+                 rust/interop/interop.sh, which is the only supported way to run this."
+            );
+            println!();
+            println!("1 checks, 1 failed");
+            return ExitCode::FAILURE;
+        }
+        n => {
+            println!(
+                "  FAIL  picoboot-rs finds the bridge's device: {n} are behind {VHCI_DRIVER} and \
+                 there is no way to tell which the bridge made"
+            );
+            println!();
+            println!("1 checks, 1 failed");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut picoboot = match Picoboot::new(device).await {
         Ok(p) => p,
         Err(e) => {
             println!("  FAIL  picoboot-rs finds the device: {e}");
@@ -288,5 +377,58 @@ async fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// A USB device tree with one bus on the controller named, laid out the way
+    /// sysfs lays one out: the bus is a symlink into the device tree, and the
+    /// controller is a directory along the way.
+    fn tree(name: &str, bus: &str, controller: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("pbx-bus-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let real = root
+            .join("devices/platform")
+            .join(controller)
+            .join(format!("usb{bus}"));
+        std::fs::create_dir_all(&real).unwrap();
+        let devices = root.join("bus/usb/devices");
+        std::fs::create_dir_all(&devices).unwrap();
+        symlink(&real, devices.join(format!("usb{bus}"))).unwrap();
+        devices
+    }
+
+    #[test]
+    fn the_bridges_bus_is_taken_as_virtual() {
+        let devices = tree("vhci", "3", "vhci_hcd.0");
+        assert!(bus_is_virtual(&devices, "3"));
+    }
+
+    #[test]
+    fn a_real_controllers_bus_is_not() {
+        let devices = tree("xhci", "1", "xhci-hcd.0");
+        assert!(!bus_is_virtual(&devices, "1"));
+    }
+
+    /// A controller whose name merely contains the driver's is not it.  The
+    /// component has to start with the name, or a board on something called
+    /// "not-vhci_hcd" would be opened and taken apart.
+    #[test]
+    fn a_controller_that_only_contains_the_name_is_not_it() {
+        let devices = tree("nearly", "2", "not-vhci_hcd.0");
+        assert!(!bus_is_virtual(&devices, "2"));
+    }
+
+    /// A bus that is not there at all is not the bridge's.  This is what a
+    /// machine with no sysfs answers, so the tool refuses there rather than
+    /// carrying on.
+    #[test]
+    fn an_absent_bus_is_not() {
+        let devices = tree("absent", "4", "vhci_hcd.0");
+        assert!(!bus_is_virtual(&devices, "9"));
     }
 }

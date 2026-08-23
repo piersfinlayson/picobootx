@@ -1,0 +1,40 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# The device half of the hardware test.  An instrument, not an example: it
+# exists to be driven by test/hw/host, and it carries a way back into BOOTSEL
+# so a run does not need the board jumpered by hand.
+#
+# Its own workspace, for the reason examples/embassy is one - the conformance
+# suite builds rust/ and has no business fetching embassy.
+
+[package]
+name = "picobootx-hw-device"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# No test harness exists for a bare-metal target, so nothing here is a test or
+# a benchmark.  Saying so is what lets --all-targets be asked for.
+[[bin]]
+name = "picobootx-hw-device"
+test = false
+bench = false
+
+[dependencies]
+picobootx = { path = "../../../rust/picobootx" }
+picobootx-embassy = { path = "../../../rust/picobootx-embassy", features = ["rp2350"] }
+picobootx-rp2350 = { path = "../../../rust/picobootx-rp2350" }
+
+embassy-executor = { version = "0.10", features = ["executor-thread", "platform-cortex-m"] }
+embassy-futures = { version = "0.1" }
+embassy-rp = { version = "0.10", features = ["rt", "critical-section-impl", "time-driver", "rp235xa"] }
+embassy-usb = { version = "0.6", default-features = false }
+cortex-m-rt = "0.7"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"

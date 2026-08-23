@@ -1,0 +1,25 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# Two link flags, and picobootx-rp2350 needs the second one.
+#
+# -Tlink.x reaches cortex-m-rt's script.  -Tpicobootx.x reaches the fragment
+# picobootx-rp2350 ships, which places .ramfunc in RAM with a load address in
+# flash, and inserts it after .data so the startup copy carries it.  The flash
+# erase's critical part runs from there, while flash has stopped answering.
+#
+# cargo does not carry a dependency's link arguments to the binary being
+# linked, so this flag is the consumer's to add.  Without it .ramfunc is an
+# orphan section, the link succeeds without a word, and an erase jumps into
+# flash it has just quietened.
+
+[build]
+target = "thumbv8m.main-none-eabi"
+
+[target.thumbv8m.main-none-eabi]
+rustflags = [
+  "-C", "link-arg=--nmagic",
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tpicobootx.x",
+]

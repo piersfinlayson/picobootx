@@ -1,0 +1,38 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# The host half of the hardware test.  Drives test/hw/device over a real USB
+# bus, which is the one thing the usbip conformance suite cannot do.
+#
+# Its own workspace, so the conformance suite's rust/ does not have to fetch
+# nusb to build the archive it links.
+
+[package]
+name = "picobootx-hw-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# The recovery test, and the way to put the board back in BOOTSEL so it can be
+# reflashed without being jumpered again.
+[[bin]]
+name = "picobootx-hw-test"
+path = "src/bin/test.rs"
+
+[[bin]]
+name = "picobootx-hw-bootsel"
+path = "src/bin/bootsel.rs"
+
+# Watches the device's own view of the protocol across a run.
+[[bin]]
+name = "picobootx-hw-diag"
+path = "src/bin/diag.rs"
+
+[dependencies]
+# The wire constants come from the library under test rather than being written
+# out again here, so a change to the framing reaches this without being copied.
+# It is no_std with no dependencies, which costs a host build nothing.
+picobootx = { path = "../../../rust/picobootx" }
+nusb = { version = "0.2", features = ["tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

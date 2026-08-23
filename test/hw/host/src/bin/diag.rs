@@ -1,0 +1,65 @@
+// Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+//
+// MIT License
+
+//! Watch what the device's protocol does across a sequence of commands.
+//!
+//! Every step reads the device's own view over the control endpoint, which
+//! answers whether or not the bulk pair is moving.  That is the difference
+//! between seeing where the protocol stopped and inferring it from the outside.
+
+use std::process::ExitCode;
+
+use picobootx::wire::DIR_IN;
+use picobootx_hw_host::{Board, EP_IN, EP_OUT};
+
+const CMD_READ: u8 = 0x04 | DIR_IN;
+const ROM_MAGIC_ADDR: u32 = 0x0000_0010;
+const READ_LEN: u32 = 4;
+
+async fn show(board: &Board, when: &str) {
+    match board.diagnostics().await {
+        Ok(d) => println!("        [{when}] {d}"),
+        Err(e) => println!("        [{when}] unavailable: {e}"),
+    }
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let board = match Board::open().await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    show(&board, "opened").await;
+
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&ROM_MAGIC_ADDR.to_le_bytes());
+    args[4..8].copy_from_slice(&READ_LEN.to_le_bytes());
+
+    for i in 1..=4 {
+        println!("read {i}:");
+        match board.send_cmd(CMD_READ, READ_LEN, &args) {
+            Ok(()) => println!("        command sent"),
+            Err(e) => println!("        command FAILED: {e}"),
+        }
+        show(&board, "after send").await;
+
+        match board.read_reply(READ_LEN as usize) {
+            Ok(d) => println!("        reply {d:02x?}"),
+            Err(e) => println!("        reply FAILED: {e}"),
+        }
+        show(&board, "after reply").await;
+    }
+
+    println!("recover:");
+    let _ = board.clear_halt(EP_IN).await;
+    let _ = board.clear_halt(EP_OUT).await;
+    let _ = board.interface_reset().await;
+    show(&board, "after recovery").await;
+
+    ExitCode::SUCCESS
+}

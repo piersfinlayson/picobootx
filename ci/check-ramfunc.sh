@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Where picobootx-rp2350's RAM function ends up in a real link.
 #
-# Usage: ci/check-ramfunc.sh
+# Usage: ci/check-ramfunc.sh [crate-dir binary-name]
+#
+# With no arguments it checks ci/ramfunc-probe, which exists to be checked.
+# With a crate directory and the name of its binary it checks that consumer's
+# own link instead - because the probe proves the crate's linker fragment
+# works, and says nothing about whether a given consumer passed the two link
+# flags the crate asks for.  A consumer that dropped -Tpicobootx.x links clean
+# and faults at runtime, and only its own ELF shows that.
 #
 # The flash erase's critical part is placed in .ramfunc because it cannot be
 # fetched from flash while flash is answering serial commands.  A section name
@@ -34,9 +41,21 @@
 set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROBE="$ROOT/ci/ramfunc-probe"
 TARGET="thumbv8m.main-none-eabi"
-ELF="$PROBE/target/$TARGET/release/ramfunc-probe"
+
+if [ "$#" -eq 2 ]; then
+    SUBJECT="$ROOT/$1"
+    NAME="$2"
+    IS_PROBE=0
+elif [ "$#" -eq 0 ]; then
+    SUBJECT="$ROOT/ci/ramfunc-probe"
+    NAME="ramfunc-probe"
+    IS_PROBE=1
+else
+    echo "usage: ci/check-ramfunc.sh [crate-dir binary-name]" >&2
+    exit 1
+fi
+ELF="$SUBJECT/target/$TARGET/release/$NAME"
 
 # objdump rather than readelf, because the section header carries the VMA and
 # only objdump prints the LMA beside it - and the LMA is half of what is being
@@ -54,15 +73,15 @@ command -v "$NM" >/dev/null || {
     exit 1
 }
 
-echo "Building the probe"
-(cd "$PROBE" && cargo build --release)
+echo "Building $NAME"
+(cd "$SUBJECT" && cargo build --release)
 
 # ORIGIN and LENGTH of one region, as two decimal numbers.  The shell reads 0x
 # for itself, so only the K and M suffixes a linker script may write need
 # handling here.
 region() {
     local line origin len mult=1
-    line="$(grep -E "^[[:space:]]*$1[[:space:]]*:" "$PROBE/memory.x")"
+    line="$(grep -E "^[[:space:]]*$1[[:space:]]*:" "$SUBJECT/memory.x")"
     origin="$(echo "$line" | sed -n 's/.*ORIGIN[[:space:]]*=[[:space:]]*\([^,[:space:]]*\).*/\1/p')"
     len="$(echo "$line" | sed -n 's/.*LENGTH[[:space:]]*=[[:space:]]*\([^,[:space:]]*\).*/\1/p')"
     case "$len" in
@@ -79,14 +98,14 @@ read -r RAM_ORIGIN RAM_LEN <<EOF
 $(region RAM)
 EOF
 [ -n "$FLASH_LEN" ] && [ -n "$RAM_LEN" ] || {
-    echo "could not read FLASH and RAM out of $PROBE/memory.x" >&2
+    echo "could not read FLASH and RAM out of $SUBJECT/memory.x" >&2
     exit 1
 }
 
 # Idx Name  Size  VMA  LMA  File-off  Algn
 SECTION="$("$OBJDUMP" -h "$ELF" | awk '$2 == ".ramfunc" { print $3, $4, $5; exit }')"
 [ -n "$SECTION" ] || {
-    echo "the probe has no .ramfunc section" >&2
+    echo "$NAME has no .ramfunc section" >&2
     echo "erase_critical was not linked in, or the section was placed nowhere" >&2
     "$OBJDUMP" -h "$ELF" >&2
     exit 1
@@ -96,11 +115,25 @@ read -r SIZE VMA LMA <<EOF
 $SECTION
 EOF
 
+# Three hex numbers, or the row was not the one this expects.  An objdump that
+# lays its columns out differently would otherwise reach the arithmetic below
+# with a word where an address belongs, and report some other fault instead of
+# saying it did not understand what it read.
+hex() { [ -n "$1" ] && [ -z "${1//[0-9a-fA-F]/}" ]; }
+hex "$SIZE" && hex "$VMA" && hex "$LMA" || {
+    echo "FAIL: $OBJDUMP's section row for .ramfunc is not size, VMA and LMA:" >&2
+    echo "      $SECTION" >&2
+    echo "      An orphaned section prints without an LMA, which means the link" >&2
+    echo "      is missing -Tpicobootx.x.  A different layout means this script" >&2
+    echo "      needs an objdump it understands - GNU's prints all three." >&2
+    exit 1
+}
+
 # .data's, for the same reason - the startup copies the two as one run, so
 # where .data's bytes end is where .ramfunc's have to start.
 DATA="$("$OBJDUMP" -h "$ELF" | awk '$2 == ".data" { print $3, $5; exit }')"
 [ -n "$DATA" ] || {
-    echo "the probe has no .data section" >&2
+    echo "$NAME has no .data section" >&2
     exit 1
 }
 
@@ -111,19 +144,29 @@ EOF
 size=$((0x$SIZE)); vma=$((0x$VMA)); lma=$((0x$LMA))
 data_size=$((0x$DATA_SIZE)); data_lma=$((0x$DATA_LMA))
 
-# An empty .data ends where anything could start, so the comparison below
-# would hold whatever the linker script did.  ci/ramfunc-probe carries a
-# static to stop that, and this is what says the static is still there.
-[ "$data_size" -gt 0 ] || {
-    echo "the probe's .data is empty, so where .ramfunc is loaded from cannot" >&2
-    echo "be checked against it - ci/ramfunc-probe carries a static for this" >&2
-    exit 1
-}
+# An empty .data ends where anything could start, so the load address
+# comparison below would hold whatever the linker script did.
+#
+# The probe carries a static to stop that, and a missing one is a defect in the
+# probe - it is the artefact whose whole job is to make that comparison mean
+# something.  A consumer is not asked to carry one: what its ELF is being asked
+# is whether it passed the link flags, which the placement and span checks
+# answer on their own.  The weaker check is said out loud rather than passing
+# quietly as though it had proved something.
+ADJACENCY="checked"
+if [ "$data_size" -eq 0 ]; then
+    if [ "$IS_PROBE" -eq 1 ]; then
+        echo "the probe's .data is empty, so where .ramfunc is loaded from cannot" >&2
+        echo "be checked against it - ci/ramfunc-probe carries a static for this" >&2
+        exit 1
+    fi
+    ADJACENCY="not checked, .data is empty - ci/ramfunc-probe is what proves it"
+fi
 
 # Where cortex-m-rt's startup copy stops.
 EDATA="$("$NM" "$ELF" | awk '$3 == "__edata" { print $1; exit }')"
 [ -n "$EDATA" ] || {
-    echo "the probe defines no __edata, so where the startup copy stops cannot" >&2
+    echo "$NAME defines no __edata, so where the startup copy stops cannot" >&2
     echo "be read - it is cortex-m-rt's link.x that defines it" >&2
     exit 1
 }
@@ -132,6 +175,7 @@ edata=$((0x$EDATA))
 printf '.ramfunc  size 0x%x  VMA 0x%08x  LMA 0x%08x\n' "$size" "$vma" "$lma"
 printf '.data     size 0x%x  LMA 0x%08x\n' "$data_size" "$data_lma"
 printf '__edata   0x%08x\n' "$edata"
+printf 'adjacency %s\n' "$ADJACENCY"
 printf 'RAM   0x%08x + 0x%x\n' "$RAM_ORIGIN" "$RAM_LEN"
 printf 'FLASH 0x%08x + 0x%x\n' "$FLASH_ORIGIN" "$FLASH_LEN"
 
@@ -156,7 +200,7 @@ if [ "$edata" -lt $((vma + size)) ]; then
     bad=1
 fi
 
-if [ "$lma" -ne $((data_lma + data_size)) ]; then
+if [ "$ADJACENCY" = "checked" ] && [ "$lma" -ne $((data_lma + data_size)) ]; then
     echo "FAIL: .ramfunc is loaded from a different place than the one the" >&2
     printf '      startup copy reads for it - .data ends at 0x%08x and\n' \
         $((data_lma + data_size)) >&2
@@ -166,4 +210,8 @@ if [ "$lma" -ne $((data_lma + data_size)) ]; then
 fi
 
 [ "$bad" -eq 0 ] || exit 1
-echo "PASS: .ramfunc runs from RAM, is loaded from flash right after .data, and the startup copy covers it"
+if [ "$ADJACENCY" = "checked" ]; then
+    echo "PASS: $NAME's .ramfunc runs from RAM, is loaded from flash right after .data, and the startup copy covers it"
+else
+    echo "PASS: $NAME's .ramfunc runs from RAM, is loaded from flash, and the startup copy covers it"
+fi

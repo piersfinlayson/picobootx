@@ -46,7 +46,7 @@ picobootx comes pre-integrated with tinyusb, and is intended to replace tinyusb'
 
 The heart of picobootx should be USB stack agnostic, though and easy to port to other USB stacks (or even other physical layers).
 
-The Rust picobootx in [rust](rust) is integrated with embassy-usb by the `picobootx-embassy` crate, which supplies the driver task, the transport and the control handler that embassy-usb asks a class for.  [examples/embassy](examples/embassy/README.md) is a whole device built on it.
+The Rust picobootx in [rust](rust) is integrated with embassy-usb by the `picobootx-embassy` crate, which supplies the driver task, the transport and the control handler that embassy-usb asks a class for.  [examples/embassy](examples/embassy/README.md) is a whole device built on it, and [test/hw](test/hw/README.md) is the firmware and host driver that exercise it on a real board.
 
 ## Testing
 

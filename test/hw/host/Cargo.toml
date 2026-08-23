@@ -8,6 +8,8 @@
 # Its own workspace, so the conformance suite's rust/ does not have to fetch
 # nusb to build the archive it links.
 
+[workspace]
+
 [package]
 name = "picobootx-hw-host"
 version = "0.0.0"

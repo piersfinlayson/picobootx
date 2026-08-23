@@ -67,9 +67,15 @@ shipped hardware.
   directory, and its `.cargo/config.toml` carries the Arm target and the two
   link flags `picobootx-rp2350` asks a consumer for.  `make example-embassy`
   builds it.
-- `test/` — the two conformance suites, and `test/usbip/`, the bridge that puts
-  the device on a real USB bus for a host tool.  `test/tinyusb` is cloned at a
-  pinned commit, not committed.
+- `test/` — the two conformance suites, `test/usbip/`, the bridge that puts the
+  device on a real USB bus for a host tool, and `test/hw/`, the firmware and the
+  host driver that put `picobootx-embassy` on a board.  `test/tinyusb` is cloned
+  at a pinned commit, not committed.
+- `test/hw/` — a device crate and a host crate.  CI builds both and runs
+  neither, since running them needs a board.  The device carries a vendor request that reboots it into
+  BOOTSEL, so it is jumpered once and reflashed over USB from then on.  It is an
+  instrument rather than an example, which is why it is here and not in
+  `examples/`.
 - `rust/` — the Rust picobootx.  `picobootx` is the library, `picobootx-rp2350`
   the default RP2350 implementations — the port of `src/picobootx_impl.c`, with
   its own copy of the host-test seam — and `picobootx-ffi` the C ABI

@@ -63,6 +63,17 @@ join(usb.run(), picoboot.run(ep_out, ep_in)).await;
 
 `examples/embassy` in the repository is a complete device built this way.
 
+## Reading what it is doing
+
+`Picoboot::diagnostics()` returns a `Diagnostics`: the protocol's state, what
+each queue is holding, whether either endpoint is halted, and whether a packet
+is armed and not yet taken.  Every field is read under one borrow, so it is a
+picture of one moment rather than several.
+
+It changes nothing.  A device answers it over a control request, a log or a
+light — a control request being the useful one, since it is answerable while
+the bulk endpoints are halted, which is when the answer is wanted.
+
 ## Two things worth knowing
 
 **Both halves run on one executor.** The control handler and the driver task
@@ -73,8 +84,9 @@ the two halves on separate executors rather than letting them race.
 **A halt is recovered at `INTERFACE RESET`.** embassy-usb answers
 `CLEAR_FEATURE(ENDPOINT_HALT)` itself and reports it to no handler, and a
 driver is free to leave the endpoint's data toggle and receive buffer wherever
-the halt left them.  A picoboot host always follows the clear with the vendor
-`INTERFACE RESET`, which does reach a handler, so that is where `Halt::resync`
-is called — for the endpoints picoboot halted, and no others.  `INTERFACE
-RESET` is also what a host sends to begin a session, and resyncing an endpoint
-that was carrying something would take that packet back off the controller.
+the halt left them.  The vendor `INTERFACE RESET` does reach a handler, and the
+RP2350 datasheet (5.6.5.1) has it clear the halt on both bulk endpoints anyway,
+so that is where `Halt::resync` is called — for the endpoints picoboot halted,
+and no others.  A host may send `CLEAR_FEATURE` first and need not, and it also
+sends `INTERFACE RESET` to begin a session, where resyncing an endpoint that
+was carrying something would take that packet back off the controller.

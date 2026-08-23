@@ -20,6 +20,8 @@ INTEROP_DIR         := $(RUST_DIR)/interop
 PROBE_DIR           := ci/ramfunc-probe
 EXAMPLE_DIR         := examples/tinyusb
 EXAMPLE_EMBASSY_DIR := examples/embassy
+HW_DEVICE_DIR       := test/hw/device
+HW_HOST_DIR         := test/hw/host
 
 # Where the sub-make writes its tracefiles, and what ci/coverage-report.sh
 # reads.  Named here as well because cov empties it — see there.
@@ -31,7 +33,8 @@ EXAMPLE_TINYUSB_DIR := tinyusb-repo
 
 .PHONY: all test test-core test-usb test-usbip test-rust test-unit build cov \
         cov-html cov-raise cov-uncovered clean clean-test clean-example \
-        clean-example-embassy clean-rust example example-embassy
+        clean-example-embassy clean-rust example example-embassy \
+        hw-device hw-host clean-hw
 
 all: build
 
@@ -133,7 +136,7 @@ cov-html:
 
 # Every build output.  Neither clean removes a cloned repository — the tinyusb
 # example's distclean does that, from its own directory.
-clean: clean-test clean-rust clean-example clean-example-embassy
+clean: clean-test clean-rust clean-example clean-example-embassy clean-hw
 
 clean-test:
 	@$(MAKE) -C $(TEST_DIR) clean
@@ -172,3 +175,19 @@ example-embassy:
 	@command -v cargo >/dev/null || \
 	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
 	cd $(EXAMPLE_EMBASSY_DIR) && cargo build --release
+
+# The hardware test's two halves.  Built here and by CI, run by neither: both
+# want a board on the end of a USB cable.  See test/hw/README.md.
+hw-device:
+	@command -v cargo >/dev/null || \
+	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
+	cd $(HW_DEVICE_DIR) && cargo build --release
+
+hw-host:
+	@command -v cargo >/dev/null || \
+	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
+	cd $(HW_HOST_DIR) && cargo build --release
+
+clean-hw:
+	@$(call cargo-clean,$(HW_DEVICE_DIR))
+	@$(call cargo-clean,$(HW_HOST_DIR))

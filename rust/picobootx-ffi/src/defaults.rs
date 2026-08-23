@@ -241,6 +241,12 @@ pub extern "C" fn pb_status_from_bootrom(ret: c_int) -> CStatus {
     picobootx_rp2350::bootrom::status_from(ret) as CStatus
 }
 
+// c_char is signed on some targets and unsigned on others - i8 on x86_64
+// Linux, u8 on aarch64 Linux - so this cast is required on the first and
+// redundant on the second.  It is written for the target that needs it, and
+// allowed on the target that does not, or the crate stops building with
+// -D warnings on an Arm host.
+#[allow(clippy::unnecessary_cast)]
 #[unsafe(no_mangle)]
 pub extern "C" fn picoboot_lookup_boot_fn(a: c_char, b: c_char) -> *mut c_void {
     picobootx_rp2350::bootrom::lookup(a as u8, b as u8)

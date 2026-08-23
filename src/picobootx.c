@@ -730,38 +730,38 @@ static void pb_handle_data_out(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
 
 static void pb_task_data_out(pb_state_block_t *s) {
     const pb_cmd_table_entry_t *entry = pb_find_cmd(s->cmd_id);
-    // Unreachable: PB_STATE_DATA_OUT is entered only by pb_handle_data_out,
-    // which found a table row carrying a consume, and cmd_id is written only
-    // when a command is taken off the wire in PB_STATE_IDLE.
-    if (!entry || !entry->consume) {
+    if (entry && entry->consume) {
+        uint8_t  buf[64];
+        uint32_t available = picoboot_vendor_available();
+        if (available == 0u) {
+            return;
+        }
+
+        uint32_t chunk = available < sizeof(buf) ? available : sizeof(buf);
+        uint32_t n = picoboot_vendor_read(buf, chunk);
+        if (n == 0u) {
+            return;
+        }
+
+        bool done = false;
+        pb_status_t st = entry->consume(s, buf, n, &done, s->ctx);
+        if (st != PB_STATUS_OK) {
+            pb_stall(s, st);
+            return;
+        }
+
+        if (done) {
+            pb_send_zlp(s);
+        }
+    } else {
+        // The else cannot be taken.  This state is entered only by
+        // pb_handle_data_out, which found this command in the table and checked
+        // that its row carries a consume function, and cmd_id changes only when
+        // the next command arrives in PB_STATE_IDLE.
         // LCOV_UNREACHABLE_START
         ERR("pb_task_data_out: no consume fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
-        return;
         // LCOV_UNREACHABLE_STOP
-    }
-
-    uint8_t  buf[64];
-    uint32_t available = picoboot_vendor_available();
-    if (available == 0u) {
-        return;
-    }
-
-    uint32_t chunk = available < sizeof(buf) ? available : sizeof(buf);
-    uint32_t n = picoboot_vendor_read(buf, chunk);
-    if (n == 0u) {
-        return;
-    }
-
-    bool done = false;
-    pb_status_t st = entry->consume(s, buf, n, &done, s->ctx);
-    if (st != PB_STATUS_OK) {
-        pb_stall(s, st);
-        return;
-    }
-
-    if (done) {
-        pb_send_zlp(s);
     }
 }
 

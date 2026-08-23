@@ -208,10 +208,10 @@ jobs:
       # machine and wants std, which the part has not got.
       - name: Lint the default implementations for the part
         run: |
-          cd rust && cargo clippy -p picobootx-rp2350 \
-              --target thumbv8m.main-none-eabi --release -- -D warnings
-          cd rust && cargo clippy -p picobootx-embassy --features rp2350 \
-              --target thumbv8m.main-none-eabi --release -- -D warnings
+          (cd rust && cargo clippy -p picobootx-rp2350 \
+              --target thumbv8m.main-none-eabi --release -- -D warnings)
+          (cd rust && cargo clippy -p picobootx-embassy --features rp2350 \
+              --target thumbv8m.main-none-eabi --release -- -D warnings)
 
   # How much of the library the suites reach, in both languages, merged.
   #

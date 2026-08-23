@@ -52,6 +52,36 @@ struct Inner<'a, O: Ops, C: Custom, H: Halt> {
 /// the largest `max_packet_size` either endpoint may be allocated with.
 pub const PACKET_LEN: usize = 64;
 
+/// What the protocol and its queues are doing at one moment.
+///
+/// For a device that wants to report its own state - over a control request,
+/// a log, or a light.  Nothing here changes what the protocol does.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Diagnostics {
+    /// `picobootx::State`, as its discriminant.
+    pub state: u8,
+    /// Bytes queued from the host and not yet taken by the protocol.
+    pub rx_len: u16,
+    /// Bytes the protocol has queued for the host and not yet sent.
+    pub tx_len: u16,
+    /// Whether the host-to-device endpoint is halted.
+    pub halted_out: bool,
+    /// Whether the device-to-host endpoint is halted.
+    pub halted_in: bool,
+    /// Whether a packet is armed on the device-to-host endpoint and not yet
+    /// taken by the host.
+    pub in_flight: bool,
+}
+
+// Whether the protocol is waiting on the host rather than owing it something.
+//
+// Only then is there a packet to wait for.  In the states left out the device
+// is the one with something to send, and polling is what produces it.
+fn waits_on_host(state: picobootx::State) -> bool {
+    use picobootx::State::{AwaitAck, DataOut, Idle};
+    matches!(state, Idle | DataOut | AwaitAck)
+}
+
 // What one turn of the driver task's loop found to do.  Read under the borrow
 // and acted on after it, since every one of them awaits.
 enum Action {
@@ -121,6 +151,18 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                 if n > 0 {
                     return Action::Send(n);
                 }
+                // Reading the host-to-device endpoint waits for a packet, so
+                // it may only be done when the host is the one owing something.
+                // Where the device owes the data - a device-to-host phase, or
+                // the acknowledgement of one - poll is what produces it, and
+                // one poll produces one step: the poll that took the command
+                // moved to the sending state, and the poll after it is what
+                // queues the first packet.  Waiting on the endpoint in between
+                // parks the task against a host that is itself waiting for that
+                // packet, and neither side moves until the host gives up.
+                if !waits_on_host(i.core.state()) {
+                    return Action::Again;
+                }
                 // Only ever ask the endpoint for a packet there is somewhere
                 // to put.  The poll above takes a command, a packet's worth of
                 // a host-to-device phase, or a partial command it drops, so a
@@ -129,7 +171,13 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                 if i.xport.rx.free() >= i.xport.max_packet_size() {
                     Action::Receive
                 } else {
+                    // Unreachable: a poll runs before every decision, and one
+                    // that takes a command leaves the device either owing the
+                    // host a packet or no longer reading.  So the queue is
+                    // never filled twice without being drained between.
+                    // LCOV_UNREACHABLE_START
                     Action::Again
+                    // LCOV_UNREACHABLE_STOP
                 }
             });
 
@@ -177,6 +225,25 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                 Action::Again => yield_now().await,
             }
         }
+    }
+
+    /// What the protocol and its queues are doing, for a device that wants to
+    /// report it.
+    ///
+    /// Every field is read under the same borrow, so the picture is of one
+    /// moment rather than assembled from several.
+    pub fn diagnostics(&self) -> Diagnostics {
+        self.lock(|i| {
+            let (rx_len, tx_len) = i.xport.queued();
+            Diagnostics {
+                state: i.core.state() as u8,
+                rx_len: rx_len as u16,
+                tx_len: tx_len as u16,
+                halted_out: i.xport.halted_dir(picobootx::Direction::Out),
+                halted_in: i.xport.halted_dir(picobootx::Direction::In),
+                in_flight: i.xport.in_flight(),
+            }
+        })
     }
 
     fn lock<R>(&self, f: impl FnOnce(&mut Inner<'a, O, C, H>) -> R) -> R {

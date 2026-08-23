@@ -455,7 +455,13 @@ COV_RUST_FILTER := --filter region \
 COV_RUST_SRC := \
 	$(abspath $(ROOT)/rust/picobootx/src) \
 	$(abspath $(ROOT)/rust/picobootx-rp2350/src) \
-	$(abspath $(ROOT)/rust/picobootx-ffi/src)
+	$(abspath $(ROOT)/rust/picobootx-ffi/src) \
+	$(abspath $(ROOT)/rust/picobootx-embassy/src)
+
+# A crate's own test module is not what is being measured.  It is compiled into
+# the test binary and would otherwise be reported beside the code it drives,
+# where it reads as a hundred per cent of itself and flatters the total.
+COV_RUST_IGNORE := --ignore-filename-regex='/tests\.rs$$'
 
 # ---------------------------------------------------------------------------
 # The Rust crates' own tests
@@ -471,7 +477,7 @@ COV_RUST_SRC := \
 # drives that.
 # ---------------------------------------------------------------------------
 
-RUST_UNIT_PKGS    := -p picobootx -p picobootx-rp2350
+RUST_UNIT_PKGS    := -p picobootx -p picobootx-rp2350 -p picobootx-embassy
 
 # A target directory of their own.  These are a different build of the same
 # crates — the test profile, with the test modules compiled in — so sharing one
@@ -642,7 +648,7 @@ cov-capture-rust:
 	@for pair in core:$(COV_CORE)/picobootx-test usb:$(COV_USB)/picobootx-usb-test; do \
 	    name=$${pair%%:*}; bin=$${pair#*:}; \
 	    $(LLVM_COV) export --format=lcov --instr-profile $(COV_PROFDATA) \
-	        $$bin $(COV_RUST_SRC) > $(COV_DIR)/rust-$$name.info || exit 1; \
+	        $$bin $(COV_RUST_IGNORE) $(COV_RUST_SRC) > $(COV_DIR)/rust-$$name.info || exit 1; \
 	done
 	@# The two merged, and the lines the source marks unreachable dropped.
 	@# lcov does this for the C as it captures, but llvm-cov reads the coverage
@@ -718,7 +724,7 @@ cov-unit:
 	@rm -f $(COV_UNIT) $(COV_UNIT).raw
 	@for b in $$(cat $(COV_UNIT_BINS)); do \
 	    $(LLVM_COV) export --format=lcov --instr-profile $(COV_UNIT_PROFDATA) \
-	        $$b $(COV_RUST_SRC) >> $(COV_UNIT).raw || exit 1; \
+	        $$b $(COV_RUST_IGNORE) $(COV_RUST_SRC) >> $(COV_UNIT).raw || exit 1; \
 	done
 	@# Same filtering and same normalisation as the suites', for the same
 	@# reasons.  One tracefile carrying every binary's records, which lcov

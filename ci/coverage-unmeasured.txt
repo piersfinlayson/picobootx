@@ -31,6 +31,4 @@ rust/picobootx-rp2350/src/lib.rs          declarations, re-exports and the part'
 rust/picobootx-rp2350/src/usb.rs          the part's USB registers, built only for the part
 rust/picobootx-embassy/src/lib.rs         module declarations and re-exports
 rust/picobootx-embassy/src/halt.rs        the halt trait, and the RP2350's implementation of it
-rust/picobootx-embassy/src/device.rs      embassy-usb's, and the suite links no USB stack
-rust/picobootx-embassy/src/fifo.rs        reached only from device.rs
-rust/picobootx-embassy/src/transport.rs   reached only from device.rs
+rust/picobootx-embassy/src/tests.rs       the crate's own tests, which are not what is measured

@@ -70,6 +70,16 @@ impl<H: Halt> Xport<H> {
         usize::from(self.max_packet_size)
     }
 
+    /// What the two queues are holding, for a diagnostic read-out.
+    pub(crate) fn queued(&self) -> (usize, usize) {
+        (self.rx.len(), self.tx.len())
+    }
+
+    /// Whether one named endpoint is halted, rather than either of them.
+    pub(crate) fn halted_dir(&self, dir: Direction) -> bool {
+        self.halt.is_stalled(self.addr(dir))
+    }
+
     /// Whether either endpoint is halted, which is when nothing moves.
     pub(crate) fn halted(&self) -> bool {
         self.halt.is_stalled(self.ep_out) || self.halt.is_stalled(self.ep_in)

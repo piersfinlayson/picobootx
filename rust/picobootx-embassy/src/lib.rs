@@ -10,7 +10,10 @@ mod fifo;
 mod halt;
 mod transport;
 
-pub use device::{ControlHandler, PACKET_LEN, Picoboot};
+#[cfg(test)]
+mod tests;
+
+pub use device::{ControlHandler, Diagnostics, PACKET_LEN, Picoboot};
 pub use halt::Halt;
 
 #[cfg(all(feature = "rp2350", target_os = "none"))]

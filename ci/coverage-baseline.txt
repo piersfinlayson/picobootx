@@ -8,6 +8,9 @@
 src/picobootx.c                              100.0
 src/picobootx_impl.c                         100.0
 src/picobootx_vendor.c                       100.0
+rust/picobootx-embassy/src/device.rs         100.0
+rust/picobootx-embassy/src/fifo.rs           100.0
+rust/picobootx-embassy/src/transport.rs      100.0
 rust/picobootx-ffi/src/defaults.rs           100.0
 rust/picobootx-ffi/src/lib.rs                100.0
 rust/picobootx-ffi/src/ops.rs                100.0

@@ -335,6 +335,17 @@ static void scenario_unrelated_control_requests_are_declined(void) {
     PBT_CHECK(!pbt_ctrl(TUSB_REQ_TYPE_VENDOR, TUSB_REQ_RCPT_INTERFACE, 0x43u,
                         0u, 0u, 0u));
 
+    // GET_COMMAND_STATUS to our own interface, under the request type the
+    // specification reserves.  Every other field is one picoboot answers, so
+    // what declines this is the type and nothing else.
+    PBT_CHECK(!pbt_ctrl(TUSB_REQ_TYPE_INVALID, TUSB_REQ_RCPT_INTERFACE, 0x42u,
+                        0u, 0u, 16u));
+
+    // The same request addressed to a recipient that is neither the device,
+    // an interface nor an endpoint.
+    PBT_CHECK(!pbt_ctrl(TUSB_REQ_TYPE_VENDOR, TUSB_REQ_RCPT_OTHER, 0x42u, 0u,
+                        0u, 16u));
+
     // Nothing was answered on the device's behalf for any of them.
     PBT_CHECK_EQ(pbt_count("control_xfer"), 0);
     PBT_CHECK_EQ(pbt_count("control_status"), 0);

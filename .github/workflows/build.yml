@@ -11,7 +11,9 @@ jobs:
   # part, so nothing else can see it.
   #
   # The tinyusb example is the C's: the only build that exercises
-  # picobootx_vendor.c and the linker placement its flash erase needs.
+  # picobootx_vendor.c and the linker placement its flash erase needs.  The
+  # embassy example is the Rust's counterpart, and the only build that links
+  # picobootx-embassy against a real USB stack for the part.
   # ci/ramfunc-probe is the Rust's, a cortex-m-rt program that calls
   # flash_erase and is linked the way the crate tells a consumer to link it.
   # The rust job's cross-target lint compiles that code and links none of it,
@@ -32,6 +34,9 @@ jobs:
 
       - name: Build tinyusb example
         run: make example
+
+      - name: Build embassy example
+        run: make example-embassy
 
       - name: Check where the Rust RAM function landed
         run: ci/check-ramfunc.sh
@@ -130,15 +135,35 @@ jobs:
           components: rustfmt, clippy
           targets: thumbv8m.main-none-eabi
 
+      # Four workspaces, and --all reaches only the members of the one it is
+      # asked in.  rust/interop, examples/embassy and ci/ramfunc-probe are each
+      # their own, so each is named here or nothing checks it.
       - name: Check formatting
         run: |
-          cd rust && cargo fmt --all -- --check
-          cd interop && cargo fmt -- --check
+          (cd rust && cargo fmt --all -- --check)
+          (cd rust/interop && cargo fmt -- --check)
+          (cd examples/embassy && cargo fmt -- --check)
+          (cd ci/ramfunc-probe && cargo fmt -- --check)
 
+      # The crates' own tests, of the API surface the conformance suite reaches
+      # through the C ABI and therefore cannot exercise: an Ops that leaves a
+      # method to its default, and Rp2350 held as a Rust type.  The coverage
+      # job runs these too — this is where a failing one fails fast, and
+      # without waiting for lcov to be built.
+      - name: Run the crates' own tests
+        run: make test-unit
+
+      # The same four.  examples/embassy and ci/ramfunc-probe build for the part
+      # rather than for this machine, from the target in each one's
+      # .cargo/config.toml.  Both declare `test = false` and `bench = false` on
+      # their binary, since a bare-metal target has no test harness to build,
+      # and that is what lets --all-targets be asked of them too.
       - name: Lint
         run: |
-          cd rust && cargo clippy --workspace --all-targets --release -- -D warnings
-          cd interop && cargo clippy --all-targets --release -- -D warnings
+          (cd rust && cargo clippy --workspace --all-targets --release -- -D warnings)
+          (cd rust/interop && cargo clippy --all-targets --release -- -D warnings)
+          (cd examples/embassy && cargo clippy --all-targets --release -- -D warnings)
+          (cd ci/ramfunc-probe && cargo clippy --all-targets --release -- -D warnings)
 
       # The default RP2350 implementations again, for the part.  The lint above
       # runs on this machine, where the host half of the seam is selected and

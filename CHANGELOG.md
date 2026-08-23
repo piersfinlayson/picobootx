@@ -10,6 +10,14 @@ release.
 
 ## Unreleased
 
+- Added the Rust `picobootx-embassy`, which serves picoboot on a device whose
+  USB stack is embassy-usb — a task driving the two bulk endpoints, a transport
+  over the queues it fills, and an `embassy_usb::Handler` for picoboot's control
+  requests.  [examples/embassy](examples/embassy) is a complete device built on
+  it.  Its `rp2350` feature supplies `Rp2350Halt`, the halt control embassy-usb
+  does not hand out, so a device on that part need not write it.
+- `picobootx-rp2350` gained a `usb` module reaching the RP2350's endpoint
+  buffer controls, for a USB stack that does not lend out its own halt control.
 - The Rust `picobootx-rp2350` needs `-C link-arg=-Tpicobootx.x` beside
   `-Tlink.x` to place its flash erase routine in RAM.  Without it the routine
   linked into flash and stopped part way through an erase.

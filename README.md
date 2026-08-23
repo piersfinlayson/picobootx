@@ -32,6 +32,8 @@ See [the integration guide](INTEGRATION.md) for how to integrate picobootx into 
 
 See [the tinyusb example](examples/tinyusb/README.md) for a complete, working, bare-metal picobootx implementation using tinyusb and [pico-sdkless](https://github.com/piersfinlayson/pico-sdkless), which can be used as a reference for your own implementation.
 
+See [the embassy example](examples/embassy/README.md) for the same device in Rust, built on [embassy](https://embassy.dev).  `make example-embassy` builds it, and `make example` the tinyusb one.
+
 ## PICOBOOT Protocol
 
 The PICOBOOT protocol is documented in the RP2040 and RP2350 datasheets.  picobootx follows the RP2350 datasheet, and does not currently fully implement RP2040 support.
@@ -43,6 +45,8 @@ picobootx comes pre-integrated with tinyusb, and is intended to replace tinyusb'
 - no ability to send a ZLP (zero length packet) on demand as required by the protocol.
 
 The heart of picobootx should be USB stack agnostic, though and easy to port to other USB stacks (or even other physical layers).
+
+The Rust picobootx in [rust](rust) is integrated with embassy-usb by the `picobootx-embassy` crate, which supplies the driver task, the transport and the control handler that embassy-usb asks a class for.  [examples/embassy](examples/embassy/README.md) is a whole device built on it.
 
 ## Testing
 
@@ -107,8 +111,20 @@ The point is not the language — picotool reaches the kernel through libusb and
 picoboot-rs through nusb, so a claim the two agree on is a claim about picobootx
 rather than about either host.  It also reaches one thing picotool cannot: a
 write asking an OTP bit to go back, which picotool refuses before it leaves the
-host.  This is the only part of picobootx that needs a Rust toolchain, and
-nothing else refers to it.
+host.  It needs a Rust toolchain, and nothing else in the tree refers to it.
+
+The Rust crates carry tests of their own, which are not part of either suite:
+
+```bash
+make test-unit
+```
+
+The suites drive the Rust library through the C ABI, and that ABI hands every
+operation over as a table of function pointers.  A table is either populated or
+null, so nothing in the suites ever meets an `Ops` that left a method to its
+default — which is the whole of the trait's "refuse by default" contract — and
+nothing there holds an `Rp2350` as a Rust type either.  Those are the crates'
+own tests, and they need a Rust toolchain.
 
 `make` on its own builds both suites without running them.  `make test-core` and
 `make test-usb` run one.  Inside [test](test), `make SUITE=usb` selects the
@@ -117,9 +133,9 @@ string, `LOGGING=1` builds with picobootx's own logging turned on, and
 `SANITIZE=1` builds under the address and undefined behaviour sanitizers.
 `make usbip TRACE=1` runs the bridge with every transfer traced.
 
-`make cov` runs both suites under coverage, under both implementations, and
-reports what they reached per file in one table — the C's three sources and the
-Rust's eleven.  It gates twice.  The C fails below every line and every
+`make cov` runs both suites under coverage, under both implementations, adds
+the crates' own tests, and reports what they reached per file in one table —
+the C's three sources and the Rust's eleven.  It gates twice.  The C fails below every line and every
 function, and the few arms neither suite can reach are marked unreachable in the
 source with lcov exclusion comments, each saying which invariant makes it so.
 The Rust fails below the per-file floor in

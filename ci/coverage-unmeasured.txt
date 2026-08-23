@@ -6,18 +6,31 @@
 # directory none of test/Makefile's lists names, is caught rather than being
 # quietly measured by nothing.
 #
-# A file belongs here only when it carries no executable line at all: module
+# A file belongs here when it carries no executable line at all: module
 # declarations, re-exports, type and trait definitions, constants, and extern
 # blocks compile to nothing that can be reached, so llvm-cov emits no record
-# for them.  A file that carries a function belongs in the floors instead.  The
-# check keeps this honest both ways: an entry naming a file that has gone, or
-# one that turns out to be measured after all, fails as STALE.
+# for them.  A file that carries a function and is linked by the suite belongs
+# in the floors instead.  The check keeps this honest both ways: an entry
+# naming a file that has gone, or one that turns out to be measured after all,
+# fails as STALE.
+#
+# It also belongs here when the suite does not build it at all.  Code the suite
+# cannot reach is code a floor cannot speak for, and a figure of zero would
+# read as a test that was written and never ran.  That is the whole of
+# picobootx-embassy, which needs a USB stack the suite does not link, and the
+# part of picobootx-rp2350 that only a build for the part compiles.
 #
 # The reason is part of the entry.  Everything after the path is read by people.
 
-rust/picobootx/src/lib.rs           module declarations and re-exports
-rust/picobootx/src/control.rs       the control endpoint's types
-rust/picobootx/src/status.rs        the status enum and the Result alias
-rust/picobootx/src/transport.rs     the two transport traits
-rust/picobootx-ffi/src/cabi.rs      the C types and the extern declarations
-rust/picobootx-rp2350/src/lib.rs    declarations, re-exports and the part's addresses
+rust/picobootx/src/lib.rs                 module declarations and re-exports
+rust/picobootx/src/control.rs             the control endpoint's types
+rust/picobootx/src/status.rs              the status enum and the Result alias
+rust/picobootx/src/transport.rs           the two transport traits
+rust/picobootx-ffi/src/cabi.rs            the C types and the extern declarations
+rust/picobootx-rp2350/src/lib.rs          declarations, re-exports and the part's addresses
+rust/picobootx-rp2350/src/usb.rs          the part's USB registers, built only for the part
+rust/picobootx-embassy/src/lib.rs         module declarations and re-exports
+rust/picobootx-embassy/src/halt.rs        the halt trait, and the RP2350's implementation of it
+rust/picobootx-embassy/src/device.rs      embassy-usb's, and the suite links no USB stack
+rust/picobootx-embassy/src/fifo.rs        reached only from device.rs
+rust/picobootx-embassy/src/transport.rs   reached only from device.rs

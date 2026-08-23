@@ -103,6 +103,12 @@ mod chip;
 mod defaults;
 mod ops;
 
+// The registers behind it are the part's own, so there is nothing to compile
+// for a machine that is not one.  A USB stack that exposes its own halt
+// control needs none of this.
+#[cfg(target_os = "none")]
+pub mod usb;
+
 pub use defaults::{
     enter_xip, exclusive_access, exit_xip, flash_erase, flash_erase_prepare, flash_page_write,
     get_info_sys, otp_read, otp_write, read, read_prepare, reboot_execute, reboot_prepare, serial,

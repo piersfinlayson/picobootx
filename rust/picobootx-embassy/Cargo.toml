@@ -1,0 +1,51 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# picobootx for a device whose USB stack is embassy-usb.
+
+[package]
+name = "picobootx-embassy"
+version = "0.1.0"
+description = "Device-side PICOBOOT for embassy-usb: a driver task, a transport and a control handler"
+keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
+categories = ["embedded", "no-std", "asynchronous"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# embassy-usb for the control endpoint's Handler, embassy-usb-driver for the
+# two endpoint traits the driver task is generic over.  Both are named here
+# rather than the second being reached through the first, so the versions this
+# crate is written against are the ones it states.
+#
+# picobootx-rp2350 is optional and reached only through the rp2350 feature, so
+# a device on another part pays nothing for it and does not have to build it.
+[dependencies]
+picobootx = { workspace = true }
+picobootx-rp2350 = { workspace = true, optional = true }
+embassy-usb = { version = "0.6", default-features = false }
+embassy-usb-driver = { version = "0.2" }
+
+# Off by default: this crate is a USB stack's half of picobootx and knows
+# nothing about a part until asked.  dep: rather than the bare name, so
+# enabling the dependency is the feature rather than there being two ways to
+# say it.
+[features]
+rp2350 = ["dep:picobootx-rp2350"]
+
+# Rp2350Halt exists only in a build for the part, so docs built for this
+# machine would not show it.  The first target listed is the one docs.rs
+# renders.
+[package.metadata.docs.rs]
+all-features = true
+targets = ["thumbv8m.main-none-eabi"]
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

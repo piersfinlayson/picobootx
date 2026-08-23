@@ -165,7 +165,7 @@ void picoboot_vendor_unstall_endpoint(uint8_t ep_addr) {
             DEBUG("Re-arm OUT endpoint");
             picoboot_vendor_read_clear();
         } else {
-            // LCOV_EXCL_START
+            // LCOV_UNREACHABLE_START
             // Unreachable.  INTERFACE RESET is this function's only caller, and
             // reaching here means the OUT endpoint is not halted while its FIFO
             // still holds something.  pb_task_idle clears and re-arms any
@@ -176,7 +176,7 @@ void picoboot_vendor_unstall_endpoint(uint8_t ep_addr) {
             // a One ROM answering normally, however often it is repeated.
             DEBUG("Endpoint %02X was not stalled, just clearing", ep_addr);
             tu_edpt_stream_clear(&p_itf.rx_stream);
-            // LCOV_EXCL_STOP
+            // LCOV_UNREACHABLE_STOP
         }
     } else {
         DEBUG("Re-arm IN endpoint");

@@ -6,18 +6,20 @@
 #
 # picobootx has no build of its own — it is source that an integrating project
 # compiles alongside its own, which is what picobootx.mk exists for.  What can be
-# built here is the conformance suite in test and the worked example in
-# examples/tinyusb, and these targets reach both from the repository root so
-# neither has to be found first.
+# built here is the conformance suite in test and the two worked examples in
+# examples, and these targets reach all three from the repository root so none
+# has to be found first.
 #
 # Variables named on the command line reach the sub-make unchanged, so
 # `make cov CC=gcc`, `make test FILTER=stall`, `make test LOGGING=1` and
 # `make test SANITIZE=1` all do what the same invocation does in test.
 
-TEST_DIR    := test
-RUST_DIR    := rust
-INTEROP_DIR := $(RUST_DIR)/interop
-EXAMPLE_DIR := examples/tinyusb
+TEST_DIR            := test
+RUST_DIR            := rust
+INTEROP_DIR         := $(RUST_DIR)/interop
+PROBE_DIR           := ci/ramfunc-probe
+EXAMPLE_DIR         := examples/tinyusb
+EXAMPLE_EMBASSY_DIR := examples/embassy
 
 # Where the sub-make writes its tracefiles, and what ci/coverage-report.sh
 # reads.  Named here as well because cov empties it — see there.
@@ -27,11 +29,22 @@ COV_DIR     := $(TEST_DIR)/build/coverage
 # example has been built here — see clean-example.
 EXAMPLE_TINYUSB_DIR := tinyusb-repo
 
-.PHONY: all test test-core test-usb test-usbip test-rust build cov cov-html \
-        cov-raise cov-uncovered clean clean-test clean-example clean-rust \
-        example
+.PHONY: all test test-core test-usb test-usbip test-rust test-unit build cov \
+        cov-html cov-raise cov-uncovered clean clean-test clean-example \
+        clean-example-embassy clean-rust example example-embassy
 
 all: build
+
+# cargo clean in one workspace, named by $(1).  A tree that has not built it has
+# nothing to remove, and must not be made to install a toolchain to find that
+# out.
+define cargo-clean
+if [ -d $(1)/target ]; then \
+    (cd $(1) && cargo clean); \
+else \
+    echo "$(1) has not been built, nothing to clean"; \
+fi
+endef
 
 # Build both suites without running them.
 build:
@@ -55,6 +68,17 @@ test-usb:
 # run needs root — building it does not, so only the run is handed to sudo.
 test-usbip:
 	@$(MAKE) -C $(TEST_DIR) usbip
+
+# The Rust crates' own tests.  The conformance suite drives the Rust library
+# through the C ABI, which hands every operation over as a table of function
+# pointers — so it never meets an Ops that left a method to its default, and
+# never holds an Rp2350 as a Rust type.  Those are the crates' own tests, and
+# this is what runs them.  Needs cargo, which is why it is not part of
+# `make test`: the suites build and run with nothing but a C compiler and make.
+test-unit:
+	@command -v cargo >/dev/null || \
+	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
+	@$(MAKE) -C $(TEST_DIR) test-unit
 
 # The same device, driven by picoboot-rs instead of picotool — a second
 # implementation of the protocol, over a second USB stack.  Needs Linux, root
@@ -87,6 +111,9 @@ cov:
 	rm -rf $(COV_DIR)
 	@$(MAKE) -C $(TEST_DIR) cov LIB=c
 	@$(MAKE) -C $(TEST_DIR) cov LIB=rust
+	@# And the Rust the suites structurally cannot reach, since they drive the
+	@# library through the C ABI - see test-unit.
+	@$(MAKE) -C $(TEST_DIR) cov-unit
 	@echo
 	@ci/coverage-report.sh
 	@echo
@@ -104,24 +131,19 @@ cov-uncovered:
 cov-html:
 	@$(MAKE) -C $(TEST_DIR) cov-html
 
-# Both build outputs.  Neither clean removes a cloned repository — the example's
-# distclean does that, from its own directory.
-clean: clean-test clean-rust clean-example
+# Every build output.  Neither clean removes a cloned repository — the tinyusb
+# example's distclean does that, from its own directory.
+clean: clean-test clean-rust clean-example clean-example-embassy
 
 clean-test:
 	@$(MAKE) -C $(TEST_DIR) clean
 
-# A tree that has built neither the library nor the interop driver has nothing
-# to clean, and must not be made to install a toolchain to find that out.  The
-# two are separate workspaces, so each is asked separately.
+# The library, the interop driver and the RAM function probe.  Each is a
+# workspace of its own, so each is asked separately.
 clean-rust:
-	@for d in $(RUST_DIR) $(INTEROP_DIR); do \
-	    if [ -d $$d/target ]; then \
-	        (cd $$d && cargo clean); \
-	    else \
-	        echo "$$d has not been built, nothing to clean"; \
-	    fi; \
-	done
+	@$(call cargo-clean,$(RUST_DIR))
+	@$(call cargo-clean,$(INTEROP_DIR))
+	@$(call cargo-clean,$(PROBE_DIR))
 
 # The example's Makefile includes tinyusb.mk and pico-sdkless's common.mk, which
 # arrive with the repositories it clones as it is parsed.  So it cannot be
@@ -135,7 +157,18 @@ clean-example:
 	    echo "$(EXAMPLE_DIR) has not been built, nothing to clean"; \
 	fi
 
-# The worked example, a bare-metal picobootx device for the RP2350.  Needs an
-# arm-none-eabi toolchain, and clones what it builds against.
+clean-example-embassy:
+	@$(call cargo-clean,$(EXAMPLE_EMBASSY_DIR))
+
+# The tinyusb example, a bare-metal picobootx device for the RP2350 in C.  Needs
+# an arm-none-eabi toolchain, and clones what it builds against.
 example:
 	@$(MAKE) -C $(EXAMPLE_DIR)
+
+# The embassy example, the same device in Rust.  A workspace of its own, so it
+# is built from its own directory rather than from rust, and the Arm target and
+# the two link flags come from its .cargo/config.toml.
+example-embassy:
+	@command -v cargo >/dev/null || \
+	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
+	cd $(EXAMPLE_EMBASSY_DIR) && cargo build --release

@@ -109,6 +109,75 @@ static void scenario_an_action_callback_that_refuses_stalls(void) {
     }
 }
 
+// The status the stub below returns, set by the scenario that installs it.
+static pb_status_t s_forced_status;
+
+static pb_status_t forced_exit_xip(void *ctx) {
+    (void)ctx;
+    pbt_log("op_exit_xip", 0u, 0u, 0u, 0u);
+    return s_forced_status;
+}
+
+static void scenario_every_status_a_callback_returns_reaches_the_host(void) {
+    // A callback's return is the whole of what the host is told about the
+    // command, and it crosses the library from an integrator's function to the
+    // status packet without being interpreted.  Every value the header defines
+    // is sent through one at a time, so a library that recognises some of them
+    // and turns the rest into a generic failure is caught here rather than by
+    // whichever integrator first returned the one that was dropped.
+    const pb_status_t all[] = {
+        PB_STATUS_OK,
+        PB_STATUS_UNKNOWN_CMD,
+        PB_STATUS_INVALID_CMD_LENGTH,
+        PB_STATUS_INVALID_TRANSFER_LEN,
+        PB_STATUS_INVALID_ADDRESS,
+        PB_STATUS_BAD_ALIGNMENT,
+        PB_STATUS_INTERLEAVED_WRITE,
+        PB_STATUS_REBOOTING,
+        PB_STATUS_UNKNOWN_ERROR,
+        PB_STATUS_INVALID_STATE,
+        PB_STATUS_NOT_PERMITTED,
+        PB_STATUS_INVALID_ARG,
+        PB_STATUS_BUFFER_TOO_SMALL,
+        PB_STATUS_PRECONDITION_NOT_MET,
+        PB_STATUS_MODIFIED_DATA,
+        PB_STATUS_INVALID_DATA,
+        PB_STATUS_NOT_FOUND,
+        PB_STATUS_UNSUPPORTED_MOD,
+    };
+
+    for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+        pbt_begin();
+        s_forced_status  = all[i];
+        pbt_ops.exit_xip = forced_exit_xip;
+        pbt_start();
+
+        picoboot_cmd_t cmd = pbt_cmd(PB_CMD_EXIT_XIP, 0x00u, 0u);
+        pb_status_t    got = pbt_run_cmd(&cmd);
+        if (got != all[i]) {
+            pbt_fail(__FILE__, __LINE__, "EXIT_XIP returning %s: host read %s",
+                     pbt_status_name((int)all[i]), pbt_status_name((int)got));
+            continue;
+        }
+        if (pbt_count("op_exit_xip") != 1) {
+            pbt_fail(__FILE__, __LINE__, "%s: the callback was not reached",
+                     pbt_status_name((int)all[i]));
+            continue;
+        }
+
+        // Success is acknowledged and everything else halts, so the status a
+        // host reads back is not the only thing that separates them.
+        bool ok = all[i] == PB_STATUS_OK;
+        if (ok && (pbt_cur_state() != PB_STATE_IDLE || pbt_packet_count() != 1u)) {
+            pbt_fail(__FILE__, __LINE__, "OK did not acknowledge the command");
+        }
+        if (!ok && (pbt_cur_state() != PB_STATE_STALLED || pbt_packet_count() != 0u)) {
+            pbt_fail(__FILE__, __LINE__, "%s did not halt the command",
+                     pbt_status_name((int)all[i]));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // REBOOT2
 // ---------------------------------------------------------------------------
@@ -205,6 +274,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_optional_action_callbacks_may_be_absent },
     { "an action callback that refuses halts with its own status",
       scenario_an_action_callback_that_refuses_stalls },
+    { "every status a callback returns reaches the host",
+      scenario_every_status_a_callback_returns_reaches_the_host },
     { "REBOOT2 without its prepare callback is refused",
       scenario_reboot2_without_prepare_is_refused },
     { "REBOOT2 without its execute callback still acknowledges",

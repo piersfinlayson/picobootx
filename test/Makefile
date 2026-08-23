@@ -19,8 +19,10 @@
 #   make LOGGING=1   build with picobootx's own logging turned on
 #   make SANITIZE=1  build with the address and undefined behaviour sanitizers
 #   make LIB=c|rust  which implementation of picobootx is under test
+#   make test-unit   the Rust crates' own tests, which are no suite's
 #   make cov         run under coverage, list what this LIB's library reached,
 #                    and fail if the C is not all of it
+#   make cov-unit    the crates' own tests under coverage, as a tracefile
 #   make cov-html    the same, as a browsable report
 #   make usbip       put the device on this machine's USB bus and drive it with
 #                    picotool.  Linux only, and the run needs root
@@ -99,6 +101,29 @@ ROOT    := ..
 # configuration that lands somewhere else cannot be driven by a stale one.
 BRIDGE  := build/usbip$(if $(filter rust,$(LIB)),-rust)/picobootx-usbip
 
+# Where the Rust is, how it is instrumented, and the tools that read what the
+# instrumentation wrote.
+#
+# rustc's own toolchain supplies those tools: the profiler runtime the archive
+# needs at link time, and llvm-profdata and llvm-cov afterwards.  Taken from
+# the sysroot rather than from PATH, so a system LLVM of some other vintage
+# cannot answer instead.
+#
+# Deferred rather than expanded here, because LIB=c needs none of it and must
+# not have to find a Rust toolchain to build the C.
+RUST_DIR       = $(ROOT)/rust
+RUST_SYSROOT   = $(shell rustc --print sysroot)
+RUST_HOST      = $(shell rustc -vV | sed -n 's/^host: //p')
+RUST_LIBDIR    = $(RUST_SYSROOT)/lib/rustlib/$(RUST_HOST)/lib
+LLVM_BIN       = $(RUST_SYSROOT)/lib/rustlib/$(RUST_HOST)/bin
+LLVM_PROFDATA ?= $(LLVM_BIN)/llvm-profdata
+LLVM_COV      ?= $(LLVM_BIN)/llvm-cov
+
+# How the Rust is instrumented, said once.  Applied only where a build is meant
+# to carry counters: an archive built with this and linked without the profiler
+# runtime does not link at all, so it must not reach an ordinary build.
+RUST_INSTRUMENT := -C instrument-coverage
+
 # The Rust library is an archive cargo builds.  It carries the protocol and the
 # default RP2350 implementations, so nothing in ../src is compiled for it but
 # the tinyusb vendor driver.
@@ -107,26 +132,13 @@ BRIDGE  := build/usbip$(if $(filter rust,$(LIB)),-rust)/picobootx-usbip
 # carries LLVM's counters — so it is built into a target directory of its own.
 # Sharing one would mean every switch between `make test LIB=rust` and
 # `make cov LIB=rust` rebuilt the workspace.
-#
-# rustc's own toolchain supplies the tools that read what it wrote: the
-# profiler runtime the archive needs at link time, and llvm-profdata and
-# llvm-cov afterwards.  Taken from the sysroot rather than from PATH, so a
-# system LLVM of some other vintage cannot answer instead.
 ifeq ($(LIB),rust)
-RUST_DIR    := $(ROOT)/rust
 RUST_TARGET := target$(if $(filter 1,$(COVERAGE)),/coverage)
 RUST_A      := $(RUST_DIR)/$(RUST_TARGET)/release/libpicobootx_ffi.a
 RUST_LINK   := $(RUST_A)
 
-RUST_SYSROOT  := $(shell rustc --print sysroot)
-RUST_HOST     := $(shell rustc -vV | sed -n 's/^host: //p')
-RUST_LIBDIR   := $(RUST_SYSROOT)/lib/rustlib/$(RUST_HOST)/lib
-LLVM_BIN      := $(RUST_SYSROOT)/lib/rustlib/$(RUST_HOST)/bin
-LLVM_PROFDATA ?= $(LLVM_BIN)/llvm-profdata
-LLVM_COV      ?= $(LLVM_BIN)/llvm-cov
-
 ifeq ($(COVERAGE),1)
-RUSTFLAGS_COV := -C instrument-coverage
+RUSTFLAGS_COV := $(RUST_INSTRUMENT)
 
 # A staticlib is linked without the profiler runtime — the crate is dropped on
 # the way in — so nothing in the archive defines the writer that turns the
@@ -360,9 +372,10 @@ TU_OBJ := $(patsubst %.c,$(BUILD)/tu/%.o,$(notdir $(TINYUSB_SRC)))
 # replaces, and it is compiled by examples/tinyusb.
 #
 # Everything the suite cannot reach is marked in the library with an
-# LCOV_EXCL_START / LCOV_EXCL_STOP pair or an LCOV_EXCL_BR_LINE comment, and
-# every one of those is an arm defending an invariant the state machine has
-# already established.  cov gates on the result being complete, so a new branch
+# LCOV_UNREACHABLE_START / LCOV_UNREACHABLE_STOP pair, and every one of those
+# is an arm defending an invariant the state machine has already established.
+# lcov fails the capture if a marked line was reached, so the claim is checked
+# rather than taken.  cov gates on the result being complete, so a new branch
 # nothing reaches fails the build, and so does removing a test that was the only
 # thing reaching an existing one.
 #
@@ -381,7 +394,8 @@ GCOV ?= gcov
 # inconsistent, and reports function extents lcov's version checks reject, and
 # neither says anything about what the suites reached.  gcc raises neither, so
 # accepting them costs the measured configuration nothing and lets the same
-# command work under either compiler.
+# command work under either compiler.  Its lcov export raises them too, which is
+# why the Rust tracefiles pass through this as well.
 COV_IGNORE := --ignore-errors inconsistent,unsupported,corrupt
 
 # Coverage measures the logging build of both suites, merged.  command_to_str
@@ -417,6 +431,19 @@ COV_PROFRAW  := $(COV_DIR)/profraw
 COV_PROFDATA := $(COV_DIR)/rust.profdata
 COV_RUST     := $(COV_DIR)/rust.info
 
+# What drops the lines the Rust marks unreachable.  lcov's region filter reads
+# the source and honours LCOV_UNREACHABLE_START / LCOV_UNREACHABLE_STOP, but
+# only for a file whose extension it takes as C, Perl, Python or Java — .rs is
+# none of those, so without naming it here the filter is skipped in silence.
+# The list is lcov's own C default with rs added, since the setting replaces
+# rather than extends it.
+#
+# A marked line the runs reached fails rather than being dropped quietly, which
+# is the point of the marker.  COV_IGNORE does not name unreachable, and must
+# not.
+COV_RUST_FILTER := --filter region \
+    --rc c_file_extensions=c,h,i,C,H,I,icc,cpp,cc,cxx,hh,hpp,hxx,rs
+
 # The Rust sources the report is narrowed to.  picobootx is the protocol,
 # picobootx-rp2350 the default implementations, and picobootx-ffi the C ABI in
 # front of both — the only thing that drives the library's public API from C, so
@@ -429,6 +456,33 @@ COV_RUST_SRC := \
 	$(abspath $(ROOT)/rust/picobootx/src) \
 	$(abspath $(ROOT)/rust/picobootx-rp2350/src) \
 	$(abspath $(ROOT)/rust/picobootx-ffi/src)
+
+# ---------------------------------------------------------------------------
+# The Rust crates' own tests
+#
+# The conformance suite drives the Rust library through the C ABI, which hands
+# every operation over as a table of function pointers.  A table is either
+# populated or null, so the suite never meets an Ops that left a method to its
+# default, and it never holds an Rp2350 as a Rust type either.  Those live in
+# the crates, as `cargo test` runs them, and this is what runs them here and
+# turns what they reached into a tracefile beside the suites'.
+#
+# picobootx-ffi is absent deliberately: it is the C ABI, and the suite is what
+# drives that.
+# ---------------------------------------------------------------------------
+
+RUST_UNIT_PKGS    := -p picobootx -p picobootx-rp2350
+
+# A target directory of their own.  These are a different build of the same
+# crates — the test profile, with the test modules compiled in — so sharing one
+# with the archive would rebuild the workspace on every switch.
+RUST_UNIT_TARGET  := target/coverage-unit
+
+COV_UNIT_PROFRAW  := $(COV_DIR)/profraw-unit
+COV_UNIT_PROFDATA := $(COV_DIR)/rust-unit.profdata
+COV_UNIT_JSON     := $(COV_DIR)/rust-unit-build.json
+COV_UNIT_BINS     := $(COV_DIR)/rust-unit-binaries.txt
+COV_UNIT          := $(COV_DIR)/rust-unit.info
 
 # %p, so the two suites — and a re-run of either — each write their own raw
 # profile.  Without it the last process to exit replaces what the others
@@ -457,7 +511,7 @@ COV_LIB_SRC := \
 COV_PATTERN := $(patsubst $(ROOT)/%,'*/%',$(COV_LIB_SRC))
 
 .PHONY: all build run clean cov cov-capture cov-capture-rust cov-html \
-        usb usb-build usbip usbip-build
+        usb usb-build usbip usbip-build test-unit cov-unit
 
 all: build
 
@@ -590,10 +644,90 @@ cov-capture-rust:
 	    $(LLVM_COV) export --format=lcov --instr-profile $(COV_PROFDATA) \
 	        $$bin $(COV_RUST_SRC) > $(COV_DIR)/rust-$$name.info || exit 1; \
 	done
+	@# The two merged, and the lines the source marks unreachable dropped.
+	@# lcov does this for the C as it captures, but llvm-cov reads the coverage
+	@# map out of the binary and never opens the source, so nothing before this
+	@# point has seen a marker.  Before the paths are made relative, since lcov
+	@# opens each SF: as it stands.
+	lcov --add-tracefile $(COV_DIR)/rust-core.info \
+	     --add-tracefile $(COV_DIR)/rust-usb.info \
+	     $(COV_RUST_FILTER) $(COV_IGNORE) --output-file $(COV_RUST).filtered
 	@# Same normalisation as the C's, for the same reason.
-	@sed -e 's#^SF:$(abspath $(ROOT))/#SF:#' \
-	     $(COV_DIR)/rust-core.info $(COV_DIR)/rust-usb.info > $(COV_RUST)
+	@sed -e 's#^SF:$(abspath $(ROOT))/#SF:#' $(COV_RUST).filtered > $(COV_RUST)
+	@rm -f $(COV_RUST).filtered
 	@test -s $(COV_RUST) || \
+	    (echo "no coverage data for $(COV_RUST_SRC)" && exit 1)
+
+# The crates' own tests, run and nothing more.  Independent of LIB: it is the
+# crates that are under test here, not whichever library the suites are linking.
+test-unit:
+	cd $(RUST_DIR) && cargo test $(RUST_UNIT_PKGS)
+
+# The same tests, instrumented, as a tracefile beside the suites'.
+#
+# --no-run, then each binary run from here, for two reasons.  cargo would run
+# them all under one LLVM_PROFILE_FILE and the last to exit would replace what
+# the others recorded, and cargo does not say where the binaries are unless it
+# is asked - and llvm-cov reads a binary's coverage map, so their paths are
+# what the export needs.
+#
+# A staticlib carries no profiler runtime and has to be handed one, which is
+# what the archive's link does.  A test binary is an executable rustc links
+# itself, so -C instrument-coverage brings the runtime with it and there is
+# nothing to ask for by name here.  The profiles are checked below all the
+# same, because a build that wrote none reads exactly like a run that reached
+# nothing.
+cov-unit:
+	@mkdir -p $(COV_DIR)
+	rm -rf $(COV_UNIT_PROFRAW)
+	@mkdir -p $(COV_UNIT_PROFRAW)
+	@# RUSTFLAGS reaches the build scripts too, so each writes a profile as it
+	@# exits, into whatever its working directory is - which cargo sets to the
+	@# package directory.  Somewhere of its own, as the archive's build does,
+	@# so it lands neither in the source tree nor among the tests' profiles.
+	@#
+	@# The build writes its JSON to a file and the names are read out of the
+	@# file afterwards, so that cargo's exit status is this line's.  Down a
+	@# pipe it is not: the shell reports the last command, sh has no pipefail,
+	@# and cargo emits artifact JSON for every target that compiled before it
+	@# reached the one that did not — so a build that failed leaves a list of
+	@# binaries, and the tests behind the failure are skipped without a word.
+	cd $(RUST_DIR) && CARGO_TARGET_DIR=$(RUST_UNIT_TARGET) \
+	    LLVM_PROFILE_FILE=$(abspath $(COV_DIR))/build-scripts/%p.profraw \
+	    RUSTFLAGS="$(RUST_INSTRUMENT)" \
+	    cargo test $(RUST_UNIT_PKGS) --no-run --message-format=json \
+	    > $(abspath $(COV_UNIT_JSON))
+	@# Compiler diagnostics arrive as JSON here too, and are not executables.
+	@# "executable" is null for everything that is not one, so matching on a
+	@# quoted value is what separates the test binaries from the rest.
+	@grep -o '"executable":"[^"]*"' $(COV_UNIT_JSON) | cut -d'"' -f4 \
+	    > $(COV_UNIT_BINS)
+	@test -s $(COV_UNIT_BINS) || \
+	    (echo "cargo built no test binaries — nothing would be measured" && exit 1)
+	@for b in $$(cat $(COV_UNIT_BINS)); do \
+	    echo "running $$b"; \
+	    LLVM_PROFILE_FILE=$(abspath $(COV_UNIT_PROFRAW))/$$(basename $$b)-%p.profraw \
+	        $$b || exit 1; \
+	done
+	@ls $(COV_UNIT_PROFRAW)/*.profraw >/dev/null 2>&1 || \
+	    (echo "no raw profiles in $(COV_UNIT_PROFRAW) — the tests wrote none" && exit 1)
+	@for f in $(COV_UNIT_PROFRAW)/*.profraw; do \
+	    test -s $$f || { echo "$$f is empty — the run did not write its profile" >&2; exit 1; }; \
+	done
+	$(LLVM_PROFDATA) merge -sparse -o $(COV_UNIT_PROFDATA) $(COV_UNIT_PROFRAW)/*.profraw
+	@rm -f $(COV_UNIT) $(COV_UNIT).raw
+	@for b in $$(cat $(COV_UNIT_BINS)); do \
+	    $(LLVM_COV) export --format=lcov --instr-profile $(COV_UNIT_PROFDATA) \
+	        $$b $(COV_RUST_SRC) >> $(COV_UNIT).raw || exit 1; \
+	done
+	@# Same filtering and same normalisation as the suites', for the same
+	@# reasons.  One tracefile carrying every binary's records, which lcov
+	@# merges per source file as it reads.
+	lcov --add-tracefile $(COV_UNIT).raw \
+	     $(COV_RUST_FILTER) $(COV_IGNORE) --output-file $(COV_UNIT).filtered
+	@sed -e 's#^SF:$(abspath $(ROOT))/#SF:#' $(COV_UNIT).filtered > $(COV_UNIT)
+	@rm -f $(COV_UNIT).raw $(COV_UNIT).filtered
+	@test -s $(COV_UNIT) || \
 	    (echo "no coverage data for $(COV_RUST_SRC)" && exit 1)
 
 cov: cov-capture

@@ -312,6 +312,44 @@ static void scenario_the_library_built_the_wire_it_was_given(void) {
     PBT_CHECK_EQ(got[PBT_LAYOUT_CTRL_REQUEST_SIZE], sizeof(tusb_control_request_t));
 }
 
+static void scenario_the_library_names_its_own_states(void) {
+    // The state machine is internal, so the harness asks the library what it
+    // calls a state rather than keeping a table of its own — a failure message
+    // and a log line then say the library's word.  A library whose names are
+    // in a different order from its numbers puts the wrong word on every one,
+    // which nothing else here would notice.
+    const struct {
+        pb_state_t  state;
+        const char *name;
+    } cases[] = {
+        { PB_STATE_IDLE,      "IDLE" },
+        { PB_STATE_DATA_OUT,  "DATA_OUT" },
+        { PB_STATE_DATA_IN,   "DATA_IN" },
+        { PB_STATE_CUSTOM_IN, "CUSTOM_IN" },
+        { PB_STATE_AWAIT_ZLP, "AWAIT_ZLP" },
+        { PB_STATE_AWAIT_ACK, "AWAIT_ACK" },
+        { PB_STATE_STALLED,   "STALLED" },
+    };
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const char *got = pbt_lib_state_name(cases[i].state);
+        if (got == NULL) {
+            pbt_fail(__FILE__, __LINE__, "state %u has no name",
+                     (unsigned)cases[i].state);
+            continue;
+        }
+        if (strcmp(got, cases[i].name) != 0) {
+            pbt_fail(__FILE__, __LINE__, "state %u: expected %s, got %s",
+                     (unsigned)cases[i].state, cases[i].name, got);
+        }
+    }
+
+    // A number that is not a state has no name, so the harness prints that it
+    // is not one rather than whatever sits past the end of the table.
+    PBT_CHECK(pbt_lib_state_name((pb_state_t)(PB_STATE_STALLED + 1)) == NULL);
+    PBT_CHECK(pbt_lib_state_name((pb_state_t)0xFFu) == NULL);
+}
+
 static const pbt_scenario_t k_scenarios[] = {
     { "GET_INFO accepts the 256-byte transfer picotool asks for",
       scenario_get_info_accepts_a_256_byte_transfer },
@@ -337,6 +375,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_the_serial_without_a_bootrom_routine },
     { "the library built the wire it was given",
       scenario_the_library_built_the_wire_it_was_given },
+    { "the library names its own states",
+      scenario_the_library_names_its_own_states },
 };
 
 PBT_SUITE(pbt_suite_quirks, "quirks", k_scenarios);

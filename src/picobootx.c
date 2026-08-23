@@ -612,11 +612,11 @@ static void pb_handle_action_sync(pb_state_block_t *s, const picoboot_cmd_t *cmd
                 st = s->ops->enter_xip(s->ctx);
             }
             break;
-        // LCOV_EXCL_START
+        // LCOV_UNREACHABLE_START
         default:
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             return;
-        // LCOV_EXCL_STOP
+        // LCOV_UNREACHABLE_STOP
     }
 
     if (st != PB_STATUS_OK) {
@@ -650,11 +650,11 @@ static void pb_handle_action_async(pb_state_block_t *s, const picoboot_cmd_t *cm
             }
             st = s->ops->flash_erase((const pb_addr_size_args_t *)cmd->args, s->ctx);
             break;
-        // LCOV_EXCL_START
+        // LCOV_UNREACHABLE_START
         default:
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             return;
-        // LCOV_EXCL_STOP
+        // LCOV_UNREACHABLE_STOP
     }
 
     if (st != PB_STATUS_OK) {
@@ -681,11 +681,11 @@ static void pb_handle_action_deferred(pb_state_block_t *s, const picoboot_cmd_t 
             }
             break;
         }
-        // LCOV_EXCL_START
+        // LCOV_UNREACHABLE_START
         default:
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             return;
-        // LCOV_EXCL_STOP
+        // LCOV_UNREACHABLE_STOP
     }
     pb_send_zlp(s);
 }
@@ -695,12 +695,12 @@ static void pb_handle_data_in(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     // Unreachable: pb_dispatch_cmd found this same identifier in the table
     // before routing here on its category, and every PB_CAT_DATA_IN row carries
     // both a prepare and a fill.
-    // LCOV_EXCL_START
     if (!entry || !entry->prepare || !entry->fill) {
+        // LCOV_UNREACHABLE_START
         pb_stall(s, PB_STATUS_UNKNOWN_CMD);
         return;
+        // LCOV_UNREACHABLE_STOP
     }
-    // LCOV_EXCL_STOP
     pb_status_t st = entry->prepare(s, cmd, s->ctx);
     if (st != PB_STATUS_OK) {
         pb_stall(s, st);
@@ -714,12 +714,12 @@ static void pb_handle_data_out(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
     // Unreachable: pb_dispatch_cmd found this same identifier in the table
     // before routing here on its category, and every PB_CAT_DATA_OUT row
     // carries both a prepare and a consume.
-    // LCOV_EXCL_START
     if (!entry || !entry->prepare || !entry->consume) {
+        // LCOV_UNREACHABLE_START
         pb_stall(s, PB_STATUS_UNKNOWN_CMD);
         return;
+        // LCOV_UNREACHABLE_STOP
     }
-    // LCOV_EXCL_STOP
     pb_status_t st = entry->prepare(s, cmd, s->ctx);
     if (st != PB_STATUS_OK) {
         pb_stall(s, st);
@@ -733,13 +733,13 @@ static void pb_task_data_out(pb_state_block_t *s) {
     // Unreachable: PB_STATE_DATA_OUT is entered only by pb_handle_data_out,
     // which found a table row carrying a consume, and cmd_id is written only
     // when a command is taken off the wire in PB_STATE_IDLE.
-    // LCOV_EXCL_START
     if (!entry || !entry->consume) {
+        // LCOV_UNREACHABLE_START
         ERR("pb_task_data_out: no consume fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
+        // LCOV_UNREACHABLE_STOP
     }
-    // LCOV_EXCL_STOP
 
     uint8_t  buf[64];
     uint32_t available = picoboot_vendor_available();
@@ -838,12 +838,12 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
             pb_handle_data_out(s, cmd);
             break;
 
-        // LCOV_EXCL_START
+        // LCOV_UNREACHABLE_START
         default:
             ERR("Invalid command category %u for cmd_id 0x%02x", entry->category, cmd->cmd_id);
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
             break;
-        // LCOV_EXCL_STOP
+        // LCOV_UNREACHABLE_STOP
     }
 }
 
@@ -992,13 +992,13 @@ static void pb_task_data_in(pb_state_block_t *s) {
     // Unreachable: PB_STATE_DATA_IN is entered only by pb_handle_data_in, which
     // found a table row carrying a fill, and cmd_id is written only when a
     // command is taken off the wire in PB_STATE_IDLE.
-    // LCOV_EXCL_START
     if (!entry || !entry->fill) {
+        // LCOV_UNREACHABLE_START
         ERR("pb_task_data_in: no fill fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
+        // LCOV_UNREACHABLE_STOP
     }
-    // LCOV_EXCL_STOP
 
     pb_pump_data_in(s, entry->fill);
 }
@@ -1020,13 +1020,13 @@ static pb_status_t pb_custom_fill(
 static void pb_task_custom_in(pb_state_block_t *s) {
     // Unreachable: pb_dispatch_custom_cmd checks both before entering this
     // state, and neither can change afterwards.
-    // LCOV_EXCL_START
     if (!s->custom || !s->custom->fill) {
+        // LCOV_UNREACHABLE_START
         ERR("pb_task_custom_in: no fill fn for cmd 0x%02x", s->cmd_id);
         pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
         return;
+        // LCOV_UNREACHABLE_STOP
     }
-    // LCOV_EXCL_STOP
 
     pb_pump_data_in(s, pb_custom_fill);
 }

@@ -21,6 +21,13 @@ publish = false
 
 [workspace]
 
+# There is no test harness for a bare-metal target, so nothing here is a test
+# or a benchmark.  Saying so is what lets --all-targets be asked for.
+[[bin]]
+name = "ramfunc-probe"
+test = false
+bench = false
+
 [dependencies]
 picobootx-rp2350 = { path = "../../rust/picobootx-rp2350" }
 cortex-m-rt = "0.7"

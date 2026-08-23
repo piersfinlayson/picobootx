@@ -153,3 +153,22 @@ impl StatusBlock {
         u32::from_le_bytes([self.0[4], self.0[5], self.0[6], self.0[7]])
     }
 }
+
+// INFO_FLAGS and the function that reads it are both private, so this is here
+// rather than in tests/.  Everything else about the wire is public and is
+// tested from there.
+#[cfg(test)]
+mod tests {
+    use super::{INFO_FLAGS, INFO_MAX_WORDS, info_max_words};
+
+    #[test]
+    fn the_widest_flag_in_the_table_is_what_sizes_a_buffer() {
+        let widest = INFO_FLAGS
+            .iter()
+            .map(|(_, words)| *words as usize)
+            .max()
+            .expect("the table names at least one flag");
+        assert_eq!(info_max_words(), widest);
+        assert_eq!(INFO_MAX_WORDS, widest);
+    }
+}

@@ -43,20 +43,32 @@ struct FfiState {
 // personality routine even where nothing can unwind.  The C binary this is
 // linked into has no unwinder and never calls it — a definition is all the
 // linker wants.
+//
+// Unreachable: nothing calls it.  Rust names this symbol for tidying up while
+// a panic unwinds the stack, and a panic here stops dead instead.
+// LCOV_UNREACHABLE_START
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_eh_personality() {}
+// LCOV_UNREACHABLE_STOP
 
 // Only for the archive.  A test target links std, which brings its own.
+//
+// Unreachable: it runs only if this shim has a bug.
+// LCOV_UNREACHABLE_START
+#[cfg(not(test))]
+unsafe extern "C" {
+    fn abort() -> !;
+}
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    // The suite links no unwinder and a panic here is a defect in this shim,
-    // not a condition to recover from.  Stopping is what a debugger can see.
-    loop {
-        core::hint::spin_loop();
-    }
+    // A panic here is a defect in this shim, not a condition to recover from.
+    // abort ends the run and make reports it, where spinning would hang CI.
+    unsafe { abort() }
 }
+// LCOV_UNREACHABLE_STOP
 
 unsafe fn state<'a>(p: *mut c_void) -> &'a mut FfiState {
     unsafe { &mut *p.cast::<FfiState>() }

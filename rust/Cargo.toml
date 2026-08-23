@@ -10,6 +10,7 @@
 resolver = "3"
 members = [
     "picobootx",
+    "picobootx-embassy",
     "picobootx-ffi",
     "picobootx-rp2350",
 ]

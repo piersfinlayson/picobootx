@@ -1,0 +1,80 @@
+# picobootx-embassy
+
+Device-side [PICOBOOT](https://github.com/piersfinlayson/picobootx) for a
+device whose USB stack is [embassy-usb](https://docs.embassy.dev/embassy-usb).
+It answers `picotool`, [pico⚡flash](https://picoflash.org) and any other
+picoboot host, alongside whatever else the device is doing.
+
+`picobootx` itself is the protocol and knows nothing about a USB stack.  This
+crate is the half that does: a task that drives the two bulk endpoints, a
+`picobootx::Transport` over the queues that task fills, and an
+`embassy_usb::Handler` that answers picoboot's control requests.
+
+Written against **embassy-usb 0.6** and **embassy-usb-driver 0.2**.
+
+## What a device supplies
+
+Three things, and the first two are picobootx's rather than this crate's.
+
+- **`picobootx::Ops`** — what the device does when a host asks it something.
+  `picobootx-rp2350`'s `Rp2350` is every one of them for an RP2350.
+- **`picobootx::Custom`** — commands of the device's own, if it has any.
+  `picobootx::NoCustom` if it has none.
+- **`Halt`** — how the device halts one of its bulk endpoints, and how it tells
+  a packet the host has taken from one merely armed.  embassy-usb keeps the
+  halt control on `embassy_usb_driver::Bus`, which `UsbDevice` owns and does not
+  lend out, and reports neither, so this cannot come from the stack.  On an
+  RP2350 it is `Rp2350Halt`, and on another part it is the device's to write.
+
+## The `rp2350` feature
+
+Off by default.  Turning it on brings in `picobootx-rp2350` and with it
+`Rp2350Halt`, which reaches the RP2350's own endpoint buffer control words —
+the calls every embassy device on that part would otherwise write out itself.
+
+```toml
+picobootx-embassy = { version = "0.1", features = ["rp2350"] }
+```
+
+The type is compiled only for a build for the part, since the registers behind
+it exist nowhere else.
+
+## Wiring it up
+
+Allocate a vendor interface with two bulk endpoints, build a `Picoboot` over
+them, and run its task alongside the USB device's:
+
+```ignore
+let mut picoboot = Picoboot::new(
+    Rp2350,
+    NoCustom,
+    Some(&mut flash_page),
+    Endpoints { out: 0x01, r#in: 0x81 },
+    64,
+    Rp2350Halt,
+);
+
+let mut handler = picoboot.handler();
+builder.handler(&mut handler);
+
+let mut usb = builder.build();
+join(usb.run(), picoboot.run(ep_out, ep_in)).await;
+```
+
+`examples/embassy` in the repository is a complete device built this way.
+
+## Two things worth knowing
+
+**Both halves run on one executor.** The control handler and the driver task
+each need the protocol and the queues, and they take turns through a
+`RefCell`.  That makes a `Picoboot` `!Sync`, so the compiler refuses to put
+the two halves on separate executors rather than letting them race.
+
+**A halt is recovered at `INTERFACE RESET`.** embassy-usb answers
+`CLEAR_FEATURE(ENDPOINT_HALT)` itself and reports it to no handler, and a
+driver is free to leave the endpoint's data toggle and receive buffer wherever
+the halt left them.  A picoboot host always follows the clear with the vendor
+`INTERFACE RESET`, which does reach a handler, so that is where `Halt::resync`
+is called — for the endpoints picoboot halted, and no others.  `INTERFACE
+RESET` is also what a host sends to begin a session, and resyncing an endpoint
+that was carrying something would take that packet back off the controller.

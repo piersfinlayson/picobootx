@@ -309,6 +309,61 @@ static void scenario_otp_access_of_part_of_a_row_is_refused(void) {
     PBT_CHECK_EQ(pbt_count("rom_otp_access"), 2);
 }
 
+static void scenario_a_zero_length_otp_access_is_nothing_to_do(void) {
+    pbt_begin();
+    pbt_start();
+
+    // An integrator's loop whose count came out zero reaches these with a
+    // length of zero and whatever pointer it was holding, which may be a null.
+    // Nothing is read and no fuse is blown, and the caller is told so rather
+    // than being faulted for asking.
+    PBT_CHECK_STATUS(picoboot_default_otp_read(0u, 0u, NULL, 0u, NULL),
+                     PB_STATUS_OK);
+    PBT_CHECK_STATUS(picoboot_default_otp_write(0u, 0u, NULL, 0u, NULL),
+                     PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_otp()[0], 0u);
+
+    // The same buffer with a row's worth in it does blow the row, so what did
+    // nothing above was the length and not the call.
+    uint8_t row[4] = { 0x0Fu, 0x00u, 0x00u, 0x00u };
+    PBT_CHECK_STATUS(picoboot_default_otp_write(0u, 0u, row, 4u, NULL),
+                     PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_otp()[0], 0x0Fu);
+}
+
+// ---------------------------------------------------------------------------
+// Finding a routine at all
+// ---------------------------------------------------------------------------
+
+static void scenario_a_bootrom_routine_is_looked_up_by_its_two_characters(void) {
+    pbt_begin();
+    pbt_start();
+
+    // The code is the two characters with the second one high, and the entry
+    // asked for is the Arm secure one.  A lookup assembled any other way finds
+    // a different routine or none at all, and every implementation above goes
+    // through this one function to reach the chip.
+    PBT_CHECK(picoboot_lookup_boot_fn('R', 'B') != NULL);
+    PBT_REQUIRE(pbt_nth("bootrom_lookup", 0) != NULL);
+    PBT_CHECK_EQ(pbt_nth("bootrom_lookup", 0)->a0,
+                 ((uint32_t)(uint8_t)'B' << 8) | (uint32_t)(uint8_t)'R');
+    // 0x0004 is RP2350_ROM_TABLE_FLAG_FUNC_ARM_SEC, written out rather than
+    // named.  The macro is what the library passes, so an assertion against it
+    // agrees with whatever the library asks for and pins nothing.
+    PBT_CHECK_EQ(pbt_nth("bootrom_lookup", 0)->a1, 0x0004u);
+
+    // A code this part does not publish is a null, not a pointer to whatever
+    // the table happened to hold next.
+    PBT_CHECK(picoboot_lookup_boot_fn('Z', 'Z') == NULL);
+
+    // And the answer follows the part: withhold the routine that was there and
+    // the same two characters find nothing.
+    pbt_begin();
+    pbt_bootrom_withhold('R', 'B');
+    pbt_start();
+    PBT_CHECK(picoboot_lookup_boot_fn('R', 'B') == NULL);
+}
+
 static void scenario_get_info_sys_refuses_a_buffer_no_flag_fills(void) {
     pbt_begin();
     pbt_start();
@@ -484,6 +539,10 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_a_reboot_the_part_no_longer_offers_does_not_happen },
     { "OTP access of part of a row is refused",
       scenario_otp_access_of_part_of_a_row_is_refused },
+    { "a zero-length OTP access is nothing to do",
+      scenario_a_zero_length_otp_access_is_nothing_to_do },
+    { "a bootrom routine is looked up by its two characters",
+      scenario_a_bootrom_routine_is_looked_up_by_its_two_characters },
     { "get_info_sys refuses a buffer no flag fills",
       scenario_get_info_sys_refuses_a_buffer_no_flag_fills },
     { "get_info_sys reports a flag the chip will not take",

@@ -59,7 +59,14 @@ impl OpsTable {
 
     fn t(&self) -> Option<&COps> {
         if self.ops.is_null() {
+            // Unreachable by contract rather than by construction: nothing
+            // here stops a NULL ops, but picobootx.h allows NULL only for
+            // custom, and the C reads straight through ops without checking.
+            // Every scenario is run against both libraries, so one passing
+            // NULL would crash the C long before this line ran.
+            // LCOV_UNREACHABLE_START
             None
+            // LCOV_UNREACHABLE_STOP
         } else {
             Some(unsafe { &*self.ops })
         }

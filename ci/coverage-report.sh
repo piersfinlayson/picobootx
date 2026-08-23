@@ -50,8 +50,9 @@ OUT_DIR="$ROOT/test/build/coverage"
 # cannot be met by fewer - fewer runs reach fewer lines - so --check refuses
 # unless every one is present.  picobootx-c is the C library as the C
 # implementation's suites reached it, picobootx-rust the C left over when the
-# Rust library is under test, and rust the Rust library itself.
-CAMPAIGN="picobootx-c.info picobootx-rust.info rust.info"
+# Rust library is under test, rust the Rust library as those same suites
+# reached it, and rust-unit the Rust library as the crates' own tests did.
+CAMPAIGN="picobootx-c.info picobootx-rust.info rust.info rust-unit.info"
 
 MODE="table"
 FILTER=""

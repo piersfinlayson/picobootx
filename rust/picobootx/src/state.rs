@@ -132,6 +132,11 @@ fn spec(cmd_id: u8) -> Option<Spec> {
 
 // What a data phase is carrying.  Only one command runs at a time, so these
 // are alternatives rather than a struct of everything.
+//
+// The C holds the same thing in a union with no discriminant, so it cannot ask
+// which command's state it is looking at.  Every arm below that refuses a
+// transfer state the command did not set is therefore the Rust's alone, and has
+// no counterpart in src/picobootx.c to compare against.
 enum Xfer {
     None,
     Read {
@@ -286,8 +291,13 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             return;
         }
         let Some(cmd) = Command::from_bytes(&buf) else {
+            // Unreachable: buf is a 32-byte array, and the only thing
+            // from_bytes rejects is a length other than 32.
+            const _: () = assert!(CMD_LEN == 32);
+            // LCOV_UNREACHABLE_START
             self.stall(t, Status::UnknownError);
             return;
+            // LCOV_UNREACHABLE_STOP
         };
 
         if cmd.magic == MAGIC {
@@ -345,7 +355,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 Ok(()) => self.state = State::DataOut,
                 Err(e) => self.stall(t, e),
             },
+            // Unreachable: an Unsupported category stalls and returns earlier
+            // in this function, so it never arrives at this match.
+            // LCOV_UNREACHABLE_START
             Category::Unsupported => unreachable!(),
+            // LCOV_UNREACHABLE_STOP
         }
     }
 
@@ -354,7 +368,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             CMD_EXCLUSIVE_ACCESS => self.ops.exclusive_access(Exclusive::from(cmd.args[0])),
             CMD_EXIT_XIP => self.ops.exit_xip(),
             CMD_ENTER_XIP => self.ops.enter_xip(),
+            // Unreachable: spec marks only these three commands Sync, and only
+            // a Sync command is routed here.
+            // LCOV_UNREACHABLE_START
             _ => unreachable!(),
+            // LCOV_UNREACHABLE_STOP
         };
         match r {
             Ok(()) => self.ack(t),
@@ -436,7 +454,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 };
                 Ok(())
             }
+            // Unreachable: spec marks only these three commands DataIn, and
+            // only a DataIn command is routed here.
+            // LCOV_UNREACHABLE_START
             _ => unreachable!(),
+            // LCOV_UNREACHABLE_STOP
         }
     }
 
@@ -468,7 +490,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 };
                 Ok(())
             }
+            // Unreachable: spec marks only these two commands DataOut, and
+            // only a DataOut command is routed here.
+            // LCOV_UNREACHABLE_START
             _ => unreachable!(),
+            // LCOV_UNREACHABLE_STOP
         }
     }
 
@@ -489,7 +515,12 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             let filled = if self.state == State::CustomIn {
                 match self.xfer {
                     Xfer::Custom(cmd) => self.custom.fill(&cmd, &mut buf[..max_len]),
+                    // Unreachable: the one place that sets the CustomIn state
+                    // assigns Xfer::Custom on the line before it, and nothing
+                    // writes the transfer again until the state moves on.
+                    // LCOV_UNREACHABLE_START
                     _ => Err(Status::UnknownError),
+                    // LCOV_UNREACHABLE_STOP
                 }
             } else {
                 self.fill(&mut buf[..max_len])
@@ -535,13 +566,21 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             CMD_READ => self.fill_read(buf),
             CMD_GET_INFO => self.fill_get_info(buf),
             CMD_OTP_READ => self.fill_otp(buf),
+            // Unreachable: only the DataIn state gets this far, and spec marks
+            // just these three commands DataIn.
+            // LCOV_UNREACHABLE_START
             _ => Err(Status::UnknownError),
+            // LCOV_UNREACHABLE_STOP
         }
     }
 
     fn fill_read(&mut self, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
         let Xfer::Read { addr, remaining } = self.xfer else {
+            // Unreachable: fill calls this only for a READ, and prepare_in set
+            // Xfer::Read before a READ could start its data phase.
+            // LCOV_UNREACHABLE_START
             return Err(Status::UnknownError);
+            // LCOV_UNREACHABLE_STOP
         };
         if remaining == 0 {
             return Ok(Filled::Done(0));
@@ -568,7 +607,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             is_partition,
         } = self.xfer
         else {
+            // Unreachable: fill calls this only for a GET_INFO, and prepare_in
+            // set Xfer::GetInfo before a GET_INFO could start its data phase.
+            // LCOV_UNREACHABLE_START
             return Err(Status::UnknownError);
+            // LCOV_UNREACHABLE_STOP
         };
 
         let save = |s: &mut Self, rf, tr, hs| {
@@ -670,7 +713,12 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             ecc,
         } = self.xfer
         else {
+            // Unreachable: fill calls this only for an OTP_READ, and
+            // prepare_in set Xfer::Otp before an OTP_READ could start its data
+            // phase.
+            // LCOV_UNREACHABLE_START
             return Err(Status::UnknownError);
+            // LCOV_UNREACHABLE_STOP
         };
         if rows_remaining == 0 {
             return Ok(Filled::Done(0));
@@ -723,7 +771,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         match self.cmd_id {
             CMD_WRITE => self.consume_write(buf),
             CMD_OTP_WRITE => self.consume_otp(buf),
+            // Unreachable: only the DataOut state gets this far, and spec
+            // marks just these two commands DataOut.
+            // LCOV_UNREACHABLE_START
             _ => Err(Status::UnknownError),
+            // LCOV_UNREACHABLE_STOP
         }
     }
 
@@ -736,7 +788,12 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             mut page_offset,
         } = self.xfer
         else {
+            // Unreachable: consume calls this only for a WRITE, and
+            // prepare_out set Xfer::Write before a WRITE could start its data
+            // phase.
+            // LCOV_UNREACHABLE_START
             return Err(Status::UnknownError);
+            // LCOV_UNREACHABLE_STOP
         };
 
         if target == Target::Flash {
@@ -788,7 +845,12 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             ecc,
         } = self.xfer
         else {
+            // Unreachable: consume calls this only for an OTP_WRITE, and
+            // prepare_out set Xfer::Otp before an OTP_WRITE could start its
+            // data phase.
+            // LCOV_UNREACHABLE_START
             return Err(Status::UnknownError);
+            // LCOV_UNREACHABLE_STOP
         };
         let row_size = ecc.row_size() as usize;
         let rows = buf.len() / row_size;

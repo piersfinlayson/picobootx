@@ -1,0 +1,41 @@
+# Copyright (C) 2026 Piers Finlayson <piers@piers.rocks>
+#
+# MIT License
+
+# A complete picobootx device for the RP2350, on embassy.
+#
+# Its own workspace, so it is not a member of rust/ - the conformance suite
+# builds that workspace and has no business fetching embassy.
+
+[package]
+name = "picobootx-embassy-example"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# There is no test harness for a bare-metal target, so nothing here is a test
+# or a benchmark.  Saying so is what lets --all-targets be asked for.
+[[bin]]
+name = "picobootx-embassy-example"
+test = false
+bench = false
+
+[dependencies]
+picobootx = { path = "../../rust/picobootx" }
+# The rp2350 feature is what brings in Rp2350Halt, the halt control
+# embassy-usb does not hand out.  Without it this device would have to write
+# those three calls itself.
+picobootx-embassy = { path = "../../rust/picobootx-embassy", features = ["rp2350"] }
+picobootx-rp2350 = { path = "../../rust/picobootx-rp2350" }
+
+embassy-executor = { version = "0.10", features = ["executor-thread", "platform-cortex-m"] }
+embassy-futures = { version = "0.1" }
+embassy-rp = { version = "0.10", features = ["rt", "critical-section-impl", "time-driver", "rp235xa"] }
+embassy-usb = { version = "0.6", default-features = false }
+cortex-m-rt = "0.7"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"

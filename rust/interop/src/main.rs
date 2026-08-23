@@ -34,7 +34,6 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use nusb::DeviceInfo;
 use picoboot::{Access, Connection, Picoboot, PicobootCmd, PicobootCmdId, Target};
 
 /// Where the checks work, and how much they move.  The flash model behind the
@@ -144,8 +143,8 @@ const VHCI_DRIVER: &str = "vhci_hcd";
 ///
 /// Anything other than a clear yes is a no, so a system that cannot answer at
 /// all, such as one that is not Linux, refuses rather than proceeds.
-fn is_bridge_device(info: &DeviceInfo) -> bool {
-    bus_is_virtual(Path::new("/sys/bus/usb/devices"), info.bus_id())
+fn is_bridge_device(bus: &str) -> bool {
+    bus_is_virtual(Path::new("/sys/bus/usb/devices"), bus)
 }
 
 /// Whether one bus is the virtual controller's, given where the USB device tree
@@ -186,7 +185,10 @@ async fn main() -> ExitCode {
         }
     };
 
-    let mut bridged: Vec<DeviceInfo> = candidates.into_iter().filter(is_bridge_device).collect();
+    let mut bridged: Vec<_> = candidates
+        .into_iter()
+        .filter(|info| is_bridge_device(info.bus_id()))
+        .collect();
 
     let device = match bridged.len() {
         1 => bridged.remove(0),

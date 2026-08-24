@@ -70,13 +70,29 @@ pub const DIAG_LEN: u16 = 8;
 /// firmware's own memory or the flash it runs from, so the window is the
 /// device's to nominate and this is how it says which one.
 pub const REQUEST_SCRATCH: u8 = 0x47;
-pub const SCRATCH_REPLY_LEN: u16 = 8;
+pub const SCRATCH_REPLY_LEN: u16 = 16;
+
+/// Where the device will let a host work, in memory and in flash.
+#[derive(Clone, Copy, Debug)]
+pub struct Scratch {
+    pub ram: u32,
+    pub ram_len: u32,
+    pub flash: u32,
+    pub flash_len: u32,
+}
 
 /// PICOBOOT's read, write and get-info, as the identifier goes on the wire.
 pub const CMD_READ: u8 = 0x04 | picobootx::wire::DIR_IN;
 pub const CMD_WRITE: u8 = 0x05;
 pub const CMD_GET_INFO: u8 = 0x0b | picobootx::wire::DIR_IN;
 pub const CMD_REBOOT2: u8 = 0x0a;
+pub const CMD_FLASH_ERASE: u8 = 0x03;
+
+/// The units flash works in: a page is what a program writes, a sector what an
+/// erase clears, and a block what a bulk erase clears at once.
+pub const FLASH_PAGE: u32 = 256;
+pub const FLASH_SECTOR: u32 = 4096;
+pub const FLASH_BLOCK: u32 = 65536;
 
 /// The reboot the protocol replaced, which a device is expected not to serve.
 pub const CMD_REBOOT_OLD: u8 = 0x02;
@@ -464,8 +480,8 @@ impl Board {
         })
     }
 
-    /// Where the device will let a host write, as base and length.
-    pub async fn scratch(&self) -> Result<(u32, u32), String> {
+    /// Where the device will let a host work.
+    pub async fn scratch(&self) -> Result<Scratch, String> {
         let s = self
             .device
             .control_in(
@@ -485,10 +501,27 @@ impl Board {
         if s.len() < SCRATCH_REPLY_LEN as usize {
             return Err(format!("the device answered {} bytes", s.len()));
         }
-        Ok((
-            u32::from_le_bytes([s[0], s[1], s[2], s[3]]),
-            u32::from_le_bytes([s[4], s[5], s[6], s[7]]),
-        ))
+        let word = |at: usize| u32::from_le_bytes([s[at], s[at + 1], s[at + 2], s[at + 3]]);
+        Ok(Scratch {
+            ram: word(0),
+            ram_len: word(4),
+            flash: word(8),
+            flash_len: word(12),
+        })
+    }
+
+    /// Erase a range of flash, and collect the device's acknowledgement.
+    ///
+    /// The device is away from the bus for the whole erase — it runs with
+    /// interrupts off and flash answering commands rather than reads — so the
+    /// acknowledgement arriving at all is part of what this asks.
+    pub fn flash_erase(&mut self, addr: u32, size: u32) -> Result<(), String> {
+        let mut args = [0u8; 8];
+        args[0..4].copy_from_slice(&addr.to_le_bytes());
+        args[4..8].copy_from_slice(&size.to_le_bytes());
+
+        self.send_cmd(CMD_FLASH_ERASE, 0, &args)?;
+        self.read_ack()
     }
 
     /// Read `len` bytes from `addr`, acknowledging the transfer.

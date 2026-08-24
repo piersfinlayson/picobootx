@@ -24,8 +24,9 @@ use std::time::Duration;
 use picobootx::Status;
 use picobootx::wire::DIR_IN;
 use picobootx_hw_host::{
-    Board, CMD_GET_INFO, CMD_REBOOT_OLD, CMD_REBOOT2, CMD_WRITE, EP_IN, EP_OUT, INFO_ARGS_LEN,
-    INFO_SYS, MAX_PACKET, REBOOT_ARGS_LEN, REBOOT_NORMAL, wait_back, wait_gone,
+    Board, CMD_FLASH_ERASE, CMD_GET_INFO, CMD_REBOOT_OLD, CMD_REBOOT2, CMD_WRITE, EP_IN, EP_OUT,
+    FLASH_BLOCK, FLASH_PAGE, FLASH_SECTOR, INFO_ARGS_LEN, INFO_SYS, MAX_PACKET, REBOOT_ARGS_LEN,
+    REBOOT_NORMAL, wait_back, wait_gone,
 };
 
 // PICOBOOT's read, and an address the RP2350 defaults refuse.  The refusal is
@@ -241,6 +242,10 @@ async fn main() -> ExitCode {
 
     if run.group("get-info") {
         get_info(&mut run, &mut board).await;
+    }
+
+    if run.group("flash") {
+        flash(&mut run, &mut board).await;
     }
 
     if run.group("reboot") {
@@ -515,13 +520,14 @@ async fn multi_packet(run: &mut Runner, board: &mut Board) {
     );
 
     // Host to device, which has never been on this board at all.
-    let (scratch, scratch_len) = match board.scratch().await {
-        Ok(s) => s,
+    let scratch = match board.scratch().await {
+        Ok(s) => (s.ram, s.ram_len),
         Err(e) => {
             run.check("the device says where a host may write", Err(e));
             return;
         }
     };
+    let (scratch, scratch_len) = scratch;
     run.check(
         "the device says where a host may write",
         if scratch_len >= 512 {
@@ -942,4 +948,192 @@ async fn bus_reset(run: &mut Runner, mut board: Board) -> Option<Board> {
     );
 
     Some(board)
+}
+
+/// Erasing and programming flash, which is the only thing here that changes the
+/// board.
+///
+/// It is also the only place the CPU leaves the bus: an erase runs with
+/// interrupts off and with flash answering commands instead of reads, from a
+/// routine copied into RAM, because code cannot be fetched from a flash that is
+/// mid-erase.  So the acknowledgement arriving at all is half of what is asked,
+/// and reading an address outside the erased range afterwards is the other
+/// half — that says execute-in-place came back and the cache was flushed rather
+/// than still holding what was there before.
+///
+/// The window comes from the device, and [memory.x](../../device/memory.x)
+/// keeps the firmware out of it, so nothing here can erase what it is running.
+async fn flash(run: &mut Runner, board: &mut Board) {
+    let scratch = match board.scratch().await {
+        Ok(s) => s,
+        Err(e) => {
+            run.check("the device says where a host may erase", Err(e));
+            return;
+        }
+    };
+    run.check(
+        "the device says where a host may erase",
+        if scratch.flash_len >= FLASH_BLOCK {
+            Ok(())
+        } else {
+            Err(format!("it offered {} bytes", scratch.flash_len))
+        },
+    );
+    let base = scratch.flash;
+
+    // What flash outside the window holds, to be read again after every erase.
+    // This firmware's own first bytes, which is as good a witness as any that
+    // reads still answer and answer the same.
+    let elsewhere = match board.read_mem(FLASH_BASE, 64) {
+        Ok(v) => v,
+        Err(e) => {
+            run.check("flash outside the window can be read", Err(e));
+            return;
+        }
+    };
+
+    run.check(
+        "an erased sector reads as ones",
+        match board
+            .flash_erase(base, FLASH_SECTOR)
+            .and_then(|()| board.read_mem(base, FLASH_SECTOR))
+        {
+            Err(e) => Err(e),
+            Ok(back) if back.iter().all(|b| *b == 0xFF) => Ok(()),
+            Ok(back) => Err(format!(
+                "{} of {} bytes are not 0xFF",
+                back.iter().filter(|b| **b != 0xFF).count(),
+                back.len()
+            )),
+        },
+    );
+
+    run.check(
+        "flash outside the erased range still reads, and reads the same",
+        match board.read_mem(FLASH_BASE, 64) {
+            Err(e) => Err(format!("it would not read at all: {e}")),
+            Ok(now) if now == elsewhere => Ok(()),
+            Ok(_) => Err("it reads something else, so the cache was not flushed".into()),
+        },
+    );
+
+    let first = pattern(0x11, FLASH_PAGE as usize);
+    run.check(
+        "a page programmed reads back as what was programmed",
+        match board
+            .write_mem(base, &first)
+            .and_then(|()| board.read_mem(base, FLASH_PAGE))
+        {
+            Err(e) => Err(e),
+            Ok(back) if back == first => Ok(()),
+            Ok(back) => Err(format!(
+                "wrote {:02x?}, read {:02x?}",
+                &first[..8],
+                &back[..8]
+            )),
+        },
+    );
+
+    // Programming clears bits and never sets one, so a second page written over
+    // the first without an erase between has to read as the two ANDed.  That is
+    // what says the erase above did something rather than the flash having been
+    // blank already, and it is the check a device that quietly skipped the erase
+    // fails.
+    let second = pattern(0x9e, FLASH_PAGE as usize);
+    let anded: Vec<u8> = first.iter().zip(&second).map(|(a, b)| a & b).collect();
+    run.check(
+        "programming over a page without erasing clears bits and sets none",
+        match board
+            .write_mem(base, &second)
+            .and_then(|()| board.read_mem(base, FLASH_PAGE))
+        {
+            Err(e) => Err(e),
+            Ok(back) if back == anded => Ok(()),
+            Ok(back) if back == second => {
+                Err("the page was replaced, so something erased it first".into())
+            }
+            Ok(_) => Err("what came back is neither page nor the two together".into()),
+        },
+    );
+
+    // The bulk path, which the device asks the boot ROM for by handing it the
+    // block size and the block erase command, and the longest the part is away
+    // from the bus in one go.
+    run.check(
+        "a whole block erases, and the device is still answering afterwards",
+        match board
+            .flash_erase(base, FLASH_BLOCK)
+            .and_then(|()| board.read_mem(base + FLASH_BLOCK - FLASH_SECTOR, FLASH_SECTOR))
+        {
+            Err(e) => Err(e),
+            Ok(back) if back.iter().all(|b| *b == 0xFF) => Ok(()),
+            Ok(back) => Err(format!(
+                "the last sector has {} bytes that are not 0xFF",
+                back.iter().filter(|b| **b != 0xFF).count()
+            )),
+        },
+    );
+
+    run.check(
+        "flash outside the block still reads, and reads the same",
+        match board.read_mem(FLASH_BASE, 64) {
+            Err(e) => Err(format!("it would not read at all: {e}")),
+            Ok(now) if now == elsewhere => Ok(()),
+            Ok(_) => Err("it reads something else, so the cache was not flushed".into()),
+        },
+    );
+
+    // What an erase will not do.  Each is followed by a recovery, so the next
+    // one starts from a device that is answering.
+    let erase_args = |addr: u32, size: u32| {
+        let mut a = [0u8; 8];
+        a[0..4].copy_from_slice(&addr.to_le_bytes());
+        a[4..8].copy_from_slice(&size.to_le_bytes());
+        a
+    };
+
+    for (addr, size, want, what) in [
+        (
+            base + 1,
+            FLASH_SECTOR,
+            Status::BadAlignment,
+            "an erase that does not start on a sector",
+        ),
+        (
+            base,
+            FLASH_SECTOR - 4,
+            Status::BadAlignment,
+            "an erase of part of a sector",
+        ),
+        (
+            0x4000_0000,
+            FLASH_SECTOR,
+            Status::InvalidAddress,
+            "an erase of something that is not flash",
+        ),
+    ] {
+        let args = erase_args(addr, size);
+        run.check(
+            &format!("{what} is refused"),
+            match refusal_code(board, CMD_FLASH_ERASE, 8, 0, &args).await {
+                Err(e) => Err(e),
+                Ok(code) if code == want as u32 => Ok(()),
+                Ok(code) => Err(format!("it reported {code} rather than {}", want as u32)),
+            },
+        );
+    }
+
+    // And what a program will not do.  Flash is written a page at a time, so an
+    // address inside one is refused rather than shifted onto the next.
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&(base + 1).to_le_bytes());
+    args[4..8].copy_from_slice(&FLASH_PAGE.to_le_bytes());
+    run.check(
+        "a program that does not start on a page is refused",
+        match refusal_code(board, CMD_WRITE, 8, FLASH_PAGE, &args).await {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::BadAlignment as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
 }

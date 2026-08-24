@@ -74,13 +74,22 @@ const DIAG_LEN: usize = 8;
 // otherwise.  Asked for over the control endpoint, so the two cannot drift the
 // way a constant written out at each end would.
 const REQ_SCRATCH: u8 = 0x47;
-const SCRATCH_REPLY_LEN: usize = 8;
+const SCRATCH_REPLY_LEN: usize = 16;
 
 /// How much room the host is given.  Enough for a transfer of several packets
 /// with room to write past the end and see that it was not written.
 const SCRATCH_LEN: usize = 1024;
 
 static mut SCRATCH: [u8; SCRATCH_LEN] = [0; SCRATCH_LEN];
+
+/// Where the host may erase and program.
+///
+/// The upper half of the part's flash, which [memory.x](../memory.x) keeps out
+/// of the linker's reach, so nothing this firmware is made of can be sitting
+/// here.  A whole 64K block, since that is the unit a bulk erase works in and
+/// the erase that takes the longest is the one worth doing.
+const FLASH_SCRATCH_BASE: u32 = 0x1010_0000;
+const FLASH_SCRATCH_LEN: u32 = 64 * 1024;
 
 // Reboot into BOOTSEL, from the RP2350 bootrom's own reboot routine.  Verified
 // against embassy-rp's reset_to_usb_boot, which passes the same value.
@@ -134,6 +143,8 @@ impl Handler for Bootsel<'_, '_> {
             let addr = &raw const SCRATCH as u32;
             self.scratch[0..4].copy_from_slice(&addr.to_le_bytes());
             self.scratch[4..8].copy_from_slice(&(SCRATCH_LEN as u32).to_le_bytes());
+            self.scratch[8..12].copy_from_slice(&FLASH_SCRATCH_BASE.to_le_bytes());
+            self.scratch[12..16].copy_from_slice(&FLASH_SCRATCH_LEN.to_le_bytes());
             return Some(InResponse::Accepted(&self.scratch));
         }
 

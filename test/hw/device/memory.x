@@ -8,9 +8,15 @@
  * the part needs, and embassy-rp fills the blocks in.
  */
 
+/* The part carries 2048K of flash.  Only the first 1024K is offered to the
+ * linker, so the window the flash checks erase and program - which starts at
+ * 1024K - cannot be occupied by this firmware whatever it grows into.  A
+ * firmware that outgrew the half it has fails to link, which is the point: the
+ * alternative is a constant on each side and a comment asking that they agree.
+ */
 MEMORY
 {
-  FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
+  FLASH : ORIGIN = 0x10000000, LENGTH = 1024K
   RAM   : ORIGIN = 0x20000000, LENGTH = 512K
 }
 

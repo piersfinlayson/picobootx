@@ -117,6 +117,27 @@ The three refusals — the reboot the protocol replaced, a wrong argument size a
 a promised data phase — run first, since everything after the reboot is a
 different connection.
 
+**`flash`** — the only group that changes the board, and the only place the CPU
+leaves the bus: an erase or a program runs with interrupts off and with flash
+answering commands instead of reads, from a routine copied into RAM, because
+code cannot be fetched from a flash that is mid-operation.  So the
+acknowledgement arriving at all is half of what is asked.  The other half is
+reading an address outside the range afterwards, which says execute-in-place
+came back and the cache was flushed rather than still holding what was there
+before.
+
+A sector is erased and has to read as ones, a page is programmed and read back,
+and a second page is programmed over it without an erase between — which has to
+read as the two ANDed, since programming clears bits and never sets one.  That
+last one is what says the erase did something rather than the flash having been
+blank already.  Then a whole 64K block, which is the bulk path and the longest
+the part is away from the bus in one go, and four refusals.
+
+The window comes from the device, and
+[memory.x](../device/memory.x) keeps the firmware out of it by offering the
+linker only the half of flash the window is not in, so nothing here can erase
+what it is running.
+
 ## How it talks to the board
 
 **It speaks the whole protocol.** Every device-to-host transfer is followed by

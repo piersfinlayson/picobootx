@@ -7,6 +7,10 @@
 //! Every step reads the device's own view over the control endpoint, which
 //! answers whether or not the bulk pair is moving.  That is the difference
 //! between seeing where the protocol stopped and inferring it from the outside.
+//!
+//! It speaks the protocol properly, acknowledgement included, so what it shows
+//! is what an ordinary session looks like rather than what one missing half of
+//! every exchange looks like.
 
 use std::process::ExitCode;
 
@@ -26,7 +30,7 @@ async fn show(board: &Board, when: &str) {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let board = match Board::open().await {
+    let mut board = match Board::open().await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{e}");
@@ -35,6 +39,13 @@ async fn main() -> ExitCode {
     };
 
     show(&board, "opened").await;
+
+    // From a known state, so what follows is this run and not the last one.
+    match board.quiesce().await {
+        Ok(()) => println!("quiesced"),
+        Err(e) => println!("quiesce FAILED: {e}"),
+    }
+    show(&board, "quiesced").await;
 
     let mut args = [0u8; 8];
     args[0..4].copy_from_slice(&ROM_MAGIC_ADDR.to_le_bytes());
@@ -53,6 +64,12 @@ async fn main() -> ExitCode {
             Err(e) => println!("        reply FAILED: {e}"),
         }
         show(&board, "after reply").await;
+
+        match board.ack() {
+            Ok(()) => println!("        acknowledged"),
+            Err(e) => println!("        acknowledgement FAILED: {e}"),
+        }
+        show(&board, "after ack").await;
     }
 
     println!("recover:");

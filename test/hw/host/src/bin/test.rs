@@ -22,7 +22,7 @@ use std::process::ExitCode;
 
 use picobootx::Status;
 use picobootx::wire::DIR_IN;
-use picobootx_hw_host::{Board, EP_IN, EP_OUT};
+use picobootx_hw_host::{Board, CMD_WRITE, EP_IN, EP_OUT, MAX_PACKET};
 
 // PICOBOOT's read, and an address the RP2350 defaults refuse.  The refusal is
 // the stimulus, so it has to be one the device is certain to give: 0x4000_0000
@@ -35,6 +35,11 @@ const READ_LEN: u32 = 4;
 /// A second ROM address, whose contents differ from the first.  Two addresses
 /// that answer differently is what lets a reply say which read produced it.
 const ROM_OTHER_ADDR: u32 = 0x0000_0000;
+
+/// Where the boot ROM starts, and where flash is mapped.  Both answer reads,
+/// and between them they give a long transfer somewhere to come from.
+const ROM_BASE: u32 = 0x0000_0000;
+const FLASH_BASE: u32 = 0x1000_0000;
 
 /// Prints as it goes and counts what it saw.
 ///
@@ -206,6 +211,10 @@ async fn main() -> ExitCode {
 
     if run.group("abandoned") {
         abandoned(&mut run, &mut board).await;
+    }
+
+    if run.group("multi-packet") {
+        multi_packet(&mut run, &mut board).await;
     }
 
     // Leave nothing behind, and say so where it would not go.  A run that ends
@@ -402,6 +411,157 @@ async fn abandoned(run: &mut Runner, board: &mut Board) {
                     .into(),
             ),
             Ok(got) => Err(format!("it returned {got:02x?}, which is neither address")),
+        },
+    );
+}
+
+/// A pattern that repeats in neither byte nor packet.
+///
+/// The index is in it, so a transfer that dropped a packet, repeated one, or
+/// put two in the wrong order reads back as something other than this rather
+/// than as a shift nothing notices.
+fn pattern(seed: u8, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+        .collect()
+}
+
+/// Transfers longer than the 64 bytes a full-speed bulk endpoint carries.
+///
+/// A packet is where a USB device's bookkeeping lives, so every question about
+/// it starts at the second one: whether the data toggle alternates across a
+/// long transfer, whether a transfer that is an exact number of packets ends
+/// without the host waiting for more, and whether one that is not ends on the
+/// short packet.  The protocol suites cannot ask any of it — they hand the
+/// library a byte queue, and a queue has no packets in it.
+async fn multi_packet(run: &mut Runner, board: &mut Board) {
+    // Device to host, growing past one packet.  Each is checked against the
+    // same bytes taken four at a time, which is the length already known to
+    // work, so a long transfer is judged against the device's own answer
+    // rather than against what this test expects the ROM to hold.
+    let mut reference = Vec::new();
+    for offset in (0..256).step_by(4) {
+        match board.read_mem(ROM_BASE + offset, 4) {
+            Ok(mut d) => reference.append(&mut d),
+            Err(e) => {
+                run.check("the ROM can be read four bytes at a time", Err(e));
+                return;
+            }
+        }
+    }
+
+    for len in [64u32, 100, 256] {
+        let want = reference[..len as usize].to_vec();
+        run.check(
+            &format!("a {len} byte read returns the same bytes as reading it in fours"),
+            match board.read_mem(ROM_BASE, len) {
+                Err(e) => Err(e),
+                Ok(got) if got == want => Ok(()),
+                Ok(got) if got.len() != len as usize => {
+                    Err(format!("{} bytes came back, not {len}", got.len()))
+                }
+                Ok(got) => Err(format!(
+                    "byte {} differs",
+                    got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(0)
+                )),
+            },
+        );
+    }
+
+    // Long enough that nothing about it fits in one of anything.
+    run.check(
+        "a 4096 byte read of flash returns 4096 bytes",
+        match board.read_mem(FLASH_BASE, 4096) {
+            Err(e) => Err(e),
+            Ok(got) if got.len() == 4096 => Ok(()),
+            Ok(got) => Err(format!("{} bytes came back", got.len())),
+        },
+    );
+
+    // Host to device, which has never been on this board at all.
+    let (scratch, scratch_len) = match board.scratch().await {
+        Ok(s) => s,
+        Err(e) => {
+            run.check("the device says where a host may write", Err(e));
+            return;
+        }
+    };
+    run.check(
+        "the device says where a host may write",
+        if scratch_len >= 512 {
+            Ok(())
+        } else {
+            Err(format!(
+                "it offered {scratch_len} bytes, which is not enough to test with"
+            ))
+        },
+    );
+
+    for len in [1usize, 63, 64, 512] {
+        let want = pattern(len as u8, len);
+        run.check(
+            &format!("a {len} byte write reads back as what went in"),
+            match board.write_mem(scratch, &want) {
+                Err(e) => Err(format!("the write would not go: {e}")),
+                Ok(()) => match board.read_mem(scratch, len as u32) {
+                    Err(e) => Err(format!("the read back would not go: {e}")),
+                    Ok(got) if got == want => Ok(()),
+                    Ok(got) => Err(format!(
+                        "byte {} differs",
+                        got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(0)
+                    )),
+                },
+            },
+        );
+    }
+
+    // A write stops at the length it was given.  Without this the checks above
+    // would pass on a device that wrote the whole packet every time, since they
+    // only ever look at the bytes they asked for.
+    let guard = 0xA5u8;
+    let filled = vec![guard; 128];
+    let short = pattern(0x11, 65);
+    run.check(
+        "a write stops where its length says, not where its packet does",
+        match board
+            .write_mem(scratch, &filled)
+            .and_then(|()| board.write_mem(scratch, &short))
+            .and_then(|()| board.read_mem(scratch, 128))
+        {
+            Err(e) => Err(e),
+            Ok(got) if got[..65] != short[..] => Err("what was written did not land".into()),
+            Ok(got) if got[65..].iter().all(|b| *b == guard) => Ok(()),
+            Ok(got) => Err(format!(
+                "{} bytes past the end of the transfer were overwritten",
+                got[65..].iter().filter(|b| **b != guard).count()
+            )),
+        },
+    );
+
+    // A host that says more than it sends.  The device is left holding a
+    // transfer that will not finish, and the reset has to be enough to get it
+    // back - a device that cannot is one a single interrupted write wedges.
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&scratch.to_le_bytes());
+    args[4..8].copy_from_slice(&256u32.to_le_bytes());
+    let promised = board
+        .send_cmd(CMD_WRITE, 256, &args)
+        .and_then(|()| board.send_data(&pattern(0x77, MAX_PACKET)));
+    run.check(
+        "a write that promises more than it sends is accepted",
+        promised,
+    );
+
+    run.check(
+        "the board comes back from a transfer the host abandoned",
+        board.quiesce().await,
+    );
+    run.check(
+        "and serves the next command",
+        match board.read_mem(ROM_BASE, 4) {
+            Ok(got) if got == reference[..4] => Ok(()),
+            Ok(got) => Err(format!("it returned {got:02x?}")),
+            Err(e) => Err(e),
         },
     );
 }

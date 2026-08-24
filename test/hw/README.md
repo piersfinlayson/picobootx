@@ -74,6 +74,20 @@ RESET` is sent, and a different address is asked for.  The answer has to be the
 second address's.  The RP2350 boot ROM takes the packet back on the same
 request, and this is that claim asked of picobootx.
 
+**`multi-packet`** — transfers longer than the 64 bytes a full-speed bulk
+endpoint carries.  A packet is where a USB device's bookkeeping lives, so every
+question about it starts at the second one: whether the data toggle alternates
+across a long transfer, whether one that is an exact number of packets ends
+without the host waiting for more, and whether one that is not ends on the short
+packet.  Reads are checked against the same bytes taken four at a time, so a
+long transfer is judged against the device's own answer rather than against what
+this test expects the ROM to hold.  Writes go to a window the device nominates —
+every address the RP2350 defaults accept is otherwise the test firmware's own
+memory or the flash it runs from — and are read back and compared.
+
+The conformance suites cannot ask any of it.  They hand the library a byte
+queue, and a queue has no packets in it.
+
 ## How it talks to the board
 
 **It speaks the whole protocol.** Every device-to-host transfer is followed by

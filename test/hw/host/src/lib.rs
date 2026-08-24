@@ -64,6 +64,18 @@ pub const REQUEST_GET_STATUS: u8 = 0x00;
 pub const REQUEST_DIAG: u8 = 0x46;
 pub const DIAG_LEN: u16 = 8;
 
+/// Ask where the device will let a host write.
+///
+/// Every address the RP2350 defaults accept for a write is either the test
+/// firmware's own memory or the flash it runs from, so the window is the
+/// device's to nominate and this is how it says which one.
+pub const REQUEST_SCRATCH: u8 = 0x47;
+pub const SCRATCH_REPLY_LEN: u16 = 8;
+
+/// PICOBOOT's read and write, as the identifier goes on the wire.
+pub const CMD_READ: u8 = 0x04 | picobootx::wire::DIR_IN;
+pub const CMD_WRITE: u8 = 0x05;
+
 /// Long enough for a device that is going to answer to have answered.
 pub const TIMEOUT: Duration = Duration::from_millis(2000);
 
@@ -396,6 +408,60 @@ impl Board {
             rx: u16::from_le_bytes([d[4], d[5]]),
             tx: u16::from_le_bytes([d[6], d[7]]),
         })
+    }
+
+    /// Where the device will let a host write, as base and length.
+    pub async fn scratch(&self) -> Result<(u32, u32), String> {
+        let s = self
+            .device
+            .control_in(
+                ControlIn {
+                    control_type: Vendor,
+                    recipient: Recipient::Interface,
+                    request: REQUEST_SCRATCH,
+                    value: 0,
+                    index: INTERFACE as u16,
+                    length: SCRATCH_REPLY_LEN,
+                },
+                TIMEOUT,
+            )
+            .await
+            .map_err(|e| format!("asking where to write failed: {e}"))?;
+
+        if s.len() < SCRATCH_REPLY_LEN as usize {
+            return Err(format!("the device answered {} bytes", s.len()));
+        }
+        Ok((
+            u32::from_le_bytes([s[0], s[1], s[2], s[3]]),
+            u32::from_le_bytes([s[4], s[5], s[6], s[7]]),
+        ))
+    }
+
+    /// Read `len` bytes from `addr`, acknowledging the transfer.
+    ///
+    /// One bulk transfer however long it is, which is what a host does — the
+    /// stack issues as many IN tokens as the length needs, and a transfer
+    /// shorter than a whole packet ends on the short packet.
+    pub fn read_mem(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, String> {
+        let mut args = [0u8; 8];
+        args[0..4].copy_from_slice(&addr.to_le_bytes());
+        args[4..8].copy_from_slice(&len.to_le_bytes());
+
+        self.send_cmd(CMD_READ, len, &args)?;
+        let data = self.read_reply(len as usize)?;
+        self.ack()?;
+        Ok(data)
+    }
+
+    /// Write `data` at `addr`, and collect the device's acknowledgement.
+    pub fn write_mem(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
+        let mut args = [0u8; 8];
+        args[0..4].copy_from_slice(&addr.to_le_bytes());
+        args[4..8].copy_from_slice(&(data.len() as u32).to_le_bytes());
+
+        self.send_cmd(CMD_WRITE, data.len() as u32, &args)?;
+        self.send_data(data)?;
+        self.read_ack()
     }
 
     /// Clear a halt the device raised, in one direction.

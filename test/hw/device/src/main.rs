@@ -65,6 +65,23 @@ const REQ_BOOTSEL_VALUE: u16 = 0xb007;
 const REQ_DIAG: u8 = 0x46;
 const DIAG_LEN: usize = 8;
 
+// Where the host may write.
+//
+// A host-to-device transfer has to land somewhere, and every address the RP2350
+// defaults accept for a write is either this firmware's own memory or flash it
+// is running from.  So the device sets aside a window and says where it is,
+// rather than the host picking an address that looks free and finding out
+// otherwise.  Asked for over the control endpoint, so the two cannot drift the
+// way a constant written out at each end would.
+const REQ_SCRATCH: u8 = 0x47;
+const SCRATCH_REPLY_LEN: usize = 8;
+
+/// How much room the host is given.  Enough for a transfer of several packets
+/// with room to write past the end and see that it was not written.
+const SCRATCH_LEN: usize = 1024;
+
+static mut SCRATCH: [u8; SCRATCH_LEN] = [0; SCRATCH_LEN];
+
 // Reboot into BOOTSEL, from the RP2350 bootrom's own reboot routine.  Verified
 // against embassy-rp's reset_to_usb_boot, which passes the same value.
 const REBOOT_TYPE_BOOTSEL: u32 = 0x2;
@@ -78,6 +95,7 @@ const REBOOT_DELAY_MS: u32 = 50;
 struct Bootsel<'d, 'a> {
     picoboot: &'d Picoboot<'a, Rp2350, NoCustom, Rp2350Halt>,
     diag: [u8; DIAG_LEN],
+    scratch: [u8; SCRATCH_REPLY_LEN],
 }
 
 impl Handler for Bootsel<'_, '_> {
@@ -105,10 +123,21 @@ impl Handler for Bootsel<'_, '_> {
     }
 
     fn control_in<'r>(&'r mut self, req: Request, _buf: &'r mut [u8]) -> Option<InResponse<'r>> {
-        if req.request_type != RequestType::Vendor
-            || req.recipient != Recipient::Interface
-            || req.request != REQ_DIAG
-        {
+        if req.request_type != RequestType::Vendor || req.recipient != Recipient::Interface {
+            return None;
+        }
+
+        if req.request == REQ_SCRATCH {
+            // The address is taken from the object itself, so moving or
+            // resizing it needs no change here and cannot leave the host
+            // writing where the buffer used to be.
+            let addr = &raw const SCRATCH as u32;
+            self.scratch[0..4].copy_from_slice(&addr.to_le_bytes());
+            self.scratch[4..8].copy_from_slice(&(SCRATCH_LEN as u32).to_le_bytes());
+            return Some(InResponse::Accepted(&self.scratch));
+        }
+
+        if req.request != REQ_DIAG {
             return None;
         }
 
@@ -168,6 +197,7 @@ async fn main(_spawner: Spawner) {
     let mut bootsel = Bootsel {
         picoboot: &picoboot,
         diag: [0; DIAG_LEN],
+        scratch: [0; SCRATCH_REPLY_LEN],
     };
 
     let mut builder = Builder::new(

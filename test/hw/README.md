@@ -88,6 +88,20 @@ memory or the flash it runs from — and are read back and compared.
 The conformance suites cannot ask any of it.  They hand the library a byte
 queue, and a queue has no packets in it.
 
+**`get-info`** — what the device says about itself, and what it does with a
+request it cannot answer.  The values come from the boot ROM rather than from
+picobootx, so what is asked is not whether they are right but whether the device
+assembles them correctly: the reply is a word saying how many words follow and
+then each flag's words in the protocol's order, and asking for two flags at once
+has to give exactly what asking for each separately gave.  A flag the part does
+not carry is counted as no words.  The transfer length is the host's to state,
+so a length of nothing, one that is not a whole number of words, and one longer
+than the reply can be are each refused, as is an information type the protocol
+does not name.
+
+Whether the values themselves are right is a question for the boot ROM, on the
+same part, and not one this group can answer.
+
 ## How it talks to the board
 
 **It speaks the whole protocol.** Every device-to-host transfer is followed by

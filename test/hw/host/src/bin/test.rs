@@ -22,7 +22,9 @@ use std::process::ExitCode;
 
 use picobootx::Status;
 use picobootx::wire::DIR_IN;
-use picobootx_hw_host::{Board, CMD_WRITE, EP_IN, EP_OUT, MAX_PACKET};
+use picobootx_hw_host::{
+    Board, CMD_GET_INFO, CMD_WRITE, EP_IN, EP_OUT, INFO_ARGS_LEN, INFO_SYS, MAX_PACKET,
+};
 
 // PICOBOOT's read, and an address the RP2350 defaults refuse.  The refusal is
 // the stimulus, so it has to be one the device is certain to give: 0x4000_0000
@@ -40,6 +42,19 @@ const ROM_OTHER_ADDR: u32 = 0x0000_0000;
 /// and between them they give a long transfer somewhere to come from.
 const ROM_BASE: u32 = 0x0000_0000;
 const FLASH_BASE: u32 = 0x1000_0000;
+
+/// The system information flags, and how many words each carries.  The device
+/// answers whichever of them it was asked for, one after another in this order,
+/// which is what a host reads the reply apart by.
+const FLAG_CHIP: u32 = 0x0001;
+const FLAG_CHIP_WORDS: u32 = 3;
+const FLAG_CPU: u32 = 0x0004;
+const FLAG_CPU_WORDS: u32 = 1;
+const FLAG_BOOT_RANDOM: u32 = 0x0010;
+const FLAG_BOOT_RANDOM_WORDS: u32 = 4;
+
+/// A flag no part carries, for asking what the device does with one.
+const FLAG_UNKNOWN: u32 = 0x0080;
 
 /// Prints as it goes and counts what it saw.
 ///
@@ -215,6 +230,10 @@ async fn main() -> ExitCode {
 
     if run.group("multi-packet") {
         multi_packet(&mut run, &mut board).await;
+    }
+
+    if run.group("get-info") {
+        get_info(&mut run, &mut board).await;
     }
 
     // Leave nothing behind, and say so where it would not go.  A run that ends
@@ -562,6 +581,162 @@ async fn multi_packet(run: &mut Runner, board: &mut Board) {
             Ok(got) if got == reference[..4] => Ok(()),
             Ok(got) => Err(format!("it returned {got:02x?}")),
             Err(e) => Err(e),
+        },
+    );
+}
+
+/// Send a command that should be refused, and return the status the device
+/// gives for it, leaving the board ready for the next one.
+///
+/// The read is expected to fail — a refusal halts both endpoints rather than
+/// answering — so what it returned is not looked at.  The reason comes from the
+/// control endpoint, which is the whole point of a refusal being reported
+/// there.
+async fn refusal_code(board: &mut Board, tlen: u32, args: &[u8]) -> Result<u32, String> {
+    board.send_cmd(CMD_GET_INFO, tlen, args)?;
+    let _ = board.read_reply(4);
+
+    let status = board.command_status().await?;
+    if status.len() < 8 {
+        return Err(format!("the status block was {} bytes", status.len()));
+    }
+    let code = u32::from_le_bytes([status[4], status[5], status[6], status[7]]);
+
+    board.quiesce().await?;
+    Ok(code)
+}
+
+/// `GET_INFO` arguments asking for these system flags.
+fn info_args(flags: u32) -> [u8; INFO_ARGS_LEN] {
+    let mut args = [0u8; INFO_ARGS_LEN];
+    args[0] = INFO_SYS;
+    args[4..8].copy_from_slice(&flags.to_le_bytes());
+    args
+}
+
+/// What the device says about itself, and what it does with a request it
+/// cannot answer.
+///
+/// The values come from the boot ROM rather than from picobootx, so what is
+/// asked here is not whether they are right — that needs the same question put
+/// to the boot ROM on the same part — but whether the device assembles them
+/// correctly.  The reply is a word saying how many words follow, then each
+/// flag's words in the order the protocol lists them, so the arithmetic joining
+/// those is the device's own and is what can be wrong.
+async fn get_info(run: &mut Runner, board: &mut Board) {
+    let chip = match board.get_info_sys(FLAG_CHIP, FLAG_CHIP_WORDS) {
+        Ok((header, data)) => {
+            run.check(
+                "one flag is answered with the word count it carries",
+                if header == FLAG_CHIP_WORDS && data.len() == FLAG_CHIP_WORDS as usize * 4 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "it said {header} words and sent {} bytes",
+                        data.len()
+                    ))
+                },
+            );
+            data
+        }
+        Err(e) => {
+            run.check(
+                "one flag is answered with the word count it carries",
+                Err(e),
+            );
+            return;
+        }
+    };
+
+    let cpu = match board.get_info_sys(FLAG_CPU, FLAG_CPU_WORDS) {
+        Ok((header, data)) => {
+            run.check(
+                "a flag carrying one word is answered with one word",
+                if header == FLAG_CPU_WORDS && data.len() == 4 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "it said {header} words and sent {} bytes",
+                        data.len()
+                    ))
+                },
+            );
+            data
+        }
+        Err(e) => {
+            run.check("a flag carrying one word is answered with one word", Err(e));
+            return;
+        }
+    };
+
+    // The discriminating one.  Two flags at once have to give exactly what the
+    // two gave separately, in the protocol's order — that is the join the
+    // device does itself, and a device that answered a fixed buffer, dropped a
+    // flag, or put them the other way round fails here and passes everything
+    // above.
+    let mut both = chip.clone();
+    both.extend_from_slice(&cpu);
+    run.check(
+        "two flags together are the two flags separately, in order",
+        match board.get_info_sys(FLAG_CHIP | FLAG_CPU, FLAG_CHIP_WORDS + FLAG_CPU_WORDS) {
+            Err(e) => Err(e),
+            Ok((header, _)) if header != FLAG_CHIP_WORDS + FLAG_CPU_WORDS => {
+                Err(format!("it said {header} words"))
+            }
+            Ok((_, data)) if data == both => Ok(()),
+            Ok((_, data)) => Err(format!(
+                "it sent {data:02x?} where the two separately gave {both:02x?}"
+            )),
+        },
+    );
+
+    // A second flag whose value has nothing to do with the first, so a device
+    // handing back the same buffer whatever it was asked is caught.
+    run.check(
+        "a different flag answers with something different",
+        match board.get_info_sys(FLAG_BOOT_RANDOM, FLAG_BOOT_RANDOM_WORDS) {
+            Err(e) => Err(e),
+            Ok((_, data)) if data[..4] != chip[..4] => Ok(()),
+            Ok(_) => Err("it gave the same first word as the chip flag".into()),
+        },
+    );
+
+    // A flag the part does not carry is dropped rather than answered, and the
+    // count says so before any of it is sent.
+    run.check(
+        "a flag the part does not carry is counted as no words",
+        match board.get_info_sys(FLAG_UNKNOWN, 0) {
+            Err(e) => Err(e),
+            Ok((0, _)) => Ok(()),
+            Ok((header, _)) => Err(format!("it said {header} words")),
+        },
+    );
+
+    // The transfer length is the host's to state, so a device has to judge it.
+    for (len, what) in [
+        (0u32, "of nothing"),
+        (6, "that is not a whole number of words"),
+        (260, "longer than the reply can be"),
+    ] {
+        run.check(
+            &format!("a transfer length {what} is refused"),
+            match refusal_code(board, len, &info_args(FLAG_CHIP)).await {
+                Err(e) => Err(e),
+                Ok(code) if code == Status::InvalidTransferLen as u32 => Ok(()),
+                Ok(code) => Err(format!("it reported {code}")),
+            },
+        );
+    }
+
+    // And a kind of information that is neither of the two the protocol names.
+    let mut args = info_args(FLAG_CHIP);
+    args[0] = 0x03;
+    run.check(
+        "an information type the protocol does not name is refused",
+        match refusal_code(board, 8, &args).await {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::UnknownCmd as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
         },
     );
 }

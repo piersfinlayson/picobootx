@@ -72,9 +72,19 @@ pub const DIAG_LEN: u16 = 8;
 pub const REQUEST_SCRATCH: u8 = 0x47;
 pub const SCRATCH_REPLY_LEN: u16 = 8;
 
-/// PICOBOOT's read and write, as the identifier goes on the wire.
+/// PICOBOOT's read, write and get-info, as the identifier goes on the wire.
 pub const CMD_READ: u8 = 0x04 | picobootx::wire::DIR_IN;
 pub const CMD_WRITE: u8 = 0x05;
+pub const CMD_GET_INFO: u8 = 0x0b | picobootx::wire::DIR_IN;
+
+/// `GET_INFO`'s argument block is sixteen bytes whatever it asks for.
+pub const INFO_ARGS_LEN: usize = 16;
+
+/// Which kind of information is being asked for, in the first argument byte.
+pub const INFO_SYS: u8 = 0x01;
+
+/// The reply opens with one word saying how many words follow.
+pub const INFO_HEADER_LEN: usize = 4;
 
 /// Long enough for a device that is going to answer to have answered.
 pub const TIMEOUT: Duration = Duration::from_millis(2000);
@@ -462,6 +472,30 @@ impl Board {
         self.send_cmd(CMD_WRITE, data.len() as u32, &args)?;
         self.send_data(data)?;
         self.read_ack()
+    }
+
+    /// Ask for system information, and return the reply split into the header
+    /// word and the data after it.
+    ///
+    /// `words` is how many words of data the flags asked for are expected to
+    /// carry, which is what the transfer length is built from — the protocol
+    /// leaves that length to the host, so getting it wrong is one of the things
+    /// worth asking a device about.
+    pub fn get_info_sys(&mut self, flags: u32, words: u32) -> Result<(u32, Vec<u8>), String> {
+        let mut args = [0u8; INFO_ARGS_LEN];
+        args[0] = INFO_SYS;
+        args[4..8].copy_from_slice(&flags.to_le_bytes());
+
+        let len = INFO_HEADER_LEN as u32 + words * 4;
+        self.send_cmd(CMD_GET_INFO, len, &args)?;
+        let reply = self.read_reply(len as usize)?;
+        self.ack()?;
+
+        if reply.len() < INFO_HEADER_LEN {
+            return Err(format!("the reply was {} bytes", reply.len()));
+        }
+        let header = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]);
+        Ok((header, reply[INFO_HEADER_LEN..].to_vec()))
     }
 
     /// Clear a halt the device raised, in one direction.

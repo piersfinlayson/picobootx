@@ -8,8 +8,8 @@ use picobootx::wire::{FLASH_BLOCK_SIZE, FLASH_PAGE_SIZE, FLASH_SECTOR_SIZE, INFO
 use picobootx::{Ecc, Exclusive, Reboot, Result, Status, Target};
 
 use crate::bootrom::{
-    self, FlashExitXipFn, FlashFlushCacheFn, FlashRangeEraseFn, FlashSelectXipReadModeFn,
-    OTP_ACCESS_FLAG_ECC, OTP_ACCESS_FLAG_WRITE,
+    self, FlashExitXipFn, FlashFlushCacheFn, FlashRangeEraseFn, FlashRangeProgramFn,
+    FlashSelectXipReadModeFn, OTP_ACCESS_FLAG_ECC, OTP_ACCESS_FLAG_WRITE,
 };
 use crate::chip;
 use crate::{FLASH_BASE, FLASH_SIZE, ROM_BASE, ROM_SIZE, SRAM_BASE, SRAM_SIZE};
@@ -167,14 +167,55 @@ pub unsafe fn write(addr: u32, buf: &[u8]) -> Result {
 
 /// Program one flash page at `addr`.
 ///
-/// Serves an address [`write_prepare`] called [`Target::Flash`], and checks
-/// nothing itself.
+/// Serves an address [`write_prepare`] called [`Target::Flash`], and checks the
+/// address no further itself.
+///
+/// The boot ROM's programming routine talks to flash over its serial interface,
+/// which means execute-in-place has to be left first and put back afterwards —
+/// the same bracket [`flash_erase`] needs, for the same reason, and the part of
+/// it that runs while flash cannot be read is in RAM with interrupts off.  A
+/// program issued without that bracket writes nothing and reports success,
+/// which a host reads as an image successfully written onto blank flash.
+///
+/// `page` is read while flash is unreadable, so a page that is not in RAM is
+/// refused rather than programmed from bytes that cannot be fetched.
 pub fn flash_page_write(addr: u32, page: &[u8; FLASH_PAGE_SIZE]) -> Result {
-    let Some(program) = bootrom::flash_range_program() else {
-        return Err(Status::NotFound);
-    };
+    #[cfg(target_os = "none")]
+    if !ramfunc_resident(program_critical as *const ()) {
+        return Err(Status::PreconditionNotMet);
+    }
 
-    unsafe { program(flash_offs(addr), page.as_ptr(), FLASH_PAGE_SIZE) };
+    #[cfg(target_os = "none")]
+    if !within(
+        page.as_ptr() as u32,
+        FLASH_PAGE_SIZE as u32,
+        SRAM_BASE,
+        SRAM_SIZE,
+    ) {
+        return Err(Status::PreconditionNotMet);
+    }
+
+    let connect_internal_flash = bootrom::connect_internal_flash().ok_or(Status::NotFound)?;
+    let exit_xip = bootrom::flash_exit_xip().ok_or(Status::NotFound)?;
+    let range_program = bootrom::flash_range_program().ok_or(Status::NotFound)?;
+    let flush_cache = bootrom::flash_flush_cache().ok_or(Status::NotFound)?;
+    let select_xip = bootrom::flash_select_xip_read_mode().ok_or(Status::NotFound)?;
+
+    unsafe { connect_internal_flash() };
+
+    // Execute-in-place is restored on the divisor the firmware's own QMI setup
+    // put in force, which is why it is read here rather than assumed.
+    let clkdiv = chip::xip_clkdiv();
+
+    program_critical(
+        exit_xip,
+        range_program,
+        flush_cache,
+        select_xip,
+        flash_offs(addr),
+        page.as_ptr(),
+        clkdiv,
+    );
     Ok(())
 }
 
@@ -216,19 +257,19 @@ static RAMFUNC_MARK: u32 = RAMFUNC_MARK_VALUE;
 #[cfg(target_os = "none")]
 const RAMFUNC_MARK_VALUE: u32 = 0x7062_785f;
 
-/// Whether the erase's critical part can be run.
+/// Whether a routine that runs while flash is unreadable can be run.
 ///
 /// It has to be resident in SRAM and it has to hold what was linked, and
 /// neither follows from the `.ramfunc` section name alone — that names a
 /// section, and the consumer's linker script and startup are what decide where
 /// the section goes and whether its bytes are carried there.  A project that
-/// has not done both links clean, and what an erase then jumps into is either
-/// flash that has stopped answering or RAM nothing filled, so this is checked
-/// while flash still answers rather than discovered by a fetch that never
-/// completes.
+/// has not done both links clean, and what an erase or a program then jumps
+/// into is either flash that has stopped answering or RAM nothing filled, so
+/// this is checked while flash still answers rather than discovered by a fetch
+/// that never completes.
 #[cfg(target_os = "none")]
-fn erase_critical_resident() -> bool {
-    let addr = erase_critical as *const () as usize;
+fn ramfunc_resident(routine: *const ()) -> bool {
+    let addr = routine as usize;
     let sram = (SRAM_BASE as usize)..(SRAM_BASE as usize + SRAM_SIZE as usize);
     if !sram.contains(&addr) {
         return false;
@@ -290,6 +331,46 @@ fn erase_critical(
     chip::irq_enable();
 }
 
+/// The part of a program that runs while flash cannot be read.
+///
+/// Everything [`erase_critical`] says applies here for the same reasons: it
+/// runs from RAM, because a function fetched from flash cannot be executed
+/// while flash is answering serial commands instead of reads, and with
+/// interrupts off, because a handler taken here would be fetched from that same
+/// flash.
+///
+/// `data` is one page, read while flash is unreadable, so it has to point into
+/// RAM.  [`flash_page_write`] is what establishes that.
+#[cfg_attr(target_os = "none", unsafe(link_section = ".ramfunc"))]
+#[inline(never)]
+fn program_critical(
+    exit_xip: FlashExitXipFn,
+    range_program: FlashRangeProgramFn,
+    flush_cache: FlashFlushCacheFn,
+    select_xip: FlashSelectXipReadModeFn,
+    flash_offs: u32,
+    data: *const u8,
+    clkdiv: u8,
+) {
+    chip::irq_disable();
+
+    // Leaving XIP puts the QSPI interface into serial command mode, which is
+    // what a program needs and what stops code being fetched from flash.
+    unsafe { exit_xip() };
+
+    // One page, which is the unit the protocol writes flash in and the only
+    // length this is ever asked for.
+    unsafe { range_program(flash_offs, data, FLASH_PAGE_SIZE) };
+
+    // Reads answer again from here.
+    unsafe { select_xip(XIP_READ_MODE, clkdiv) };
+
+    // What the cache holds is what was there before the program.
+    unsafe { flush_cache() };
+
+    chip::irq_enable();
+}
+
 /// Erase the range.
 ///
 /// Serves a range [`flash_erase_prepare`] accepted, and checks nothing itself.
@@ -302,7 +383,7 @@ fn erase_critical(
 /// refused with [`Status::PreconditionNotMet`].
 pub fn flash_erase(addr: u32, size: u32) -> Result {
     #[cfg(target_os = "none")]
-    if !erase_critical_resident() {
+    if !ramfunc_resident(erase_critical as *const ()) {
         return Err(Status::PreconditionNotMet);
     }
 

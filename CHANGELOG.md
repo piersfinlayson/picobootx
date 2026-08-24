@@ -21,9 +21,13 @@ release.
   reading a command behind.
 - `picobootx-rp2350` gained a `usb` module reaching the RP2350's endpoint
   buffer controls, for a USB stack that does not lend out its own halt control.
+- The Rust `picobootx-rp2350` programs a flash page with execute-in-place left
+  and put back around the boot ROM call, from RAM with interrupts off, as it
+  already did for an erase.  Without that bracket the program wrote nothing and
+  reported success, which a host reads as an image written onto blank flash.
 - The Rust `picobootx-rp2350` needs `-C link-arg=-Tpicobootx.x` beside
-  `-Tlink.x` to place its flash erase routine in RAM.  Without it the routine
-  linked into flash and stopped part way through an erase.
+  `-Tlink.x` to place its flash erase and program routines in RAM.  Without it
+  they linked into flash and stopped part way through the operation.
 - [INTEGRATION.md](INTEGRATION.md) now says a C integrator's linker script and
   reset handler have to place and copy `.ramfunc`.
 - `picoboot_default_get_info_sys` read past its own buffer for a request of 17

@@ -317,6 +317,16 @@ impl<O: Ops, C: Custom, H: Halt> Handler for ControlHandler<'_, '_, O, C, H> {
             // why resync puts back only what picoboot halted.
             if is_interface_reset(&req) {
                 i.xport.resync();
+                // A packet armed for a host that stopped collecting it is
+                // delivered to whoever reads next, one command behind, and a
+                // reset is a host asking not to be in that position.  The
+                // queues are emptied by the unhalt above, which reaches only
+                // what the protocol holds - this is the one the controller
+                // holds.  The epoch goes with it, since the task waiting for
+                // that packet must hear that it will not be taken rather than
+                // read it going away as the host having taken it.
+                i.xport.retract_in();
+                i.epoch = i.epoch.wrapping_add(1);
                 wake(&mut i.waker);
             }
             Some(OutResponse::Accepted)

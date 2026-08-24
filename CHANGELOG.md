@@ -15,7 +15,10 @@ release.
   over the queues it fills, and an `embassy_usb::Handler` for picoboot's control
   requests.  [examples/embassy](examples/embassy) is a complete device built on
   it.  Its `rp2350` feature supplies `Rp2350Halt`, the halt control embassy-usb
-  does not hand out, so a device on that part need not write it.
+  does not hand out, so a device on that part need not write it.  `INTERFACE
+  RESET` takes back a reply the host never collected, the way the RP2350 boot
+  ROM does, so a host that stops part way through does not leave the next one
+  reading a command behind.
 - `picobootx-rp2350` gained a `usb` module reaching the RP2350's endpoint
   buffer controls, for a USB stack that does not lend out its own halt control.
 - The Rust `picobootx-rp2350` needs `-C link-arg=-Tpicobootx.x` beside

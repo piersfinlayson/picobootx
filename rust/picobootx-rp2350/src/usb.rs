@@ -114,6 +114,34 @@ pub fn set_stalled(ep_addr: u8, stalled: bool) {
     }
 }
 
+/// Take back a packet armed on this endpoint that the host has not taken.
+///
+/// This undoes the arming, which is two bits and not one.  The buffer stops
+/// being offered, and the recorded PID goes back to the one before it — arming
+/// a packet advances that PID, and the next packet written advances it again
+/// from wherever it stands.  A host that never saw the retracted packet is
+/// still waiting for its number, so leaving the advance in place would send
+/// the one after it and the host would drop it.
+///
+/// The toggle is put back, not reset.  DATA0 is what a cleared halt calls for
+/// and is [`resync`]'s job, and a host that has cleared no halt has moved
+/// nothing for a reset to match.
+///
+/// Does nothing where no packet is armed, since there is then no arming to
+/// undo and moving the PID would desynchronise a healthy endpoint.
+pub fn retract(ep_addr: u8) {
+    let ctrl = buffer_control(ep_addr);
+    // SAFETY: as is_stalled, and the write puts back every bit it read but the
+    // two the arming set.
+    unsafe {
+        let value = ctrl.read_volatile();
+        if value & AVAILABLE_0 == 0 {
+            return;
+        }
+        ctrl.write_volatile((value & !AVAILABLE_0) ^ PID_0);
+    }
+}
+
 /// Put the endpoint back to what enabling it leaves behind.
 ///
 /// A host that clears a halt has reset its own data toggle for that endpoint

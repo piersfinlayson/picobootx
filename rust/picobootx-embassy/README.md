@@ -20,11 +20,12 @@ Three things, and the first two are picobootx's rather than this crate's.
   `picobootx-rp2350`'s `Rp2350` is every one of them for an RP2350.
 - **`picobootx::Custom`** — commands of the device's own, if it has any.
   `picobootx::NoCustom` if it has none.
-- **`Halt`** — how the device halts one of its bulk endpoints, and how it tells
-  a packet the host has taken from one merely armed.  embassy-usb keeps the
-  halt control on `embassy_usb_driver::Bus`, which `UsbDevice` owns and does not
-  lend out, and reports neither, so this cannot come from the stack.  On an
-  RP2350 it is `Rp2350Halt`, and on another part it is the device's to write.
+- **`Halt`** — how the device halts one of its bulk endpoints, how it tells a
+  packet the host has taken from one merely armed, and how it takes an armed one
+  back.  embassy-usb keeps the halt control on `embassy_usb_driver::Bus`, which
+  `UsbDevice` owns and does not lend out, and reports none of the rest, so this
+  cannot come from the stack.  On an RP2350 it is `Rp2350Halt`, and on another
+  part it is the device's to write.
 
 ## The `rp2350` feature
 
@@ -89,4 +90,15 @@ RP2350 datasheet (5.6.5.1) has it clear the halt on both bulk endpoints anyway,
 so that is where `Halt::resync` is called — for the endpoints picoboot halted,
 and no others.  A host may send `CLEAR_FEATURE` first and need not, and it also
 sends `INTERFACE RESET` to begin a session, where resyncing an endpoint that
-was carrying something would take that packet back off the controller.
+never halted would put its toggle somewhere the host has not.
+
+**An uncollected reply is taken back at `INTERFACE RESET` too.** A host that
+stops part way through a command leaves a packet armed on the controller, and
+the protocol's own queues are not where that packet is — emptying them reaches
+everything except it.  Left there it is handed to whoever reads next, who gets
+the previous session's answer to a question it never asked and is one command
+behind from then on.  So `Halt::retract` is called for the device-to-host
+endpoint, which is what the RP2350 boot ROM does with the same request.  It
+undoes the arming rather than resetting anything: arming a packet advances the
+recorded data toggle, and a host that never saw that packet is still waiting for
+its number.

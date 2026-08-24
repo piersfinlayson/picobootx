@@ -36,7 +36,7 @@ use embassy_usb_driver::{
 };
 
 use picobootx::wire::{CMD_LEN, DIR_IN, MAGIC};
-use picobootx::{NoCustom, Ops, Result as PbResult, Status};
+use picobootx::{NoCustom, Ops, Reboot, Result as PbResult, Status};
 
 use crate::Picoboot;
 use crate::halt::Halt;
@@ -49,6 +49,7 @@ const MAX_PACKET: u16 = 64;
 const CMD_READ: u8 = 0x04 | DIR_IN;
 const CMD_WRITE: u8 = 0x05;
 const CMD_EXIT_XIP: u8 = 0x06;
+const CMD_REBOOT2: u8 = 0x0a;
 
 // ---------------------------------------------------------------------------
 // The bus
@@ -69,6 +70,10 @@ struct Bus {
     stalled_in: bool,
     /// Every endpoint address `resync` was called for, in order.
     resyncs: Vec<u8>,
+    /// Every endpoint address `retract` was called for, in order.
+    retracts: Vec<u8>,
+    /// How many times the device has actually rebooted.
+    reboots: usize,
     /// Whether the host collects a packet the moment it is written.  A real
     /// host does, and a test that wants to watch a packet sit unread says so.
     host_collects: bool,
@@ -226,6 +231,19 @@ impl Halt for FakeHalt {
         self.0.borrow_mut().resyncs.push(ep_addr);
     }
 
+    fn retract(&mut self, ep_addr: u8) {
+        let mut bus = self.0.borrow_mut();
+        bus.retracts.push(ep_addr);
+        // Physical, like the flash model in the conformance suite: a packet
+        // taken back off the controller is one the host never sees, so it
+        // leaves the record of what was delivered rather than staying in it
+        // with a flag beside it.
+        if bus.in_flight {
+            bus.to_host.pop();
+            bus.in_flight = false;
+        }
+    }
+
     fn in_flight(&self, ep_addr: u8) -> bool {
         let _ = ep_addr;
         self.0.borrow().in_flight
@@ -242,15 +260,22 @@ struct MemOps {
     mem: [u8; 512],
     /// Refuse the next prepare, whichever it is.
     refuse: bool,
+    /// Where a reboot is recorded, since the effect of one is not something a
+    /// test can observe on the bus.
+    bus: Rc<RefCell<Bus>>,
 }
 
 impl MemOps {
-    fn new() -> Self {
+    fn new(bus: &Rc<RefCell<Bus>>) -> Self {
         let mut mem = [0u8; 512];
         for (i, b) in mem.iter_mut().enumerate() {
             *b = i as u8;
         }
-        Self { mem, refuse: false }
+        Self {
+            mem,
+            refuse: false,
+            bus: Rc::clone(bus),
+        }
     }
 }
 
@@ -283,6 +308,19 @@ impl Ops for MemOps {
         let at = addr as usize;
         self.mem[at..at + buf.len()].copy_from_slice(buf);
         Ok(())
+    }
+
+    fn reboot_prepare(&mut self, args: &Reboot) -> PbResult {
+        let _ = args;
+        Ok(())
+    }
+
+    // Runs only once the host has taken the acknowledgement, which is what
+    // makes it worth counting: a reboot recorded here without the host having
+    // collected anything is one no host asked for.
+    fn reboot_execute(&mut self, args: &Reboot) {
+        let _ = args;
+        self.bus.borrow_mut().reboots += 1;
     }
 }
 
@@ -317,7 +355,7 @@ fn device(
     FakeIn,
 ) {
     let picoboot = Picoboot::new(
-        MemOps::new(),
+        MemOps::new(bus),
         NoCustom,
         None,
         Endpoints {
@@ -1025,5 +1063,101 @@ fn the_hosts_completion_packet_returns_the_device_to_idle() {
         host.collected(),
         vec![0, 1, 2, 3, 4, 5, 6, 7],
         "the next command was not served"
+    );
+}
+
+/// A reply the host stopped collecting is not handed to whoever reads next.
+///
+/// The device arms a packet and the host goes away without taking it.  Left
+/// there, the controller delivers it to the next host to read, which then has
+/// the previous session's answer to a question it never asked - and every
+/// answer after that is one command behind.  INTERFACE RESET is a host asking
+/// for a clean start, so that is where it is taken back.
+#[test]
+fn interface_reset_takes_back_a_reply_the_host_never_collected() {
+    let bus = Bus::new();
+    let host = Host(Rc::clone(&bus));
+    let (picoboot, ep_out, ep_in) = device(&bus);
+
+    // A host that walks away: what the device writes is armed and left.
+    bus.borrow_mut().host_collects = false;
+
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&0u32.to_le_bytes());
+    args[4..8].copy_from_slice(&4u32.to_le_bytes());
+    host.send_cmd(CMD_READ, 4, &args);
+
+    let mut fut = pin!(picoboot.run(ep_out, ep_in));
+    step(&mut fut, STEPS);
+    assert!(
+        bus.borrow().in_flight,
+        "no reply was armed, so there is nothing for this to take back"
+    );
+
+    // The next host along, asking for a clean start.
+    picoboot.handler().control_out(interface_reset(), &[]);
+    assert_eq!(
+        bus.borrow().retracts,
+        vec![EP_IN],
+        "INTERFACE RESET did not take the armed reply back"
+    );
+
+    // It asks a different question, and has to get the answer to that one.
+    bus.borrow_mut().host_collects = true;
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&4u32.to_le_bytes());
+    args[4..8].copy_from_slice(&4u32.to_le_bytes());
+    host.send_cmd(CMD_READ, 4, &args);
+    step(&mut fut, STEPS);
+
+    assert_eq!(
+        host.collected(),
+        vec![4, 5, 6, 7],
+        "the new host was served the previous one's reply"
+    );
+}
+
+/// REBOOT2 acts once the host has taken the acknowledgement, and not before.
+///
+/// The command is answered first and acted on when the answer has gone, so a
+/// device that treated an armed packet as a delivered one would reboot with the
+/// acknowledgement still sitting on the controller - and the host that asked
+/// would never learn the command was accepted.
+#[test]
+fn reboot2_acts_once_the_host_has_taken_the_acknowledgement() {
+    // The host that never collects.  The board must stay where it is.
+    let bus = Bus::new();
+    let host = Host(Rc::clone(&bus));
+    bus.borrow_mut().host_collects = false;
+    let (picoboot, ep_out, ep_in) = device(&bus);
+
+    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    let mut fut = pin!(picoboot.run(ep_out, ep_in));
+    step(&mut fut, STEPS);
+
+    assert!(
+        bus.borrow().in_flight,
+        "the acknowledgement was never armed, so nothing here is being waited on"
+    );
+    assert_eq!(
+        bus.borrow().reboots,
+        0,
+        "it rebooted with the acknowledgement still on the controller"
+    );
+
+    // The same command, to a host that does collect.  Without this the test
+    // would pass on a device that never reboots at all.
+    let bus = Bus::new();
+    let host = Host(Rc::clone(&bus));
+    let (picoboot, ep_out, ep_in) = device(&bus);
+
+    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    let mut fut = pin!(picoboot.run(ep_out, ep_in));
+    step(&mut fut, STEPS);
+
+    assert_eq!(
+        bus.borrow().reboots,
+        1,
+        "a host that took the acknowledgement did not get its reboot"
     );
 }

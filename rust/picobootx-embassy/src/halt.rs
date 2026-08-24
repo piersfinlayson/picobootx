@@ -40,6 +40,23 @@ pub trait Halt {
     /// the controller may fill, since a halted endpoint holds none.
     fn resync(&mut self, ep_addr: u8, max_packet_size: u16);
 
+    /// Take back a packet armed on the endpoint at this address, so the host
+    /// does not receive it.
+    ///
+    /// Called for the device-to-host endpoint when the host sends `INTERFACE
+    /// RESET`, which is a host asking for a clean start.  A packet armed for a
+    /// host that stopped collecting is delivered to whoever reads next, one
+    /// command behind, and that is what this prevents.
+    ///
+    /// What this undoes is the arming, which moved the data toggle as well as
+    /// offering the buffer.  The host never saw the packet and is still waiting
+    /// for its number, so the toggle goes back to what it was rather than
+    /// forward to the next one or back to DATA0 — the latter is what a cleared
+    /// halt calls for, and is [`Halt::resync`]'s job.
+    ///
+    /// Doing nothing is the right answer where no packet is armed.
+    fn retract(&mut self, ep_addr: u8);
+
     /// Whether the controller still holds the packet buffer of the endpoint at
     /// this address.
     ///
@@ -78,6 +95,10 @@ impl Halt for Rp2350Halt {
 
     fn resync(&mut self, ep_addr: u8, max_packet_size: u16) {
         picobootx_rp2350::usb::resync(ep_addr, max_packet_size);
+    }
+
+    fn retract(&mut self, ep_addr: u8) {
+        picobootx_rp2350::usb::retract(ep_addr);
     }
 
     fn in_flight(&self, ep_addr: u8) -> bool {

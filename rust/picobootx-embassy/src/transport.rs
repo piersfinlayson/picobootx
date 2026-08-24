@@ -117,6 +117,15 @@ impl<H: Halt> Xport<H> {
         }
     }
 
+    /// Take back a packet armed on the device-to-host endpoint.
+    ///
+    /// Only that direction has one.  A host-to-device buffer is offered to the
+    /// controller to fill rather than holding anything the host has yet to
+    /// see, so there is nothing there to take back.
+    pub(crate) fn retract_in(&mut self) {
+        self.halt.retract(self.ep_in);
+    }
+
     /// Drop whatever both queues are holding, and whatever either endpoint is
     /// owed.
     pub(crate) fn clear(&mut self) {

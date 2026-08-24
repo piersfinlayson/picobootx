@@ -76,6 +76,16 @@ pub const SCRATCH_REPLY_LEN: u16 = 8;
 pub const CMD_READ: u8 = 0x04 | picobootx::wire::DIR_IN;
 pub const CMD_WRITE: u8 = 0x05;
 pub const CMD_GET_INFO: u8 = 0x0b | picobootx::wire::DIR_IN;
+pub const CMD_REBOOT2: u8 = 0x0a;
+
+/// The reboot the protocol replaced, which a device is expected not to serve.
+pub const CMD_REBOOT_OLD: u8 = 0x02;
+
+/// `REBOOT2`'s argument block: flags, a delay, and two parameters.
+pub const REBOOT_ARGS_LEN: usize = 16;
+
+/// Reboot the way the part boots normally, which brings this firmware back.
+pub const REBOOT_NORMAL: u32 = 0x0;
 
 /// `GET_INFO`'s argument block is sixteen bytes whatever it asks for.
 pub const INFO_ARGS_LEN: usize = 16;
@@ -238,13 +248,47 @@ impl Board {
         })
     }
 
+    /// Give up the interface and the endpoints, keeping the device.
+    ///
+    /// A port reset is refused while an interface is claimed, so anything that
+    /// resets the bus has to let go of everything below the device first.
+    pub fn into_device(self) -> Device {
+        let Self {
+            device,
+            interface,
+            ep_out,
+            ep_in,
+            ..
+        } = self;
+        drop(ep_out);
+        drop(ep_in);
+        drop(interface);
+        device
+    }
+
     /// Send one 32 byte command header.
     pub fn send_cmd(&mut self, cmd_id: u8, transfer_len: u32, args: &[u8]) -> Result<(), String> {
+        self.send_cmd_sized(cmd_id, args.len() as u8, transfer_len, args)
+    }
+
+    /// Send one command header, stating an argument size of its own.
+    ///
+    /// The size a command declares and the arguments it carries are separate
+    /// fields on the wire, and a device has to judge the first.  Everything
+    /// except a test of that judgement wants [`Board::send_cmd`], where the two
+    /// agree by construction.
+    pub fn send_cmd_sized(
+        &mut self,
+        cmd_id: u8,
+        cmd_size: u8,
+        transfer_len: u32,
+        args: &[u8],
+    ) -> Result<(), String> {
         let mut buf = [0u8; CMD_LEN];
         buf[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         buf[4..8].copy_from_slice(&1u32.to_le_bytes());
         buf[8] = cmd_id;
-        buf[9] = args.len() as u8;
+        buf[9] = cmd_size;
         buf[12..16].copy_from_slice(&transfer_len.to_le_bytes());
         buf[16..16 + args.len()].copy_from_slice(args);
 
@@ -548,6 +592,60 @@ impl Board {
             .await
             .map(|_| ())
             .map_err(|e| format!("control request {request:#04x} failed: {e}"))
+    }
+}
+
+/// Whether the board is on the bus at all.
+pub fn present() -> bool {
+    nusb::list_devices()
+        .wait()
+        .map(|mut d| {
+            d.any(|d| {
+                d.vendor_id() == VID && d.product_id() == PID && d.product_string() == Some(PRODUCT)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Wait for the board to leave the bus, which is how a reboot is seen from
+/// here.
+pub async fn wait_gone(within: Duration) -> Result<(), String> {
+    if wait_until(within, || !present()).await {
+        Ok(())
+    } else {
+        Err(format!("it was still on the bus after {within:?}"))
+    }
+}
+
+/// Wait for the board to come back, and open it.
+///
+/// Enumerating and being ready to answer are not the same moment, so the open
+/// is retried rather than made once the moment it appears.
+pub async fn wait_back(within: Duration) -> Result<Board, String> {
+    if !wait_until(within, present).await {
+        return Err(format!("it did not come back within {within:?}"));
+    }
+    let mut last = String::new();
+    for _ in 0..40 {
+        match Board::open().await {
+            Ok(b) => return Ok(b),
+            Err(e) => last = e,
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!("it came back but would not open: {last}"))
+}
+
+async fn wait_until(within: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if done() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

@@ -19,11 +19,13 @@
 //! and the same call at the end is what says this run left nothing behind.
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use picobootx::Status;
 use picobootx::wire::DIR_IN;
 use picobootx_hw_host::{
-    Board, CMD_GET_INFO, CMD_WRITE, EP_IN, EP_OUT, INFO_ARGS_LEN, INFO_SYS, MAX_PACKET,
+    Board, CMD_GET_INFO, CMD_REBOOT_OLD, CMD_REBOOT2, CMD_WRITE, EP_IN, EP_OUT, INFO_ARGS_LEN,
+    INFO_SYS, MAX_PACKET, REBOOT_ARGS_LEN, REBOOT_NORMAL, wait_back, wait_gone,
 };
 
 // PICOBOOT's read, and an address the RP2350 defaults refuse.  The refusal is
@@ -55,6 +57,11 @@ const FLAG_BOOT_RANDOM_WORDS: u32 = 4;
 
 /// A flag no part carries, for asking what the device does with one.
 const FLAG_UNKNOWN: u32 = 0x0080;
+
+/// How long the device waits before rebooting, so the acknowledgement has time
+/// to be collected first.  Long enough to be the device's wait rather than a
+/// race, short enough not to stretch the run.
+const REBOOT_DELAY_MS: u32 = 100;
 
 /// Prints as it goes and counts what it saw.
 ///
@@ -234,6 +241,16 @@ async fn main() -> ExitCode {
 
     if run.group("get-info") {
         get_info(&mut run, &mut board).await;
+    }
+
+    if run.group("reboot") {
+        match reboot(&mut run, board).await {
+            Some(b) => board = b,
+            // Nothing after this can be asked of a board that did not come
+            // back, and saying so once beats every later check failing with a
+            // reason that is not its own.
+            None => return run.finish(),
+        }
     }
 
     // Leave nothing behind, and say so where it would not go.  A run that ends
@@ -592,8 +609,14 @@ async fn multi_packet(run: &mut Runner, board: &mut Board) {
 /// answering — so what it returned is not looked at.  The reason comes from the
 /// control endpoint, which is the whole point of a refusal being reported
 /// there.
-async fn refusal_code(board: &mut Board, tlen: u32, args: &[u8]) -> Result<u32, String> {
-    board.send_cmd(CMD_GET_INFO, tlen, args)?;
+async fn refusal_code(
+    board: &mut Board,
+    cmd: u8,
+    cmd_size: u8,
+    tlen: u32,
+    args: &[u8],
+) -> Result<u32, String> {
+    board.send_cmd_sized(cmd, cmd_size, tlen, args)?;
     let _ = board.read_reply(4);
 
     let status = board.command_status().await?;
@@ -720,7 +743,15 @@ async fn get_info(run: &mut Runner, board: &mut Board) {
     ] {
         run.check(
             &format!("a transfer length {what} is refused"),
-            match refusal_code(board, len, &info_args(FLAG_CHIP)).await {
+            match refusal_code(
+                board,
+                CMD_GET_INFO,
+                INFO_ARGS_LEN as u8,
+                len,
+                &info_args(FLAG_CHIP),
+            )
+            .await
+            {
                 Err(e) => Err(e),
                 Ok(code) if code == Status::InvalidTransferLen as u32 => Ok(()),
                 Ok(code) => Err(format!("it reported {code}")),
@@ -733,10 +764,182 @@ async fn get_info(run: &mut Runner, board: &mut Board) {
     args[0] = 0x03;
     run.check(
         "an information type the protocol does not name is refused",
-        match refusal_code(board, 8, &args).await {
+        match refusal_code(board, CMD_GET_INFO, INFO_ARGS_LEN as u8, 8, &args).await {
             Err(e) => Err(e),
             Ok(code) if code == Status::UnknownCmd as u32 => Ok(()),
             Ok(code) => Err(format!("it reported {code}")),
         },
     );
+}
+
+/// `REBOOT2` args: how to reboot, how long to wait first, and two parameters.
+fn reboot_args(flags: u32, delay_ms: u32) -> [u8; REBOOT_ARGS_LEN] {
+    let mut args = [0u8; REBOOT_ARGS_LEN];
+    args[0..4].copy_from_slice(&flags.to_le_bytes());
+    args[4..8].copy_from_slice(&delay_ms.to_le_bytes());
+    args
+}
+
+/// The command that answers before it acts, and the bus going away underneath
+/// it.
+///
+/// `REBOOT2` is acknowledged first and carried out once the acknowledgement has
+/// gone, so a device that treated an armed packet as a delivered one reboots
+/// with the answer still on the controller and the host never learns the
+/// command was taken.  Which of the two happened is only visible on a wire: a
+/// model has no moment where a packet is written but not yet collected.
+///
+/// Takes the board rather than borrowing it, because a reboot ends the
+/// connection - the handle afterwards is a different one, and the reopening is
+/// half of what is being tested.
+async fn reboot(run: &mut Runner, mut board: Board) -> Option<Board> {
+    // What the protocol will not serve, before anything that ends the session.
+    run.check(
+        "the reboot the protocol replaced is not served",
+        match refusal_code(&mut board, CMD_REBOOT_OLD, 0, 0, &[]).await {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::UnknownCmd as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+
+    run.check(
+        "a reboot declaring the wrong argument size is refused",
+        match refusal_code(
+            &mut board,
+            CMD_REBOOT2,
+            (REBOOT_ARGS_LEN - 1) as u8,
+            0,
+            &reboot_args(REBOOT_NORMAL, 0),
+        )
+        .await
+        {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::InvalidCmdLength as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+
+    run.check(
+        "a reboot promising a data phase is refused",
+        match refusal_code(
+            &mut board,
+            CMD_REBOOT2,
+            REBOOT_ARGS_LEN as u8,
+            4,
+            &reboot_args(REBOOT_NORMAL, 0),
+        )
+        .await
+        {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::InvalidTransferLen as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+
+    // What a read gives now, so the board that comes back can be shown to be
+    // the same one answering the same way.
+    let before = board.read_mem(ROM_BASE, 4).ok();
+
+    // The reboot itself.  A delay, so the acknowledgement has somewhere to be
+    // collected before the part goes - which is the ordering under test.
+    let acknowledged = board
+        .send_cmd(CMD_REBOOT2, 0, &reboot_args(REBOOT_NORMAL, REBOOT_DELAY_MS))
+        .and_then(|()| board.read_ack());
+    run.check(
+        "the device acknowledges a reboot before it goes",
+        acknowledged,
+    );
+
+    // Let go before the part does, so the bus is not being held by a handle to
+    // something that has stopped answering.
+    drop(board);
+
+    run.check(
+        "the board leaves the bus",
+        wait_gone(Duration::from_secs(5)).await,
+    );
+
+    let board = match wait_back(Duration::from_secs(15)).await {
+        Ok(b) => b,
+        Err(e) => {
+            run.check("the board comes back", Err(e));
+            return None;
+        }
+    };
+    run.check("the board comes back", Ok(()));
+
+    let mut board = board;
+    run.check(
+        "the board that came back is the same one, answering the same way",
+        match (board.read_mem(ROM_BASE, 4), before) {
+            (Err(e), _) => Err(e),
+            (Ok(now), Some(then)) if now == then => Ok(()),
+            (Ok(now), Some(then)) => Err(format!("it reads {now:02x?} where it read {then:02x?}")),
+            (Ok(_), None) => Err("there was nothing to compare with".into()),
+        },
+    );
+
+    bus_reset(run, board).await
+}
+
+/// The bus going down under a command the device is part way through.
+///
+/// A reset re-enumerates the device, so whatever was in flight is not something
+/// any host is still waiting for.  picobootx drops both queues and puts the
+/// protocol back to waiting for a command, and the stack re-enables the
+/// endpoints as the host configures the device again.  What has to be true
+/// afterwards is that nothing survives to be served to the next question — the
+/// same claim the abandoned group makes of INTERFACE RESET, reached by the one
+/// path a device does not choose to take.
+async fn bus_reset(run: &mut Runner, mut board: Board) -> Option<Board> {
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&ROM_BASE.to_le_bytes());
+    args[4..8].copy_from_slice(&READ_LEN.to_le_bytes());
+    if let Err(e) = board.send_cmd(CMD_READ, READ_LEN, &args) {
+        run.check("a command can be left in flight", Err(e));
+        return Some(board);
+    }
+
+    // The reply is deliberately not collected.  The bus goes down under it.
+    //
+    // Everything below the device is given up first: a port reset is refused
+    // while an interface is claimed, and a reset that was refused would leave
+    // the checks below passing for the wrong reason.
+    let device = board.into_device();
+    let reset = device.reset().await.map_err(|e| format!("{e}"));
+    drop(device);
+    run.check("the device accepts a bus reset", reset);
+
+    let mut board = match wait_back(Duration::from_secs(15)).await {
+        Ok(b) => b,
+        Err(e) => {
+            run.check("the board comes back from a bus reset", Err(e));
+            return None;
+        }
+    };
+    run.check("the board comes back from a bus reset", Ok(()));
+
+    let want = match board.read_mem(ROM_OTHER_ADDR, READ_LEN) {
+        Ok(v) => v,
+        Err(e) => {
+            run.check("it serves a command after a bus reset", Err(e));
+            return Some(board);
+        }
+    };
+    run.check("it serves a command after a bus reset", Ok(()));
+
+    // And the answer is that command's, not the one the reset interrupted.
+    run.check(
+        "the command the reset interrupted left nothing behind",
+        match board.read_mem(ROM_OTHER_ADDR, READ_LEN) {
+            Err(e) => Err(e),
+            Ok(got) if got == want => Ok(()),
+            Ok(got) => Err(format!(
+                "it returned {got:02x?} where the same address gave {want:02x?}"
+            )),
+        },
+    );
+
+    Some(board)
 }

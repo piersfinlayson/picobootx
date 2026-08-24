@@ -37,4 +37,4 @@ path = "src/bin/diag.rs"
 # It is no_std with no dependencies, which costs a host build nothing.
 picobootx = { path = "../../../rust/picobootx" }
 nusb = { version = "0.2", features = ["tokio"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

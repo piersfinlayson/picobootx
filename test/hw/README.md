@@ -102,6 +102,21 @@ does not name.
 Whether the values themselves are right is a question for the boot ROM, on the
 same part, and not one this group can answer.
 
+**`reboot`** — the command that answers before it acts, and the bus going away
+underneath one that has not finished.  `REBOOT2` is acknowledged first and
+carried out once the acknowledgement has gone, so a device that counted an armed
+packet as a delivered one reboots with the answer still on the controller and
+the host never learns the command was taken.  The board is rebooted the way it
+boots normally, has to leave the bus, come back, and answer a read the same way
+it did before.  Then the bus is reset under a command still in flight, which is
+the one path a device does not choose to take, and nothing from that command may
+survive to be served to the next question.
+
+The board reboots itself over USB throughout, so none of this needs the jumper.
+The three refusals — the reboot the protocol replaced, a wrong argument size and
+a promised data phase — run first, since everything after the reboot is a
+different connection.
+
 ## How it talks to the board
 
 **It speaks the whole protocol.** Every device-to-host transfer is followed by

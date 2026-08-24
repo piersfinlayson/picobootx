@@ -87,6 +87,18 @@ pub const CMD_WRITE: u8 = 0x05;
 pub const CMD_GET_INFO: u8 = 0x0b | picobootx::wire::DIR_IN;
 pub const CMD_REBOOT2: u8 = 0x0a;
 pub const CMD_FLASH_ERASE: u8 = 0x03;
+pub const CMD_EXCLUSIVE_ACCESS: u8 = 0x01;
+pub const CMD_EXIT_XIP: u8 = 0x06;
+pub const CMD_ENTER_XIP: u8 = 0x07;
+
+/// Two more the protocol names and this device does not serve.
+pub const CMD_EXEC: u8 = 0x08;
+pub const CMD_VECTORIZE_FLASH: u8 = 0x09;
+
+/// What `EXCLUSIVE_ACCESS` asks for, in its one argument byte.
+pub const ACCESS_NOT_EXCLUSIVE: u8 = 0;
+pub const ACCESS_EXCLUSIVE: u8 = 1;
+pub const ACCESS_EXCLUSIVE_AND_EJECT: u8 = 2;
 
 /// The units flash works in: a page is what a program writes, a sector what an
 /// erase clears, and a block what a bulk erase clears at once.
@@ -108,6 +120,7 @@ pub const INFO_ARGS_LEN: usize = 16;
 
 /// Which kind of information is being asked for, in the first argument byte.
 pub const INFO_SYS: u8 = 0x01;
+pub const INFO_PARTITION: u8 = 0x02;
 
 /// The reply opens with one word saying how many words follow.
 pub const INFO_HEADER_LEN: usize = 4;
@@ -300,8 +313,24 @@ impl Board {
         transfer_len: u32,
         args: &[u8],
     ) -> Result<(), String> {
+        self.send_cmd_magic(MAGIC, cmd_id, cmd_size, transfer_len, args)
+    }
+
+    /// Send one command header carrying a magic of its own.
+    ///
+    /// The magic is what says a command is the protocol's rather than an
+    /// integrator's, so a device has to judge it.  Everything else wants
+    /// [`Board::send_cmd`], where it is the protocol's by construction.
+    pub fn send_cmd_magic(
+        &mut self,
+        magic: u32,
+        cmd_id: u8,
+        cmd_size: u8,
+        transfer_len: u32,
+        args: &[u8],
+    ) -> Result<(), String> {
         let mut buf = [0u8; CMD_LEN];
-        buf[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        buf[0..4].copy_from_slice(&magic.to_le_bytes());
         buf[4..8].copy_from_slice(&1u32.to_le_bytes());
         buf[8] = cmd_id;
         buf[9] = cmd_size;
@@ -508,6 +537,28 @@ impl Board {
             flash: word(8),
             flash_len: word(12),
         })
+    }
+
+    /// Ask for partition information, which the library answers itself.
+    ///
+    /// Unlike the system kind there is no header — the reply is the words
+    /// themselves — so the whole of it is data.
+    pub fn get_info_partition(&mut self, words: u32) -> Result<Vec<u8>, String> {
+        let mut args = [0u8; INFO_ARGS_LEN];
+        args[0] = INFO_PARTITION;
+
+        let len = words * 4;
+        self.send_cmd(CMD_GET_INFO, len, &args)?;
+        let reply = self.read_reply(len as usize)?;
+        self.ack()?;
+        Ok(reply)
+    }
+
+    /// Send a command that carries no data either way, and collect the
+    /// device's acknowledgement.
+    pub fn sync_cmd(&mut self, cmd_id: u8, args: &[u8]) -> Result<(), String> {
+        self.send_cmd(cmd_id, 0, args)?;
+        self.read_ack()
     }
 
     /// Erase a range of flash, and collect the device's acknowledgement.

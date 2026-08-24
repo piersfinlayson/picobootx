@@ -22,17 +22,18 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use picobootx::Status;
-use picobootx::wire::DIR_IN;
+use picobootx::wire::MAGIC;
 use picobootx_hw_host::{
-    Board, CMD_FLASH_ERASE, CMD_GET_INFO, CMD_REBOOT_OLD, CMD_REBOOT2, CMD_WRITE, EP_IN, EP_OUT,
-    FLASH_BLOCK, FLASH_PAGE, FLASH_SECTOR, INFO_ARGS_LEN, INFO_SYS, MAX_PACKET, REBOOT_ARGS_LEN,
-    REBOOT_NORMAL, wait_back, wait_gone,
+    ACCESS_EXCLUSIVE, ACCESS_EXCLUSIVE_AND_EJECT, ACCESS_NOT_EXCLUSIVE, Board, CMD_ENTER_XIP,
+    CMD_EXCLUSIVE_ACCESS, CMD_EXEC, CMD_EXIT_XIP, CMD_FLASH_ERASE, CMD_GET_INFO, CMD_READ,
+    CMD_REBOOT_OLD, CMD_REBOOT2, CMD_VECTORIZE_FLASH, CMD_WRITE, EP_IN, EP_OUT, FLASH_BLOCK,
+    FLASH_PAGE, FLASH_SECTOR, INFO_ARGS_LEN, INFO_SYS, MAX_PACKET, REBOOT_ARGS_LEN, REBOOT_NORMAL,
+    wait_back, wait_gone,
 };
 
 // PICOBOOT's read, and an address the RP2350 defaults refuse.  The refusal is
 // the stimulus, so it has to be one the device is certain to give: 0x4000_0000
 // is a peripheral, and read_prepare admits ROM, flash and SRAM alone.
-const CMD_READ: u8 = 0x04 | DIR_IN;
 const ROM_MAGIC_ADDR: u32 = 0x0000_0010;
 const REFUSED_ADDR: u32 = 0x4000_0000;
 const READ_LEN: u32 = 4;
@@ -238,6 +239,14 @@ async fn main() -> ExitCode {
 
     if run.group("multi-packet") {
         multi_packet(&mut run, &mut board).await;
+    }
+
+    if run.group("session") {
+        session(&mut run, &mut board).await;
+    }
+
+    if run.group("framing") {
+        framing(&mut run, &mut board).await;
     }
 
     if run.group("get-info") {
@@ -622,7 +631,19 @@ async fn refusal_code(
     tlen: u32,
     args: &[u8],
 ) -> Result<u32, String> {
-    board.send_cmd_sized(cmd, cmd_size, tlen, args)?;
+    refusal_code_magic(board, MAGIC, cmd, cmd_size, tlen, args).await
+}
+
+/// The same, for a command carrying a magic of its own.
+async fn refusal_code_magic(
+    board: &mut Board,
+    magic: u32,
+    cmd: u8,
+    cmd_size: u8,
+    tlen: u32,
+    args: &[u8],
+) -> Result<u32, String> {
+    board.send_cmd_magic(magic, cmd, cmd_size, tlen, args)?;
     let _ = board.read_reply(4);
 
     let status = board.command_status().await?;
@@ -738,6 +759,22 @@ async fn get_info(run: &mut Runner, board: &mut Board) {
             Err(e) => Err(e),
             Ok((0, _)) => Ok(()),
             Ok((header, _)) => Err(format!("it said {header} words")),
+        },
+    );
+
+    // The other kind of information, which the library answers itself rather
+    // than asking the part.  There is no header — the reply is the words — and
+    // the same five words come back whatever the device is.
+    run.check(
+        "partition information is answered, and is the same words every time",
+        match (board.get_info_partition(5), board.get_info_partition(5)) {
+            (Err(e), _) | (_, Err(e)) => Err(e),
+            (Ok(a), Ok(_)) if a.len() != 20 => Err(format!("{} bytes came back", a.len())),
+            (Ok(a), Ok(b)) if a != b => Err("it answered differently the second time".into()),
+            (Ok(a), Ok(_)) if a.iter().all(|x| *x == 0) => {
+                Err("every word was zero, so nothing was answered".into())
+            }
+            (Ok(_), Ok(_)) => Ok(()),
         },
     );
 
@@ -1056,6 +1093,60 @@ async fn flash(run: &mut Runner, board: &mut Board) {
         },
     );
 
+    // More than one page in a single transfer, which is what a host writing an
+    // image does.  The device accumulates a page at a time and programs each as
+    // it fills, so this is the loop that carries the offset between packets and
+    // the one nothing on this board had reached.
+    let two = pattern(0x5a, 2 * FLASH_PAGE as usize);
+    run.check(
+        "a write of two pages lands as two pages",
+        match board
+            .flash_erase(base, FLASH_SECTOR)
+            .and_then(|()| board.write_mem(base, &two))
+            .and_then(|()| board.read_mem(base, 2 * FLASH_PAGE))
+        {
+            Err(e) => Err(e),
+            Ok(back) if back == two => Ok(()),
+            Ok(back) => Err(format!(
+                "byte {} differs",
+                back.iter().zip(&two).position(|(a, b)| a != b).unwrap_or(0)
+            )),
+        },
+    );
+
+    // A transfer that ends inside a page.  The rest of that page is zero filled
+    // before it is programmed, so what follows the data is 0x00 and not the
+    // 0xFF an erase leaves - and the page after it is untouched.  A device that
+    // programmed only what it was given would leave 0xFF and pass a check that
+    // looked at the data alone.
+    let odd_len = FLASH_PAGE as usize + 44;
+    let odd = pattern(0x3c, odd_len);
+    run.check(
+        "a write ending inside a page zero fills the rest of it",
+        match board
+            .flash_erase(base, FLASH_SECTOR)
+            .and_then(|()| board.write_mem(base, &odd))
+            .and_then(|()| board.read_mem(base, 3 * FLASH_PAGE))
+        {
+            Err(e) => Err(e),
+            Ok(back) if back[..odd_len] != odd[..] => Err("the data did not land".into()),
+            Ok(back)
+                if back[odd_len..2 * FLASH_PAGE as usize]
+                    .iter()
+                    .any(|b| *b != 0x00) =>
+            {
+                Err(
+                    "the rest of the part written page is not zero, so it was left unprogrammed"
+                        .into(),
+                )
+            }
+            Ok(back) if back[2 * FLASH_PAGE as usize..].iter().any(|b| *b != 0xFF) => {
+                Err("the page after the transfer was written to".into())
+            }
+            Ok(_) => Ok(()),
+        },
+    );
+
     // The bulk path, which the device asks the boot ROM for by handing it the
     // block size and the block erase command, and the longest the part is away
     // from the bus in one go.
@@ -1133,6 +1224,106 @@ async fn flash(run: &mut Runner, board: &mut Board) {
         match refusal_code(board, CMD_WRITE, 8, FLASH_PAGE, &args).await {
             Err(e) => Err(e),
             Ok(code) if code == Status::BadAlignment as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+}
+
+/// The commands a host brackets a session with.
+///
+/// picotool takes exclusive access and leaves execute-in-place before it reads
+/// or writes flash, so these are on the path of every real session even though
+/// none of them moves any data.  What each one does on an RP2350 is agree, so
+/// the claim is that they are agreed to and that the device still works
+/// afterwards — a device that took `EXIT_XIP` literally could not fetch its own
+/// next instruction.
+async fn session(run: &mut Runner, board: &mut Board) {
+    for (mode, what) in [
+        (ACCESS_NOT_EXCLUSIVE, "sharing the device"),
+        (ACCESS_EXCLUSIVE, "taking the device"),
+        (ACCESS_EXCLUSIVE_AND_EJECT, "taking the device and ejecting"),
+    ] {
+        run.check(
+            &format!("{what} is agreed to"),
+            board.sync_cmd(CMD_EXCLUSIVE_ACCESS, &[mode]),
+        );
+    }
+
+    run.check(
+        "an exclusivity the protocol does not define is refused",
+        match refusal_code(board, CMD_EXCLUSIVE_ACCESS, 1, 0, &[0x7f]).await {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::InvalidArg as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+
+    run.check(
+        "leaving execute-in-place is agreed to",
+        board.sync_cmd(CMD_EXIT_XIP, &[]),
+    );
+
+    // The one that matters: this firmware runs from flash, so a device that
+    // genuinely left execute-in-place would have stopped here.
+    run.check(
+        "the board still reads flash after being told to leave it",
+        match board.read_mem(FLASH_BASE, 64) {
+            Ok(v) if v.len() == 64 => Ok(()),
+            Ok(v) => Err(format!("{} bytes came back", v.len())),
+            Err(e) => Err(e),
+        },
+    );
+
+    run.check(
+        "re-entering execute-in-place is agreed to",
+        board.sync_cmd(CMD_ENTER_XIP, &[]),
+    );
+}
+
+/// What the device will not accept as a command at all.
+///
+/// Everything here is refused before any argument is looked at, so what is
+/// being asked is whether the framing is judged rather than what the command
+/// would have done.
+async fn framing(run: &mut Runner, board: &mut Board) {
+    // The magic is what says a command belongs to the protocol.  This device
+    // has no commands of its own, so anything else is nobody's.
+    let wrong_magic = refusal_code_magic(board, 0xdead_beef, CMD_READ, 8, 4, &[0u8; 8]).await;
+    run.check(
+        "a command carrying the wrong magic is refused",
+        match wrong_magic {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::UnknownCmd as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+
+    for (cmd, what) in [
+        (0x7fu8, "a command identifier the protocol does not name"),
+        (CMD_EXEC, "the command that runs code on the device"),
+        (CMD_VECTORIZE_FLASH, "the command that vectors flash"),
+    ] {
+        run.check(
+            &format!("{what} is refused"),
+            match refusal_code(board, cmd, 0, 0, &[]).await {
+                Err(e) => Err(e),
+                Ok(code) if code == Status::UnknownCmd as u32 => Ok(()),
+                Ok(code) => Err(format!("it reported {code}")),
+            },
+        );
+    }
+
+    // A range whose end runs off the top of the address space.  It is inside no
+    // region, and the check that says so is done in wider arithmetic than the
+    // addresses themselves - which it has to be, because this was once accepted.
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&0xffff_ff00u32.to_le_bytes());
+    args[4..8].copy_from_slice(&0x200u32.to_le_bytes());
+    run.check(
+        "a range that wraps the address space is refused",
+        match refusal_code(board, CMD_READ, 8, 0x200, &args).await {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::InvalidArg as u32 => Ok(()),
             Ok(code) => Err(format!("it reported {code}")),
         },
     );

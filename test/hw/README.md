@@ -88,6 +88,20 @@ memory or the flash it runs from — and are read back and compared.
 The conformance suites cannot ask any of it.  They hand the library a byte
 queue, and a queue has no packets in it.
 
+**`session`** — the commands a host brackets a session with.  picotool takes
+exclusive access and leaves execute-in-place before it reads or writes flash, so
+these are on the path of every real session even though none of them moves any
+data.  What each does on an RP2350 is agree, so what is asked is that they are
+agreed to and that the board still works afterwards — a device that took
+`EXIT_XIP` literally could not fetch its own next instruction.  An exclusivity
+the protocol does not define is refused.
+
+**`framing`** — what the device will not accept as a command at all: the wrong
+magic, an identifier the protocol does not name, the two commands it names and
+this device does not serve, and a range whose end runs off the top of the
+address space.  That last is done in wider arithmetic than the addresses
+themselves, because it has to be, and because it was once accepted.
+
 **`get-info`** — what the device says about itself, and what it does with a
 request it cannot answer.  The values come from the boot ROM rather than from
 picobootx, so what is asked is not whether they are right but whether the device
@@ -130,8 +144,14 @@ A sector is erased and has to read as ones, a page is programmed and read back,
 and a second page is programmed over it without an erase between — which has to
 read as the two ANDed, since programming clears bits and never sets one.  That
 last one is what says the erase did something rather than the flash having been
-blank already.  Then a whole 64K block, which is the bulk path and the longest
-the part is away from the bus in one go, and four refusals.
+blank already.
+
+Then more than one page in a single transfer, which is what a host writing an
+image does, and a transfer ending inside a page: the rest of that page is zero
+filled before it is programmed, so what follows the data reads as 0x00 and not
+as the 0xFF an erase leaves, and the page after it is untouched.  Then a whole
+64K block, which is the bulk path and the longest the part is away from the bus
+in one go, and four refusals.
 
 The window comes from the device, and
 [memory.x](../device/memory.x) keeps the firmware out of it by offering the

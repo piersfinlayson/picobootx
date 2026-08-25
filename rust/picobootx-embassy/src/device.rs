@@ -42,10 +42,44 @@ struct Inner<'a, O: Ops, C: Custom, H: Halt> {
     // host puts them back.  Nothing else moves the protocol along in that
     // state, so without it the task would sleep through the recovery.
     waker: Option<Waker>,
-    // Bumped whenever the bus goes away under a packet that was armed.  A
-    // packet waiting to be taken is waiting on the host, and this is the only
-    // report that the host has stopped answering.
+    // Bumped whenever something other than the host ends the wait for an armed
+    // packet.  A packet waiting to be taken is waiting on the host, and this is
+    // the only report that it will not be taken.
     epoch: u32,
+    // Why the last bump happened.  Read only when the epoch has moved, so the
+    // value it starts at says nothing.
+    ending: Ending,
+    // What the last wait for an armed packet ended as.  The protocol acts on
+    // one of the three and discards the other two, so a test that watched only
+    // what the protocol did could not tell the two discarded ones apart.
+    #[cfg(test)]
+    last_collection: Option<Collection>,
+}
+
+/// Why a wait for an armed packet ended without the host taking it.
+///
+/// Recorded where the wait is ended rather than worked out where it is
+/// observed: both endings clear a packet the host had not taken, and telling
+/// them apart afterwards means reading a side effect - one retracts the buffer
+/// and the other does not - which is a thing to get wrong rather than a thing
+/// to state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The device took the packet back, which is what INTERFACE RESET asks for.
+    Withdrawn,
+    /// The bus went away underneath it.
+    Gone,
+}
+
+/// What became of a packet that was armed for the host.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Collection {
+    /// The host issued its IN token and took it.
+    Taken,
+    /// The device took it back before the host asked for it.
+    Withdrawn,
+    /// The bus went away underneath it.
+    Gone,
 }
 
 /// The largest packet a bulk endpoint on a full-speed device carries, and so
@@ -118,6 +152,9 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                 xport: Xport::new(halt, out, r#in, max_packet_size),
                 waker: None,
                 epoch: 0,
+                ending: Ending::Gone,
+                #[cfg(test)]
+                last_collection: None,
             }),
         }
     }
@@ -203,11 +240,12 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                         // CMD_REBOOT2 reboots in on_tx.  So the delivery is
                         // waited for, and a packet the bus never carried is not
                         // reported as one that went.
-                        Ok(()) => {
-                            if self.delivered().await {
-                                self.lock(|i| i.core.on_tx(n as u32));
-                            }
-                        }
+                        Ok(()) => match self.await_collection().await {
+                            Collection::Taken => self.lock(|i| i.core.on_tx(n as u32)),
+                            // A packet no host took is not one the protocol
+                            // hears about.
+                            Collection::Withdrawn | Collection::Gone => {}
+                        },
                         Err(_) => yield_now().await,
                     }
                 }
@@ -225,6 +263,12 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                 Action::Again => yield_now().await,
             }
         }
+    }
+
+    /// What the last wait for an armed packet ended as.
+    #[cfg(test)]
+    pub(crate) fn last_collection(&self) -> Option<Collection> {
+        self.lock(|i| i.last_collection)
     }
 
     /// What the protocol and its queues are doing, for a device that wants to
@@ -264,22 +308,39 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
         .await;
     }
 
-    // Wait for the host to take the packet that was just armed, and say
-    // whether it took it.  False means the bus went away underneath it.
+    // Wait for the packet that was just armed to be taken, and say what became
+    // of it.
     //
-    // Nothing wakes on a packet being taken — the driver keeps that waker to
-    // itself — so this hands the executor a turn between looks.  It runs once
-    // per packet sent, and the wait is however long the host takes to issue
-    // its IN token.
-    async fn delivered(&self) -> bool {
+    // The controller does raise an interrupt when the host takes a packet, and
+    // the driver does wake on it — EndpointIn::write opens by waiting for the
+    // previous packet to clear.  What embassy_usb_driver::EndpointIn offers is
+    // write, info and wait_enabled, so there is no way to await that wake
+    // without arming another packet behind it.  Hence a turn handed to the
+    // executor between looks.  It runs once per packet sent, and the wait is
+    // however long the host takes to issue its IN token.
+    async fn await_collection(&self) -> Collection {
         let epoch = self.lock(|i| i.epoch);
         loop {
-            let (in_flight, gone) = self.lock(|i| (i.xport.in_flight(), i.epoch != epoch));
-            if !in_flight {
-                return true;
-            }
-            if gone {
-                return false;
+            // The ending is looked at before the packet, since both endings
+            // leave a packet no host will take and only one of them leaves it
+            // armed.  Asking after the packet first reports a withdrawal as a
+            // host having taken it.
+            let outcome = self.lock(|i| {
+                if i.epoch != epoch {
+                    return Some(match i.ending {
+                        Ending::Withdrawn => Collection::Withdrawn,
+                        Ending::Gone => Collection::Gone,
+                    });
+                }
+                if !i.xport.in_flight() {
+                    return Some(Collection::Taken);
+                }
+                None
+            });
+            if let Some(outcome) = outcome {
+                #[cfg(test)]
+                self.lock(|i| i.last_collection = Some(outcome));
+                return outcome;
             }
             yield_now().await;
         }
@@ -326,6 +387,7 @@ impl<O: Ops, C: Custom, H: Halt> Handler for ControlHandler<'_, '_, O, C, H> {
                 // that packet must hear that it will not be taken rather than
                 // read it going away as the host having taken it.
                 i.xport.retract_in();
+                i.ending = Ending::Withdrawn;
                 i.epoch = i.epoch.wrapping_add(1);
                 wake(&mut i.waker);
             }
@@ -363,6 +425,7 @@ impl<O: Ops, C: Custom, H: Halt> Handler for ControlHandler<'_, '_, O, C, H> {
             i.xport.clear();
             i.core
                 .on_control(&mut i.xport, &INTERFACE_RESET, Stage::Setup);
+            i.ending = Ending::Gone;
             i.epoch = i.epoch.wrapping_add(1);
             wake(&mut i.waker);
         });
@@ -373,7 +436,10 @@ impl<O: Ops, C: Custom, H: Halt> Handler for ControlHandler<'_, '_, O, C, H> {
     // reset that follows the bus coming back is what puts it to Idle.
     fn enabled(&mut self, enabled: bool) {
         if !enabled {
-            self.dev.lock(|i| i.epoch = i.epoch.wrapping_add(1));
+            self.dev.lock(|i| {
+                i.ending = Ending::Gone;
+                i.epoch = i.epoch.wrapping_add(1);
+            });
         }
     }
 }

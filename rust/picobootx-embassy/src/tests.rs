@@ -22,7 +22,9 @@ use std::rc::Rc;
 use std::vec;
 use std::vec::Vec;
 
+use crate::device::Collection;
 use core::cell::RefCell;
+
 use core::future::Future;
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
@@ -1159,5 +1161,73 @@ fn reboot2_acts_once_the_host_has_taken_the_acknowledgement() {
         bus.borrow().reboots,
         1,
         "a host that took the acknowledgement did not get its reboot"
+    );
+}
+
+/// A reboot the device took back is not one the protocol hears about.
+///
+/// INTERFACE RESET retracts the acknowledgement, so no host ever took it.  The
+/// board must stay where it is, and the wait must end rather than run on.
+#[test]
+fn a_withdrawn_acknowledgement_does_not_reboot_the_board() {
+    let bus = Bus::new();
+    let host = Host(Rc::clone(&bus));
+    bus.borrow_mut().host_collects = false;
+    let (picoboot, ep_out, ep_in) = device(&bus);
+
+    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    let mut fut = pin!(picoboot.run(ep_out, ep_in));
+    step(&mut fut, STEPS);
+    assert!(
+        bus.borrow().in_flight,
+        "the acknowledgement was never armed, so nothing here is being taken back"
+    );
+
+    picoboot.handler().control_out(interface_reset(), &[]);
+    step(&mut fut, STEPS);
+
+    assert_eq!(
+        bus.borrow().reboots,
+        0,
+        "a reboot fired on an acknowledgement the device had taken back"
+    );
+    assert_eq!(
+        picoboot.last_collection(),
+        Some(Collection::Withdrawn),
+        "a packet the device took back was read as one the host took"
+    );
+}
+
+/// A reboot the bus went away under is not one the protocol hears about.
+///
+/// The acknowledgement stays armed - powering the bus off retracts nothing -
+/// so this is the ending that has to be told apart from the host taking it.
+#[test]
+fn an_acknowledgement_the_bus_went_away_under_does_not_reboot_the_board() {
+    let bus = Bus::new();
+    let host = Host(Rc::clone(&bus));
+    bus.borrow_mut().host_collects = false;
+    let (picoboot, ep_out, ep_in) = device(&bus);
+
+    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    let mut fut = pin!(picoboot.run(ep_out, ep_in));
+    step(&mut fut, STEPS);
+    assert!(
+        bus.borrow().in_flight,
+        "the acknowledgement was never armed, so there is nothing to go away under"
+    );
+
+    picoboot.handler().enabled(false);
+    step(&mut fut, STEPS);
+
+    assert_eq!(
+        bus.borrow().reboots,
+        0,
+        "a reboot fired on an acknowledgement no host had taken"
+    );
+    assert_eq!(
+        picoboot.last_collection(),
+        Some(Collection::Gone),
+        "a packet the bus went away under was read as one the host took"
     );
 }

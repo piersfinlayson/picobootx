@@ -32,10 +32,10 @@ Locally:
 ci/local-checks.sh
 ```
 
-Then tag and push:
+Then tag and push.  Signed and annotated, as every tag in this repository is:
 
 ```bash
-git tag v<x.y.z>
+git tag -s v<x.y.z> -m "picobootx <x.y.z>"
 git push origin v<x.y.z>
 ```
 
@@ -94,12 +94,12 @@ version on crates.io is permanent — it can be yanked, never replaced — so th
 dry run is not optional.
 
 Then tag what was published, one tag per crate, since three independent
-versions have no single number between them:
+versions have no single number between them.  Signed and annotated, as above:
 
 ```bash
-git tag picobootx-v<x.y.z>
-git tag picobootx-rp2350-v<x.y.z>
-git tag picobootx-embassy-v<x.y.z>
+git tag -s picobootx-v<x.y.z> -m "picobootx <x.y.z>"
+git tag -s picobootx-rp2350-v<x.y.z> -m "picobootx-rp2350 <x.y.z>"
+git tag -s picobootx-embassy-v<x.y.z> -m "picobootx-embassy <x.y.z>"
 git push origin picobootx-v<x.y.z> picobootx-rp2350-v<x.y.z> \
                 picobootx-embassy-v<x.y.z>
 ```

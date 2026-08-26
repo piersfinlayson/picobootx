@@ -12,7 +12,7 @@
 //! advisory commands and refuses everything else.  This is where that is held.
 
 use picobootx::wire::{CMD_LEN, DIR_IN, FLASH_PAGE_SIZE, MAGIC};
-use picobootx::{Command, Custom, Ecc, Exclusive, NoCustom, Ops, Reboot, Status};
+use picobootx::{Command, Custom, Ecc, Exclusive, NoCustom, Ops, Reboot, State, Status};
 
 /// A device that writes no operation at all.
 struct Bare;
@@ -171,4 +171,97 @@ fn a_command_is_read_out_of_exactly_thirty_two_bytes() {
     longer[..CMD_LEN].copy_from_slice(&bytes);
     assert!(Command::from_bytes(&longer).is_none());
     assert!(Command::from_bytes(&[]).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// The two enums a reader outside the library meets
+// ---------------------------------------------------------------------------
+//
+// Both cross a boundary the C ABI cannot express.  `Status` is one byte there,
+// so nothing in the suite ever formats one, and `State` arrives at a diagnostic
+// reader as a discriminant with no way back.  The suite cannot reach either.
+
+/// Every `Status`, so a variant added without a phrase of its own shows up here
+/// rather than as a gap nobody looks at.
+const EVERY_STATUS: [Status; 18] = [
+    Status::Ok,
+    Status::UnknownCmd,
+    Status::InvalidCmdLength,
+    Status::InvalidTransferLen,
+    Status::InvalidAddress,
+    Status::BadAlignment,
+    Status::InterleavedWrite,
+    Status::Rebooting,
+    Status::UnknownError,
+    Status::InvalidState,
+    Status::NotPermitted,
+    Status::InvalidArg,
+    Status::BufferTooSmall,
+    Status::PreconditionNotMet,
+    Status::ModifiedData,
+    Status::InvalidData,
+    Status::NotFound,
+    Status::UnsupportedMod,
+];
+
+#[test]
+fn every_status_says_something_of_its_own() {
+    let mut seen: Vec<String> = Vec::new();
+    for status in EVERY_STATUS {
+        let shown = format!("{status}");
+        assert!(!shown.is_empty(), "{status:?} formats as nothing");
+        assert!(
+            !seen.contains(&shown),
+            "{status:?} formats the same as an earlier status: {shown}"
+        );
+        seen.push(shown);
+    }
+    assert_eq!(seen.len(), EVERY_STATUS.len());
+}
+
+#[test]
+fn a_status_reads_as_the_refusal_and_not_as_the_variant_name() {
+    assert_eq!(format!("{}", Status::UnknownCmd), "unknown command");
+    assert_eq!(format!("{}", Status::BadAlignment), "bad alignment");
+    assert_eq!(
+        format!("{}", Status::UnsupportedMod),
+        "unsupported modification"
+    );
+}
+
+#[test]
+fn a_status_is_an_error() {
+    fn as_error(status: Status) -> &'static dyn core::error::Error {
+        Box::leak(Box::new(status))
+    }
+    assert_eq!(format!("{}", as_error(Status::NotFound)), "not found");
+}
+
+#[test]
+fn a_state_survives_the_trip_through_its_discriminant() {
+    let every = [
+        State::Idle,
+        State::DataOut,
+        State::DataIn,
+        State::CustomIn,
+        State::AwaitZlp,
+        State::AwaitAck,
+        State::Stalled,
+    ];
+    for state in every {
+        assert_eq!(
+            State::try_from(state as u8),
+            Ok(state),
+            "{state:?} did not survive its own discriminant"
+        );
+    }
+}
+
+#[test]
+fn a_byte_that_names_no_state_is_refused_and_handed_back() {
+    // One past the last state, so this fails the moment a state is added
+    // without being named above.
+    let past_the_end = State::Stalled as u8 + 1;
+    assert_eq!(State::try_from(past_the_end), Err(past_the_end));
+    assert_eq!(State::try_from(0xff), Err(0xff));
 }

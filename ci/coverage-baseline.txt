@@ -21,4 +21,5 @@ rust/picobootx-rp2350/src/defaults.rs        100.0
 rust/picobootx-rp2350/src/ops.rs             100.0
 rust/picobootx/src/ops.rs                    100.0
 rust/picobootx/src/state.rs                  100.0
+rust/picobootx/src/status.rs                 100.0
 rust/picobootx/src/wire.rs                   100.0

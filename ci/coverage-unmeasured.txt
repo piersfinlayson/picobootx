@@ -24,11 +24,10 @@
 
 rust/picobootx/src/lib.rs                 module declarations and re-exports
 rust/picobootx/src/control.rs             the control endpoint's types
-rust/picobootx/src/status.rs              the status enum and the Result alias
 rust/picobootx/src/transport.rs           the two transport traits
 rust/picobootx-ffi/src/cabi.rs            the C types and the extern declarations
 rust/picobootx-rp2350/src/lib.rs          declarations, re-exports and the part's addresses
 rust/picobootx-rp2350/src/usb.rs          the part's USB registers, built only for the part
 rust/picobootx-embassy/src/lib.rs         module declarations and re-exports
-rust/picobootx-embassy/src/halt.rs        the halt trait, and the RP2350's implementation of it
+rust/picobootx-embassy/src/endpoint.rs    the endpoint control trait, and the RP2350's implementation of it
 rust/picobootx-embassy/src/tests.rs       the crate's own tests, which are not what is measured

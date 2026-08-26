@@ -6,12 +6,13 @@
 
 [package]
 name = "picobootx-rp2350"
-version = "0.2.0"
+version = "0.1.0"
 description = "Default RP2350 implementations of the picobootx device operations"
 keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
 categories = ["embedded", "no-std"]
 readme = "README.md"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -23,6 +24,12 @@ repository.workspace = true
 # a jump through a null pointer.
 [dependencies]
 picobootx = { workspace = true }
+
+# The usb module and the .ramfunc items exist only in a build for the part, so
+# docs built for this machine would not show them.  The first target listed is
+# the one docs.rs renders.
+[package.metadata.docs.rs]
+targets = ["thumbv8m.main-none-eabi"]
 
 [lints.rust]
 missing_docs = "deny"

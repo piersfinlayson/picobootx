@@ -6,15 +6,15 @@
 #![doc = include_str!("../README.md")]
 
 mod device;
+mod endpoint;
 mod fifo;
-mod halt;
 mod transport;
 
 #[cfg(test)]
 mod tests;
 
-pub use device::{ControlHandler, Diagnostics, PACKET_LEN, Picoboot};
-pub use halt::Halt;
+pub use device::{ControlHandler, Diagnostics, PACKET_LEN, PicobootClass};
+pub use endpoint::EndpointControl;
 
 #[cfg(all(feature = "rp2350", target_os = "none"))]
-pub use halt::Rp2350Halt;
+pub use endpoint::Rp2350EndpointControl;

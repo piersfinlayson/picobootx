@@ -124,15 +124,20 @@ pub unsafe extern "C" fn picoboot_task(state_block: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn picoboot_tx_cb(state_block: *mut c_void, sent_bytes: u32) {
+    // picobootx.h takes the count, and the library does not read it.
+    let _ = sent_bytes;
     let s = unsafe { state(state_block) };
-    s.pb.on_tx(sent_bytes);
+    s.pb.on_tx();
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn picoboot_rx_cb(state_block: *mut c_void, available_bytes: u32) {
+    // picobootx.h takes the count, and the library reads it from the transport,
+    // which is where this one came from.
+    let _ = available_bytes;
     let s = unsafe { state(state_block) };
     let mut t = VendorTransport::new(s.ep_out, s.ep_in);
-    s.pb.on_rx(&mut t, available_bytes);
+    s.pb.on_rx(&mut t);
 }
 
 #[unsafe(no_mangle)]
@@ -266,11 +271,12 @@ pub unsafe extern "C" fn picobootx_ffi_layout(out: *mut u32, len: u32) -> u32 {
 }
 
 // The command this shim hands to a C callback and the one the library hands to
-// a Rust one are two declarations of the same 32 bytes.
+// a Rust one are two declarations of the same 32 bytes: one length, and every
+// field at one offset.  Their alignments differ and may - nothing reinterprets
+// either as the other, and as_c copies field by field.
 const _: () = {
-    use core::mem::{align_of, offset_of, size_of};
+    use core::mem::{offset_of, size_of};
     assert!(size_of::<CCommand>() == size_of::<picobootx::Command>());
-    assert!(align_of::<CCommand>() == align_of::<picobootx::Command>());
     assert!(offset_of!(CCommand, magic) == offset_of!(picobootx::Command, magic));
     assert!(offset_of!(CCommand, token) == offset_of!(picobootx::Command, token));
     assert!(offset_of!(CCommand, cmd_id) == offset_of!(picobootx::Command, cmd_id));

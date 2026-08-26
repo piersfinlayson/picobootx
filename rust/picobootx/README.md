@@ -18,10 +18,11 @@ first — and can extend the protocol with commands of its own.
 
 Three pieces: what your device does, how bytes reach the wire, and a loop.
 
-```rust,ignore
+```rust,no_run
 use picobootx::{Endpoints, Ops, Picoboot, Result, Status};
 
 struct MyDevice;
+# fn in_range(_addr: u32, _size: u32) -> bool { true }
 
 // Every method has a default, so this is already a complete implementation —
 // of a device that refuses everything. Write a method and that command starts

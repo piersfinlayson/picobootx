@@ -5,7 +5,7 @@
 //! An RP2350 as one type, for a device that wants the whole default set.
 
 use picobootx::wire::FLASH_PAGE_SIZE;
-use picobootx::{Ecc, Exclusive, Ops, Reboot, Result, Status, Target};
+use picobootx::{Ecc, Exclusive, Ops, Reboot, Result, Target};
 
 use crate::defaults;
 
@@ -47,7 +47,7 @@ impl Ops for Rp2350 {
         unsafe { defaults::read(addr, buf) }
     }
 
-    fn write_prepare(&mut self, addr: u32, size: u32) -> core::result::Result<Target, Status> {
+    fn write_prepare(&mut self, addr: u32, size: u32) -> Result<Target> {
         defaults::write_prepare(addr, size)
     }
 
@@ -97,7 +97,7 @@ impl Ops for Rp2350 {
         Ok(())
     }
 
-    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> core::result::Result<usize, Status> {
+    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> Result {
         defaults::get_info_sys(flag, buf)
     }
 

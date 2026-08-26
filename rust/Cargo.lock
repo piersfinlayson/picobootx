@@ -232,7 +232,7 @@ checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 
 [[package]]
 name = "picobootx"
-version = "0.2.0"
+version = "0.1.0"
 
 [[package]]
 name = "picobootx-embassy"
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "picobootx-rp2350"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "picobootx",
 ]

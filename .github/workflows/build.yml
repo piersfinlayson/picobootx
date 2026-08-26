@@ -199,8 +199,9 @@ jobs:
       # the device half — absolute addresses, a transmute, two asm blocks and
       # the .ramfunc placement — is compiled by nobody.
       #
-      # picobootx-embassy too, with the feature on.  Rp2350Halt exists only in a
-      # build for the part, and clippy lints the crate it is asked for rather
+      # picobootx-embassy too, with the feature on.  Rp2350EndpointControl
+      # exists only in a build for the part, and clippy lints the crate it is
+      # asked for rather
       # than the dependencies underneath it - so a device building the example
       # compiles that code without anything ever linting it.
       #
@@ -212,6 +213,37 @@ jobs:
               --target thumbv8m.main-none-eabi --release -- -D warnings)
           (cd rust && cargo clippy -p picobootx-embassy --features rp2350 \
               --target thumbv8m.main-none-eabi --release -- -D warnings)
+
+  # The oldest Rust the published crates claim to build on.  `rust-version` is
+  # a promise a consumer's cargo enforces, and nothing else here would notice it
+  # going stale: every other job runs on stable, where a newer standard library
+  # method compiles without a word and silently raises the real floor.
+  #
+  # --locked, so the check is made against the dependency versions in
+  # Cargo.lock.  Without it a dependency may resolve to a release needing a
+  # newer compiler, and the job fails for something that is not this
+  # repository's floor.
+  #
+  # Twice, for the same reason the lint above runs twice.  The host build
+  # compiles the host half of the seam, and the part's build is where the
+  # absolute addresses, the asm and the .ramfunc placement are compiled at all.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: thumbv8m.main-none-eabi
+
+      - name: Build the published crates on the oldest Rust they claim
+        run: |
+          (cd rust && cargo check --locked \
+              -p picobootx -p picobootx-rp2350 -p picobootx-embassy)
+          (cd rust && cargo check --locked \
+              -p picobootx-rp2350 -p picobootx-embassy \
+              --features picobootx-embassy/rp2350 \
+              --target thumbv8m.main-none-eabi)
 
   # How much of the library the suites reach, in both languages, merged.
   #

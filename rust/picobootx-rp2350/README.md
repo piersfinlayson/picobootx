@@ -6,6 +6,10 @@ operations [`picobootx`] leaves to you, written for the part.
 `no_std`, no allocator, and nothing under it but raw pointers: no
 peripheral access crate, no HAL, no SDK.
 
+Either use these, or write your own with these as a starting point. They are
+the whole of the porting problem: `picobootx` knows the protocol and nothing
+about the part, and everything that touches the part is here.
+
 ## Erasing flash needs `.ramfunc` placed in RAM
 
 An erase takes flash out of execute-in-place, so the part of the sequence that
@@ -74,10 +78,11 @@ Two ways in, and they are meant to be mixed.
 `Rp2350` is the whole set as one `Ops`, for a device that serves the protocol on
 the part's own terms throughout:
 
-```rust,ignore
+```rust,no_run
 use picobootx::{Endpoints, Picoboot};
 use picobootx_rp2350::Rp2350;
 
+# let mut flash_page = [0u8; picobootx::wire::FLASH_PAGE_SIZE];
 let mut pb = Picoboot::new(
     Rp2350,
     picobootx::NoCustom,
@@ -90,7 +95,9 @@ The free functions beside it are the same work a piece at a time, so an `Ops` of
 your own can answer some commands its way and call these for the rest — a device
 that keeps a host out of its own flash while still serving reads, say:
 
-```rust,ignore
+```rust,no_run
+# use picobootx::{Ops, Result};
+# struct MyDevice;
 impl Ops for MyDevice {
     fn read_prepare(&mut self, addr: u32, size: u32) -> Result {
         picobootx_rp2350::read_prepare(addr, size)

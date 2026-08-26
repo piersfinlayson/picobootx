@@ -35,8 +35,8 @@ pub trait Transport {
     /// Put bytes in the transmit FIFO, and say how many were taken.
     fn tx_write(&mut self, buf: &[u8]) -> u32;
 
-    /// Send what the transmit FIFO is holding, and say how many bytes went.
-    fn tx_flush(&mut self) -> u32;
+    /// Send what the transmit FIFO is holding.
+    fn tx_flush(&mut self);
 
     /// Drop whatever the transmit FIFO is holding.
     fn tx_clear(&mut self);

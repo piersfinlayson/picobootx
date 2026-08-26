@@ -25,7 +25,7 @@ use embassy_usb::{Builder, Config};
 
 use picobootx::wire::FLASH_PAGE_SIZE;
 use picobootx::{Command, Custom, Endpoints, Filled, Status};
-use picobootx_embassy::{Picoboot, Rp2350Halt};
+use picobootx_embassy::{PicobootClass, Rp2350EndpointControl};
 use picobootx_rp2350::Rp2350;
 
 bind_interrupts!(struct Irqs {
@@ -125,7 +125,7 @@ async fn main(_spawner: Spawner) {
 
     // Built before the USB builder, which borrows the handler for its lifetime.
     // Hence endpoint addresses here, not the endpoints themselves.
-    let picoboot = Picoboot::new(
+    let picoboot = PicobootClass::new(
         // Serves the standard PICOBOOT commands.  Write your own impl Ops to
         // change what one does, or to serve a part that is not an RP2350.
         Rp2350,
@@ -145,7 +145,7 @@ async fn main(_spawner: Spawner) {
         MAX_PACKET_SIZE,
         // Needed on every RP2350 embassy device: picoboot refuses a command by
         // halting its endpoints, and this reaches the chip's registers to do it.
-        Rp2350Halt,
+        Rp2350EndpointControl,
     );
     let mut handler = picoboot.handler();
 
@@ -171,8 +171,8 @@ async fn main(_spawner: Spawner) {
     let mut usb = builder.build();
 
     // Both must run: control carries a command's status and INTERFACE RESET,
-    // bulk carries the commands.  Joined rather than spawned because Picoboot
-    // is shared between them.
+    // bulk carries the commands.  Joined rather than spawned because the
+    // PicobootClass is shared between them.
     join(usb.run(), picoboot.run(ep_out, ep_in)).await;
 }
 

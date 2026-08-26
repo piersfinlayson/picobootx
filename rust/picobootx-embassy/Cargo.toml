@@ -12,6 +12,7 @@ keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
 categories = ["embedded", "no-std", "asynchronous"]
 readme = "README.md"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

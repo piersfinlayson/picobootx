@@ -221,9 +221,13 @@ pub unsafe extern "C" fn picoboot_default_get_info_sys(
 ) -> CStatus {
     let _ = ctx;
     let out = unsafe { out_slice(buf, buf_size as usize) };
+    // picobootx.h has this report what it wrote.  The buffer is sized for the
+    // one flag asked for and is filled or the call fails, so what it wrote on
+    // success is the whole of it.
+    let len = out.len() as u32;
     match picobootx_rp2350::get_info_sys(flag, out) {
-        Ok(written) => {
-            unsafe { bytes_written.write(written as u32) };
+        Ok(()) => {
+            unsafe { bytes_written.write(len) };
             Status::Ok as CStatus
         }
         Err(status) => status as CStatus,
@@ -233,7 +237,9 @@ pub unsafe extern "C" fn picoboot_default_get_info_sys(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn picoboot_get_serial(buffer: *mut u16, max_len: usize) -> usize {
     let out = unsafe { out_slice(buffer, max_len) };
-    picobootx_rp2350::serial(out)
+    // picobootx_impl.h reports every failure as a length of zero, which is what
+    // this collapses the status back to.
+    picobootx_rp2350::serial(out).unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]

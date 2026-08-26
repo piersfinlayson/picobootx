@@ -21,8 +21,10 @@ const FLASH_BLOCK_ERASE_CMD: u8 = 0xd8;
 /// of the four the part offers.
 const XIP_READ_MODE: u8 = 3;
 
-/// How many code units a serial number and its terminator take.
-const SERIAL_LEN: usize = 17;
+/// How many code units [`serial`] needs: sixteen hex digits and a terminator.
+///
+/// The buffer handed to it has to be at least this long.
+pub const SERIAL_LEN: usize = 17;
 
 /// An execute-in-place address as an offset into flash, which is what every
 /// bootrom flash routine is addressed by.
@@ -49,6 +51,10 @@ fn within(addr: u32, size: u32, base: u32, len: u32) -> bool {
 ///
 /// Every kind of exclusivity the protocol defines is agreed to, and one it does
 /// not define is refused.
+///
+/// # Errors
+///
+/// [`Status::InvalidArg`] for a mode the protocol does not define.
 pub fn exclusive_access(mode: Exclusive) -> Result {
     match mode {
         Exclusive::NotExclusive | Exclusive::Exclusive | Exclusive::ExclusiveAndEject => Ok(()),
@@ -57,11 +63,19 @@ pub fn exclusive_access(mode: Exclusive) -> Result {
 }
 
 /// Leave execute-in-place.  Nothing to do on this part.
+///
+/// # Errors
+///
+/// None.  It returns a `Result` because the operation it serves does.
 pub fn exit_xip() -> Result {
     Ok(())
 }
 
 /// Re-enter execute-in-place.  Nothing to do on this part.
+///
+/// # Errors
+///
+/// None.  It returns a `Result` because the operation it serves does.
 pub fn enter_xip() -> Result {
     Ok(())
 }
@@ -70,6 +84,10 @@ pub fn enter_xip() -> Result {
 ///
 /// The arguments are the bootrom's to judge, so all this establishes is that
 /// there is a routine to hand them to.
+///
+/// # Errors
+///
+/// [`Status::NotFound`] when the part publishes no reboot routine.
 pub fn reboot_prepare(args: &Reboot) -> Result {
     let _ = args;
     if bootrom::reboot().is_none() {
@@ -97,6 +115,10 @@ pub fn reboot_execute(args: &Reboot) {
 /// The whole of it has to lie inside one of the three regions the part answers
 /// reads from.  A range spanning two of them is refused, since the gap between
 /// them is not memory.
+///
+/// # Errors
+///
+/// [`Status::InvalidArg`] for a range that is not inside one region.
 pub fn read_prepare(addr: u32, size: u32) -> Result {
     let valid = within(addr, size, ROM_BASE, ROM_SIZE)
         || within(addr, size, FLASH_BASE, FLASH_SIZE)
@@ -111,6 +133,11 @@ pub fn read_prepare(addr: u32, size: u32) -> Result {
 ///
 /// An aligned word is read as one word, since a peripheral register answers a
 /// word access and not four byte accesses.
+///
+/// # Errors
+///
+/// None.  The range was established by [`read_prepare`], which is this
+/// function's safety condition rather than something it checks.
 ///
 /// # Safety
 ///
@@ -134,7 +161,12 @@ pub unsafe fn read(addr: u32, buf: &mut [u8]) -> Result {
 ///
 /// Flash is written a page at a time, so a write that does not start on a page
 /// boundary is refused rather than shifted onto one.
-pub fn write_prepare(addr: u32, size: u32) -> core::result::Result<Target, Status> {
+///
+/// # Errors
+///
+/// [`Status::InvalidArg`] for a range that is neither SRAM nor flash, and
+/// [`Status::BadAlignment`] for a flash range not starting on a page.
+pub fn write_prepare(addr: u32, size: u32) -> Result<Target> {
     let is_sram = within(addr, size, SRAM_BASE, SRAM_SIZE);
     let is_flash = within(addr, size, FLASH_BASE, FLASH_SIZE);
 
@@ -153,6 +185,11 @@ pub fn write_prepare(addr: u32, size: u32) -> core::result::Result<Target, Statu
 }
 
 /// Write `buf` at `addr`.
+///
+/// # Errors
+///
+/// None.  The range was established by [`write_prepare`], which is this
+/// function's safety condition rather than something it checks.
 ///
 /// # Safety
 ///
@@ -179,6 +216,13 @@ pub unsafe fn write(addr: u32, buf: &[u8]) -> Result {
 ///
 /// `page` is read while flash is unreadable, so a page that is not in RAM is
 /// refused rather than programmed from bytes that cannot be fetched.
+///
+/// # Errors
+///
+/// [`Status::NotFound`] when the part publishes none of the five bootrom
+/// routines the sequence needs.  On a build for the part,
+/// [`Status::PreconditionNotMet`] when the routine that runs while flash is
+/// unreadable is not resident in RAM, or when `page` is not in RAM either.
 pub fn flash_page_write(addr: u32, page: &[u8; FLASH_PAGE_SIZE]) -> Result {
     #[cfg(target_os = "none")]
     if !ramfunc_resident(program_critical as *const ()) {
@@ -223,6 +267,11 @@ pub fn flash_page_write(addr: u32, page: &[u8; FLASH_PAGE_SIZE]) -> Result {
 ///
 /// An erase works in whole sectors, so a range that starts or ends inside one
 /// is refused rather than widened to the sectors it touches.
+///
+/// # Errors
+///
+/// [`Status::InvalidAddress`] for a range outside flash, and
+/// [`Status::BadAlignment`] for one that does not start and end on a sector.
 pub fn flash_erase_prepare(addr: u32, size: u32) -> Result {
     if !within(addr, size, FLASH_BASE, FLASH_SIZE) {
         return Err(Status::InvalidAddress);
@@ -379,8 +428,14 @@ fn program_critical(
 /// stopping part way through would leave flash out of execute-in-place.  For
 /// the same reason the part that runs while flash is unreadable is checked to
 /// be in RAM first — see [the crate documentation](crate) for the linker
-/// script and startup that put it there.  A build that has not done that is
-/// refused with [`Status::PreconditionNotMet`].
+/// script and startup that put it there.
+///
+/// # Errors
+///
+/// [`Status::NotFound`] when the part publishes none of the five bootrom
+/// routines the sequence needs.  On a build for the part,
+/// [`Status::PreconditionNotMet`] when the routine that runs while flash is
+/// unreadable is not resident in RAM.
 pub fn flash_erase(addr: u32, size: u32) -> Result {
     #[cfg(target_os = "none")]
     if !ramfunc_resident(erase_critical as *const ()) {
@@ -419,6 +474,12 @@ pub fn flash_erase(addr: u32, size: u32) -> Result {
 /// OTP is read a whole row at a time, so a length that is not a whole number of
 /// rows is refused rather than rounded — rounding either way would touch a row
 /// the caller did not name.
+///
+/// # Errors
+///
+/// [`Status::InvalidArg`] for a length that is not whole rows,
+/// [`Status::NotFound`] when the part publishes no OTP routine, and whatever
+/// [`bootrom::status_from`] makes of a refusal by that routine.
 pub fn otp_read(row: u16, ecc: Ecc, buf: &mut [u8]) -> Result {
     if !(buf.len() as u32).is_multiple_of(ecc.row_size()) {
         return Err(Status::InvalidArg);
@@ -444,6 +505,12 @@ pub fn otp_read(row: u16, ecc: Ecc, buf: &mut [u8]) -> Result {
 ///
 /// The same whole-row rule as [`otp_read`], and it matters more here: a fuse
 /// blown is blown.
+///
+/// # Errors
+///
+/// The same as [`otp_read`]: [`Status::InvalidArg`] for a length that is not
+/// whole rows, [`Status::NotFound`] when the part publishes no OTP routine, and
+/// whatever [`bootrom::status_from`] makes of a refusal by that routine.
 pub fn otp_write(row: u16, ecc: Ecc, buf: &[u8]) -> Result {
     if !(buf.len() as u32).is_multiple_of(ecc.row_size()) {
         return Err(Status::InvalidArg);
@@ -466,12 +533,19 @@ pub fn otp_write(row: u16, ecc: Ecc, buf: &[u8]) -> Result {
     Ok(())
 }
 
-/// Write the words one system information flag carries, and say how many bytes.
+/// Write the words one system information flag carries.
 ///
 /// The bootrom answers into a temporary here and the flag's data is copied out
 /// of it, so a buffer larger than the largest flag carries is refused: there
 /// would be nothing to fill the rest of it from.
-pub fn get_info_sys(flag: u32, buf: &mut [u8]) -> core::result::Result<usize, Status> {
+///
+/// # Errors
+///
+/// [`Status::NotFound`] when the part publishes no system information routine,
+/// [`Status::UnknownError`] for a buffer larger than the widest flag carries,
+/// [`Status::InvalidArg`] for a flag this part does not carry, and whatever
+/// [`bootrom::status_from`] makes of a refusal by that routine.
+pub fn get_info_sys(flag: u32, buf: &mut [u8]) -> Result {
     let Some(get_sys_info) = bootrom::get_sys_info() else {
         return Err(Status::NotFound);
     };
@@ -499,22 +573,31 @@ pub fn get_info_sys(flag: u32, buf: &mut [u8]) -> core::result::Result<usize, St
         let bytes = src.to_ne_bytes();
         dst.copy_from_slice(&bytes[..dst.len()]);
     }
-    Ok(buf.len())
+    Ok(())
 }
 
 /// Write this part's identifier into `buf` as UTF-16, for a USB string
-/// descriptor, and say how many code units that took.
+/// descriptor, and say how many code units it takes.
 ///
-/// Sixteen hex digits and a terminator, most significant word first.  Zero when
-/// the identifier cannot be read, since half a serial number in a descriptor is
-/// worse than none.
-pub fn serial(buf: &mut [u16]) -> usize {
+/// Sixteen hex digits, most significant word first, followed by a terminator.
+/// The count returned is the digits, so the string is `buf[..n]` and the
+/// terminator sits after it.  `buf` has to hold at least [`SERIAL_LEN`].
+///
+/// Nothing is written unless all of it is, since half a serial number in a
+/// descriptor is worse than none.
+///
+/// # Errors
+///
+/// [`Status::BufferTooSmall`] for a buffer shorter than [`SERIAL_LEN`],
+/// [`Status::NotFound`] when the part publishes no OTP routine, and whatever
+/// [`bootrom::status_from`] makes of a refusal by that routine.
+pub fn serial(buf: &mut [u16]) -> Result<usize> {
     if buf.len() < SERIAL_LEN {
-        return 0;
+        return Err(Status::BufferTooSmall);
     }
 
     let Some(access) = bootrom::otp_access() else {
-        return 0;
+        return Err(Status::NotFound);
     };
 
     // The identifier is four rows read through the error-correcting view, which
@@ -528,7 +611,7 @@ pub fn serial(buf: &mut [u16]) -> usize {
         )
     };
     if ret != 0 {
-        return 0;
+        return Err(bootrom::status_from(ret));
     }
 
     const HEX: [u8; 16] = *b"0123456789ABCDEF";
@@ -542,5 +625,5 @@ pub fn serial(buf: &mut [u16]) -> usize {
     }
     buf[pos] = 0;
 
-    pos
+    Ok(pos)
 }

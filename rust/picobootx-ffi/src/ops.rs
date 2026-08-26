@@ -113,7 +113,7 @@ impl Ops for OpsTable {
         status(unsafe { f(addr, buf.as_mut_ptr(), buf.len() as u32, self.ctx) })
     }
 
-    fn write_prepare(&mut self, addr: u32, size: u32) -> core::result::Result<Target, Status> {
+    fn write_prepare(&mut self, addr: u32, size: u32) -> Result<Target> {
         let t = self.t().ok_or(Status::UnknownCmd)?;
         let prepare = t.write_prepare.ok_or(Status::UnknownCmd)?;
         let mut is_flash = false;
@@ -199,7 +199,7 @@ impl Ops for OpsTable {
         Ok(())
     }
 
-    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> core::result::Result<usize, Status> {
+    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> Result {
         let f = self
             .t()
             .and_then(|t| t.get_info_sys)
@@ -214,7 +214,13 @@ impl Ops for OpsTable {
                 self.ctx,
             )
         })?;
-        Ok(written as usize)
+        // The C callback reports what it wrote, and the buffer is sized for the
+        // one flag it was asked for, so anything but a full buffer is an
+        // integrator's callback disagreeing with the flag it answered.
+        if written as usize != buf.len() {
+            return Err(Status::UnknownError);
+        }
+        Ok(())
     }
 
     fn reboot_prepare(&mut self, args: &Reboot) -> Result {
@@ -294,7 +300,7 @@ impl Custom for CustomTable {
         status(unsafe { dispatch(&c, core::ptr::null_mut(), 0, &mut written, self.ctx) })
     }
 
-    fn fill(&mut self, cmd: &Command, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
+    fn fill(&mut self, cmd: &Command, buf: &mut [u8]) -> Result<Filled> {
         let f = self.t().and_then(|t| t.fill).ok_or(Status::UnknownCmd)?;
         let c = as_c(cmd);
         let mut written: u32 = 0;

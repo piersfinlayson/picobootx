@@ -108,6 +108,34 @@ pub struct Reboot {
 /// to "does this device serve this command".  Writing `read_prepare` and
 /// leaving `read` to its default is a device that accepts a transfer it then
 /// abandons partway.
+///
+/// # Refusing
+///
+/// A method refuses by returning a [`Status`], which the library puts in the
+/// block the host reads back with `GET_COMMAND_STATUS` before halting both bulk
+/// endpoints.  Which one to return is yours, and the protocol uses them like
+/// this:
+///
+/// - [`Status::UnknownCmd`] — this device does not serve the command at all.
+///   Every default returns it, which is what makes an unwritten method a
+///   command the device does not have.
+/// - [`Status::NotPermitted`] — the command is served, and not here.  A range
+///   this device keeps a host out of, an OTP row it will not blow.
+/// - [`Status::InvalidAddress`] — outside anything this device answers for.
+/// - [`Status::InvalidArg`] — an argument out of range or not one this command
+///   accepts.
+/// - [`Status::BadAlignment`] — the right address, on the wrong boundary.
+/// - [`Status::PreconditionNotMet`] — something the operation relies on does
+///   not hold.
+/// - [`Status::UnknownError`] — a failure with nothing more specific to say.
+///
+/// The library answers three of them itself, before any method here is reached:
+/// [`Status::InvalidCmdLength`] and [`Status::InvalidTransferLen`] for a
+/// command whose header disagrees with what that command carries, and
+/// [`Status::UnknownCmd`] for an identifier or a magic it does not know.  It
+/// also answers [`Status::NotPermitted`] for a flash `WRITE` when
+/// `Picoboot::new` was given no page buffer, and [`Status::UnknownError`] when
+/// the transport refuses a write it accepted room for.
 pub trait Ops {
     /// Take or release the device.  Absent means the device simply agrees.
     fn exclusive_access(&mut self, mode: Exclusive) -> Result {
@@ -138,7 +166,7 @@ pub trait Ops {
     }
 
     /// Whether this range may be written, and what kind of storage it is.
-    fn write_prepare(&mut self, addr: u32, size: u32) -> core::result::Result<Target, Status> {
+    fn write_prepare(&mut self, addr: u32, size: u32) -> Result<Target> {
         let _ = (addr, size);
         Err(Status::UnknownCmd)
     }
@@ -203,10 +231,11 @@ pub trait Ops {
         Err(Status::UnknownCmd)
     }
 
-    /// Write the words one system info flag carries, and say how many bytes.
+    /// Write the words one system info flag carries.
     ///
-    /// Exactly one flag per call, and `buf` is sized for it.
-    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> core::result::Result<usize, Status> {
+    /// Exactly one flag per call, and `buf` is sized for it, so the whole of it
+    /// is filled or the call fails.
+    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> Result {
         let _ = (flag, buf);
         Err(Status::UnknownCmd)
     }
@@ -262,7 +291,7 @@ pub trait Custom {
     /// Defaulted, so a device with no data-carrying commands need not write it.
     /// Returning data from `dispatch` without writing this is the same
     /// half-implementation the `Ops` documentation warns about.
-    fn fill(&mut self, cmd: &Command, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
+    fn fill(&mut self, cmd: &Command, buf: &mut [u8]) -> Result<Filled> {
         let _ = (cmd, buf);
         Err(Status::UnknownCmd)
     }

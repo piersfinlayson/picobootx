@@ -17,7 +17,7 @@ use picobootx::wire::FLASH_PAGE_SIZE;
 use picobootx::{Control, Custom, Endpoints, Ops, REQUEST_INTERFACE_RESET};
 use picobootx::{Recipient, Request, RequestType, Stage};
 
-use crate::halt::Halt;
+use crate::endpoint::EndpointControl;
 use crate::transport::Xport;
 
 /// picobootx, and everything it needs to be driven from two embassy tasks.
@@ -31,13 +31,13 @@ use crate::transport::Xport;
 ///
 /// [`handler`](Self::handler) is the control side and [`run`](Self::run) the
 /// bulk side, and a device serving picoboot runs both.
-pub struct Picoboot<'a, O: Ops, C: Custom, H: Halt> {
-    inner: RefCell<Inner<'a, O, C, H>>,
+pub struct PicobootClass<'a, O: Ops, C: Custom, E: EndpointControl> {
+    inner: RefCell<Inner<'a, O, C, E>>,
 }
 
-struct Inner<'a, O: Ops, C: Custom, H: Halt> {
+struct Inner<'a, O: Ops, C: Custom, E: EndpointControl> {
     core: picobootx::Picoboot<'a, O, C>,
-    xport: Xport<H>,
+    xport: Xport<E>,
     // Registered by run while both endpoints are halted, and woken when the
     // host puts them back.  Nothing else moves the protocol along in that
     // state, so without it the task would sleep through the recovery.
@@ -90,10 +90,11 @@ pub const PACKET_LEN: usize = 64;
 ///
 /// For a device that wants to report its own state - over a control request,
 /// a log, or a light.  Nothing here changes what the protocol does.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Diagnostics {
-    /// `picobootx::State`, as its discriminant.
-    pub state: u8,
+    /// What the protocol is doing.  `state as u8` is the byte to put on a wire,
+    /// and `State::try_from` is what turns it back.
+    pub state: picobootx::State,
     /// Bytes queued from the host and not yet taken by the protocol.
     pub rx_len: u16,
     /// Bytes the protocol has queued for the host and not yet sent.
@@ -125,7 +126,7 @@ enum Action {
     Again,
 }
 
-impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
+impl<'a, O: Ops, C: Custom, E: EndpointControl> PicobootClass<'a, O, C, E> {
     /// Start, with what this device does and where its bulk endpoints are.
     ///
     /// `ops` and `custom` are the protocol's, and mean what
@@ -134,22 +135,28 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
     /// `endpoints` are the two bulk addresses as the descriptor gives them,
     /// `max_packet_size` is what both were allocated with — at most
     /// [`PACKET_LEN`], which is all a full-speed bulk endpoint may carry — and
-    /// `halt` is how this device halts one of them.  A smaller endpoint is
-    /// served in packets of its own size rather than being handed one it would
-    /// refuse.
+    /// `ep_control` is how this device halts one of them and puts it back.  A
+    /// smaller endpoint is served in packets of its own size rather than being
+    /// handed one it would refuse.
+    ///
+    /// The three are wanted here because the control handler uses them and may
+    /// be reached before [`run`](Self::run) has started.  `run` takes them from
+    /// the endpoints it is handed, which is what the driver actually allocated,
+    /// so a value here that disagrees is corrected rather than acted on — and a
+    /// debug build asserts on the disagreement.
     pub fn new(
         ops: O,
         custom: C,
         flash_page: Option<&'a mut [u8; FLASH_PAGE_SIZE]>,
         endpoints: Endpoints,
         max_packet_size: u16,
-        halt: H,
+        ep_control: E,
     ) -> Self {
         let (out, r#in) = (endpoints.out, endpoints.r#in);
         Self {
             inner: RefCell::new(Inner {
                 core: picobootx::Picoboot::new(ops, custom, flash_page, endpoints),
-                xport: Xport::new(halt, out, r#in, max_packet_size),
+                xport: Xport::new(ep_control, out, r#in, max_packet_size),
                 waker: None,
                 epoch: 0,
                 ending: Ending::Gone,
@@ -163,7 +170,7 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
     ///
     /// picoboot's `INTERFACE RESET` and `GET_COMMAND_STATUS` arrive here, and
     /// a request that is neither is left for whoever else wants it.
-    pub fn handler(&self) -> ControlHandler<'_, 'a, O, C, H> {
+    pub fn handler(&self) -> ControlHandler<'_, 'a, O, C, E> {
         ControlHandler { dev: self }
     }
 
@@ -177,6 +184,21 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
         EO: EndpointOut,
         EI: EndpointIn,
     {
+        // The addresses and the packet size the endpoints were allocated with,
+        // rather than the ones new was told.  Halting by the wrong address
+        // leaves the endpoint carrying the data unhalted and the host reading a
+        // status that never changes, and a packet size larger than the buffer
+        // here is one the driver refuses on every read.  Both are taken from
+        // the endpoints so neither can be got wrong.
+        {
+            let (out, r#in) = (*ep_out.info(), *ep_in.info());
+            let mps = out
+                .max_packet_size
+                .min(r#in.max_packet_size)
+                .min(PACKET_LEN as u16);
+            self.lock(|i| i.xport.adopt(out.addr.into(), r#in.addr.into(), mps));
+        }
+
         let mut packet = [0u8; PACKET_LEN];
         loop {
             let action = self.lock(|i| {
@@ -241,7 +263,7 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                         // waited for, and a packet the bus never carried is not
                         // reported as one that went.
                         Ok(()) => match self.await_collection().await {
-                            Collection::Taken => self.lock(|i| i.core.on_tx(n as u32)),
+                            Collection::Taken => self.lock(|i| i.core.on_tx()),
                             // A packet no host took is not one the protocol
                             // hears about.
                             Collection::Withdrawn | Collection::Gone => {}
@@ -254,8 +276,7 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
                     match ep_out.read(&mut packet).await {
                         Ok(n) => self.lock(|i| {
                             i.xport.rx.write(&packet[..n]);
-                            let available = i.xport.rx.len() as u32;
-                            i.core.on_rx(&mut i.xport, available);
+                            i.core.on_rx(&mut i.xport);
                         }),
                         Err(_) => yield_now().await,
                     }
@@ -280,7 +301,7 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
         self.lock(|i| {
             let (rx_len, tx_len) = i.xport.queued();
             Diagnostics {
-                state: i.core.state() as u8,
+                state: i.core.state(),
                 rx_len: rx_len as u16,
                 tx_len: tx_len as u16,
                 halted_out: i.xport.halted_dir(picobootx::Direction::Out),
@@ -290,7 +311,7 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
         })
     }
 
-    fn lock<R>(&self, f: impl FnOnce(&mut Inner<'a, O, C, H>) -> R) -> R {
+    fn lock<R>(&self, f: impl FnOnce(&mut Inner<'a, O, C, E>) -> R) -> R {
         f(&mut self.inner.borrow_mut())
     }
 
@@ -347,15 +368,15 @@ impl<'a, O: Ops, C: Custom, H: Halt> Picoboot<'a, O, C, H> {
     }
 }
 
-/// The control endpoint's half of a [`Picoboot`].
+/// The control endpoint's half of a [`PicobootClass`].
 ///
 /// Hand it to `embassy_usb::Builder::handler`.  It holds no state of its own —
-/// everything it touches belongs to the `Picoboot` it came from.
-pub struct ControlHandler<'p, 'a, O: Ops, C: Custom, H: Halt> {
-    dev: &'p Picoboot<'a, O, C, H>,
+/// everything it touches belongs to the `PicobootClass` it came from.
+pub struct ControlHandler<'p, 'a, O: Ops, C: Custom, E: EndpointControl> {
+    dev: &'p PicobootClass<'a, O, C, E>,
 }
 
-impl<O: Ops, C: Custom, H: Halt> Handler for ControlHandler<'_, '_, O, C, H> {
+impl<O: Ops, C: Custom, E: EndpointControl> Handler for ControlHandler<'_, '_, O, C, E> {
     fn control_out(&mut self, req: UsbRequest, data: &[u8]) -> Option<OutResponse> {
         let _ = data;
         let req = translate(req);

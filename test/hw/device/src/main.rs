@@ -31,7 +31,7 @@ use embassy_usb::{Builder, Config, Handler};
 
 use picobootx::wire::FLASH_PAGE_SIZE;
 use picobootx::{Endpoints, NoCustom, Reboot};
-use picobootx_embassy::{Picoboot, Rp2350Halt};
+use picobootx_embassy::{PicobootClass, Rp2350EndpointControl};
 use picobootx_rp2350::{Rp2350, reboot_execute};
 
 bind_interrupts!(struct Irqs {
@@ -102,7 +102,7 @@ const REBOOT_TYPE_BOOTSEL: u32 = 0x2;
 const REBOOT_DELAY_MS: u32 = 50;
 
 struct Bootsel<'d, 'a> {
-    picoboot: &'d Picoboot<'a, Rp2350, NoCustom, Rp2350Halt>,
+    picoboot: &'d PicobootClass<'a, Rp2350, NoCustom, Rp2350EndpointControl>,
     diag: [u8; DIAG_LEN],
     scratch: [u8; SCRATCH_REPLY_LEN],
 }
@@ -154,7 +154,7 @@ impl Handler for Bootsel<'_, '_> {
 
         let d = self.picoboot.diagnostics();
         self.diag = [
-            d.state,
+            d.state as u8,
             u8::from(d.halted_out),
             u8::from(d.halted_in),
             u8::from(d.in_flight),
@@ -193,7 +193,7 @@ async fn main(_spawner: Spawner) {
     // No commands of this device's own.  The refusal the test needs comes from
     // the standard read, which the RP2350 defaults refuse for an address
     // outside ROM, flash or SRAM, so nothing here has to invent one.
-    let picoboot = Picoboot::new(
+    let picoboot = PicobootClass::new(
         Rp2350,
         NoCustom,
         Some(&mut flash_page),
@@ -202,7 +202,7 @@ async fn main(_spawner: Spawner) {
             r#in: EP_IN,
         },
         MAX_PACKET_SIZE,
-        Rp2350Halt,
+        Rp2350EndpointControl,
     );
     let mut handler = picoboot.handler();
     let mut bootsel = Bootsel {

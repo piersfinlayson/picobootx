@@ -12,7 +12,7 @@
 use picobootx::wire::{CMD_LEN, DIR_IN, MAGIC, STATUS_LEN};
 use picobootx::{
     Command, Control, Custom, Direction, Endpoints, Filled, NoCustom, Ops, Picoboot, Reboot,
-    Recipient, Request, RequestType, Stage, State, Status, Transport,
+    Recipient, Request, RequestType, Result, Stage, State, Status, Transport,
 };
 
 const EP_OUT: u8 = 0x03;
@@ -94,10 +94,8 @@ impl Transport for Wire {
         n as u32
     }
 
-    fn tx_flush(&mut self) -> u32 {
-        let n = self.fifo.len();
+    fn tx_flush(&mut self) {
         self.sent.append(&mut self.fifo);
-        n as u32
     }
 
     fn tx_clear(&mut self) {
@@ -264,7 +262,7 @@ impl Custom for Overreporting {
         Ok(())
     }
 
-    fn fill(&mut self, cmd: &Command, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
+    fn fill(&mut self, cmd: &Command, buf: &mut [u8]) -> Result<Filled> {
         let _ = cmd;
         buf.fill(0x5a);
         Ok(Filled::Done(buf.len() + self.over))
@@ -337,7 +335,7 @@ fn the_operations_stay_reachable_once_the_protocol_holds_them() {
     pb.poll(&mut wire);
     assert_eq!(pb.state(), State::AwaitZlp);
     assert_eq!(wire.acks, 1);
-    pb.on_tx(0);
+    pb.on_tx();
     assert_eq!(pb.state(), State::Idle);
 
     // Reach past the protocol and change the device's mind.  The accessor has
@@ -434,7 +432,7 @@ fn a_device_that_writes_no_reboot_answers_and_stays_where_it_is() {
     assert_eq!(wire.acks, 1);
 
     // The acknowledgement has gone, which is when the reboot would happen.
-    pb.on_tx(0);
+    pb.on_tx();
     assert_eq!(pb.state(), State::Idle);
 
     // Still serving, because nothing rebooted.
@@ -455,7 +453,7 @@ fn a_device_that_writes_no_reboot_answers_and_stays_where_it_is() {
     pb.poll(&mut wire);
     assert!(pb.ops().went.is_none());
 
-    pb.on_tx(0);
+    pb.on_tx();
     let went = pb.ops().went.expect("the reboot was not run");
     assert_eq!(went.flags, 2);
     assert_eq!(went.delay_ms, 50);

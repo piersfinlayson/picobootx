@@ -20,8 +20,8 @@ export RUSTDOCFLAGS="-D warnings"
 echo "Documenting the library and the crates around it"
 (cd rust && cargo doc --workspace --no-deps)
 
-# Again for the part, because picobootx-embassy's Rp2350Halt and the whole of
-# picobootx-rp2350's usb module are compiled only there.  Documenting on this
+# Again for the part, because picobootx-embassy's Rp2350EndpointControl and the
+# whole of picobootx-rp2350's usb module are compiled only there.  Documenting on this
 # machine alone leaves both unread, and docs.rs renders the part's build - so a
 # broken link in either would be found by the world rather than here.
 echo "Documenting the parts that exist only in a build for the part"

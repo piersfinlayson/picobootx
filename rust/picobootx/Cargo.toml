@@ -4,12 +4,13 @@
 
 [package]
 name = "picobootx"
-version = "0.2.0"
+version = "0.1.0"
 description = "Device-side PICOBOOT protocol, for firmware that is not a bootloader"
 keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
 categories = ["embedded", "no-std"]
 readme = "README.md"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

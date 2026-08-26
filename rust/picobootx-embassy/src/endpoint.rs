@@ -2,9 +2,9 @@
 //
 // MIT License
 
-//! Halting a bulk endpoint, which embassy-usb does not hand out.
+//! The bulk endpoint controls embassy-usb does not hand out.
 
-/// The halt control of picoboot's two bulk endpoints.
+/// The controls picoboot's two bulk endpoints need and embassy-usb keeps.
 ///
 /// picoboot reports a refusal by halting both of them and answering
 /// `GET_COMMAND_STATUS` with the reason, and the host puts the pipe back with
@@ -18,9 +18,10 @@
 /// `UsbDevice` owns and does not lend out, and
 /// `embassy_usb_driver::Endpoint` offers only `info` and `wait_enabled`.  So
 /// the implementation comes from below the driver, from whoever knows which
-/// part is under it.  On an RP2350 that is `Rp2350Halt`, behind this crate's
-/// `rp2350` feature, and on another part it is the device's to write.
-pub trait Halt {
+/// part is under it.  On an RP2350 that is `Rp2350EndpointControl`, behind
+/// this crate's `rp2350` feature, and on another part it is the device's to
+/// write.
+pub trait EndpointControl {
     /// Whether the endpoint at this address is halted.
     fn is_stalled(&self, ep_addr: u8) -> bool;
 
@@ -52,7 +53,7 @@ pub trait Halt {
     /// offering the buffer.  The host never saw the packet and is still waiting
     /// for its number, so the toggle goes back to what it was rather than
     /// forward to the next one or back to DATA0 — the latter is what a cleared
-    /// halt calls for, and is [`Halt::resync`]'s job.
+    /// halt calls for, and is [`EndpointControl::resync`]'s job.
     ///
     /// Doing nothing is the right answer where no packet is armed.
     fn retract(&mut self, ep_addr: u8);
@@ -68,7 +69,7 @@ pub trait Halt {
     fn in_flight(&self, ep_addr: u8) -> bool;
 }
 
-/// The RP2350's [`Halt`], behind the `rp2350` feature.
+/// The RP2350's [`EndpointControl`], behind the `rp2350` feature.
 ///
 /// Every embassy device on an RP2350 answers these the same way, by
 /// reaching the USB controller's own endpoint buffer control words, so this is
@@ -81,10 +82,10 @@ pub trait Halt {
 /// rather than half-working.
 #[cfg(all(feature = "rp2350", target_os = "none"))]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Rp2350Halt;
+pub struct Rp2350EndpointControl;
 
 #[cfg(all(feature = "rp2350", target_os = "none"))]
-impl Halt for Rp2350Halt {
+impl EndpointControl for Rp2350EndpointControl {
     fn is_stalled(&self, ep_addr: u8) -> bool {
         picobootx_rp2350::usb::is_stalled(ep_addr)
     }

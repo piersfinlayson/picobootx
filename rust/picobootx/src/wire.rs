@@ -60,7 +60,12 @@ const fn info_max_words() -> usize {
 }
 
 /// The 32 bytes a host sends to start a command.
-#[repr(C, packed)]
+///
+/// Laid out as C lays it out, which for these fields is the wire's own order
+/// with nothing between them.  It is not packed: packing would remove no byte
+/// here, and it would make every field one no caller may take a reference to,
+/// which is a tax on the integrator this struct is handed to.
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Command {
     /// `MAGIC`, or the integrator's own for a custom command.

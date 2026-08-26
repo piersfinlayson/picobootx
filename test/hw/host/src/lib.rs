@@ -172,21 +172,16 @@ impl Diagnostics {
             && self.tx == 0
     }
 
-    /// `picobootx::State::Idle`.  Named here because the discriminant crosses
-    /// the wire as a number and nothing else on this side gives it a meaning.
-    pub const IDLE: u8 = 0;
+    /// `picobootx::State::Idle`, as the byte the device reports.
+    pub const IDLE: u8 = picobootx::State::Idle as u8;
 
-    fn state_name(&self) -> &'static str {
-        match self.state {
-            0 => "Idle",
-            1 => "DataOut",
-            2 => "DataIn",
-            3 => "CustomIn",
-            4 => "AwaitZlp",
-            5 => "AwaitAck",
-            6 => "Stalled",
-            _ => "?",
-        }
+    /// The state the byte names, or `None` for one no state has.
+    ///
+    /// The discriminant crosses the wire as a number, and `picobootx` is what
+    /// gives it a meaning - naming the seven again here would be a second copy
+    /// to keep in step.
+    pub fn state(&self) -> Option<picobootx::State> {
+        picobootx::State::try_from(self.state).ok()
     }
 }
 
@@ -195,7 +190,8 @@ impl fmt::Display for Diagnostics {
         write!(
             f,
             "state={} halted_out={} halted_in={} in_flight={} rx={} tx={}",
-            self.state_name(),
+            self.state()
+                .map_or_else(|| String::from("?"), |s| format!("{s:?}")),
             self.halted_out,
             self.halted_in,
             self.in_flight,

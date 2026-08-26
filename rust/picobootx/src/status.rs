@@ -48,5 +48,36 @@ pub enum Status {
     UnsupportedMod = 17,
 }
 
-/// What a callback returns: nothing, or the status the command is refused with.
-pub type Result = core::result::Result<(), Status>;
+impl core::fmt::Display for Status {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let s = match self {
+            Self::Ok => "ok",
+            Self::UnknownCmd => "unknown command",
+            Self::InvalidCmdLength => "invalid command length",
+            Self::InvalidTransferLen => "invalid transfer length",
+            Self::InvalidAddress => "invalid address",
+            Self::BadAlignment => "bad alignment",
+            Self::InterleavedWrite => "interleaved write",
+            Self::Rebooting => "rebooting",
+            Self::UnknownError => "unknown error",
+            Self::InvalidState => "invalid state",
+            Self::NotPermitted => "not permitted",
+            Self::InvalidArg => "invalid argument",
+            Self::BufferTooSmall => "buffer too small",
+            Self::PreconditionNotMet => "precondition not met",
+            Self::ModifiedData => "modified data",
+            Self::InvalidData => "invalid data",
+            Self::NotFound => "not found",
+            Self::UnsupportedMod => "unsupported modification",
+        };
+        f.write_str(s)
+    }
+}
+
+impl core::error::Error for Status {}
+
+/// What a callback returns: what the call produced, or the status the command
+/// is refused with.
+///
+/// Most of them produce nothing, so `Result` on its own means `Result<()>`.
+pub type Result<T = ()> = core::result::Result<T, Status>;

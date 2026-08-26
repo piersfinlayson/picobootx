@@ -57,8 +57,8 @@ impl Transport for VendorTransport {
         unsafe { picoboot_vendor_write(buf.as_ptr().cast::<c_void>(), buf.len() as u32) }
     }
 
-    fn tx_flush(&mut self) -> u32 {
-        unsafe { picoboot_vendor_write_flush() }
+    fn tx_flush(&mut self) {
+        unsafe { picoboot_vendor_write_flush() };
     }
 
     fn tx_clear(&mut self) {

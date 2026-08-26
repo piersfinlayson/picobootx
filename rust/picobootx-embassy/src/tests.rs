@@ -38,10 +38,10 @@ use embassy_usb_driver::{
 };
 
 use picobootx::wire::{CMD_LEN, DIR_IN, MAGIC};
-use picobootx::{NoCustom, Ops, Reboot, Result as PbResult, Status};
+use picobootx::{NoCustom, Ops, Reboot, Result as PbResult, State, Status};
 
-use crate::Picoboot;
-use crate::halt::Halt;
+use crate::PicobootClass;
+use crate::endpoint::EndpointControl;
 use picobootx::Endpoints;
 
 const EP_OUT: u8 = 0x01;
@@ -66,7 +66,7 @@ struct Bus {
     /// Packets the device has written, in order.
     to_host: Vec<Vec<u8>>,
     /// Whether the last packet written is still uncollected, which is what
-    /// `Halt::in_flight` reports.
+    /// `EndpointControl::in_flight` reports.
     in_flight: bool,
     stalled_out: bool,
     stalled_in: bool,
@@ -208,9 +208,9 @@ impl EndpointIn for FakeIn {
 // The halt control
 // ---------------------------------------------------------------------------
 
-struct FakeHalt(Rc<RefCell<Bus>>);
+struct FakeEndpointControl(Rc<RefCell<Bus>>);
 
-impl Halt for FakeHalt {
+impl EndpointControl for FakeEndpointControl {
     fn is_stalled(&self, ep_addr: u8) -> bool {
         let bus = self.0.borrow();
         if ep_addr & 0x80 == 0 {
@@ -352,11 +352,11 @@ fn step(fut: &mut core::pin::Pin<&mut impl Future>, times: usize) {
 fn device(
     bus: &Rc<RefCell<Bus>>,
 ) -> (
-    Picoboot<'static, MemOps, NoCustom, FakeHalt>,
+    PicobootClass<'static, MemOps, NoCustom, FakeEndpointControl>,
     FakeOut,
     FakeIn,
 ) {
-    let picoboot = Picoboot::new(
+    let picoboot = PicobootClass::new(
         MemOps::new(bus),
         NoCustom,
         None,
@@ -365,7 +365,7 @@ fn device(
             r#in: EP_IN,
         },
         MAX_PACKET,
-        FakeHalt(Rc::clone(bus)),
+        FakeEndpointControl(Rc::clone(bus)),
     );
     let ep_out = FakeOut {
         bus: Rc::clone(bus),
@@ -746,7 +746,11 @@ fn diagnostics_report_what_the_protocol_is_doing() {
     let (picoboot, ep_out, ep_in) = device(&bus);
 
     let idle = picoboot.diagnostics();
-    assert_eq!(idle.state, 0, "a device with nothing to do is not idle");
+    assert_eq!(
+        idle.state,
+        State::Idle,
+        "a device with nothing to do is not idle"
+    );
     assert!(!idle.halted_out && !idle.halted_in);
     assert_eq!((idle.rx_len, idle.tx_len), (0, 0));
 
@@ -779,7 +783,11 @@ fn a_bus_reset_drops_what_was_queued() {
     picoboot.handler().reset();
 
     let after = picoboot.diagnostics();
-    assert_eq!(after.state, 0, "a reset left the protocol where it was");
+    assert_eq!(
+        after.state,
+        State::Idle,
+        "a reset left the protocol where it was"
+    );
     assert_eq!(after.rx_len, 0, "a reset left the queue holding something");
 }
 
@@ -812,7 +820,7 @@ fn a_packet_left_by_a_bus_that_went_away_is_not_counted_as_sent() {
     // controller.
     assert_ne!(
         picoboot.diagnostics().state,
-        0,
+        State::Idle,
         "the protocol finished a transfer the host never took"
     );
     assert!(
@@ -1051,7 +1059,7 @@ fn the_hosts_completion_packet_returns_the_device_to_idle() {
     step(&mut fut, STEPS);
     assert_eq!(
         picoboot.diagnostics().state,
-        0,
+        State::Idle,
         "the device did not go back to waiting for a command"
     );
 

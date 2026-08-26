@@ -24,11 +24,11 @@ dependencies = [
 
 [[package]]
 name = "picobootx"
-version = "0.2.0"
+version = "0.1.0"
 
 [[package]]
 name = "picobootx-rp2350"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "picobootx",
 ]

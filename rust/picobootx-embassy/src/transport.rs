@@ -12,8 +12,8 @@
 
 use picobootx::{Direction, Transport};
 
+use crate::endpoint::EndpointControl;
 use crate::fifo::Fifo;
-use crate::halt::Halt;
 
 /// How many bytes the receive queue holds.
 ///
@@ -28,10 +28,10 @@ const RX_LEN: usize = 128;
 /// where a device-to-host transfer is split.
 const TX_LEN: usize = 64;
 
-pub(crate) struct Xport<H: Halt> {
+pub(crate) struct Xport<E: EndpointControl> {
     pub(crate) rx: Fifo<RX_LEN>,
     tx: Fifo<TX_LEN>,
-    halt: H,
+    ep_ctl: E,
     ep_out: u8,
     ep_in: u8,
     max_packet_size: u16,
@@ -44,12 +44,12 @@ pub(crate) struct Xport<H: Halt> {
     owed_in: bool,
 }
 
-impl<H: Halt> Xport<H> {
-    pub(crate) const fn new(halt: H, ep_out: u8, ep_in: u8, max_packet_size: u16) -> Self {
+impl<E: EndpointControl> Xport<E> {
+    pub(crate) const fn new(ep_ctl: E, ep_out: u8, ep_in: u8, max_packet_size: u16) -> Self {
         Self {
             rx: Fifo::new(),
             tx: Fifo::new(),
-            halt,
+            ep_ctl,
             ep_out,
             ep_in,
             max_packet_size,
@@ -65,6 +65,23 @@ impl<H: Halt> Xport<H> {
         }
     }
 
+    /// Take the addresses and the packet size from the endpoints themselves.
+    ///
+    /// `PicobootClass::new` is told all three before the endpoints exist to be
+    /// asked, because the control handler needs them and may be reached first.
+    /// What the driver allocated is what the halt control has to name and what
+    /// a packet has to be split at, so once the endpoints are in hand they are
+    /// the answer.  A debug build says so when the two disagree, and a release
+    /// build follows the endpoints.
+    pub(crate) fn adopt(&mut self, ep_out: u8, ep_in: u8, max_packet_size: u16) {
+        debug_assert_eq!(self.ep_out, ep_out);
+        debug_assert_eq!(self.ep_in, ep_in);
+        debug_assert_eq!(self.max_packet_size, max_packet_size);
+        self.ep_out = ep_out;
+        self.ep_in = ep_in;
+        self.max_packet_size = max_packet_size;
+    }
+
     /// The largest packet either endpoint carries.
     pub(crate) fn max_packet_size(&self) -> usize {
         usize::from(self.max_packet_size)
@@ -77,18 +94,18 @@ impl<H: Halt> Xport<H> {
 
     /// Whether one named endpoint is halted, rather than either of them.
     pub(crate) fn halted_dir(&self, dir: Direction) -> bool {
-        self.halt.is_stalled(self.addr(dir))
+        self.ep_ctl.is_stalled(self.addr(dir))
     }
 
     /// Whether either endpoint is halted, which is when nothing moves.
     pub(crate) fn halted(&self) -> bool {
-        self.halt.is_stalled(self.ep_out) || self.halt.is_stalled(self.ep_in)
+        self.ep_ctl.is_stalled(self.ep_out) || self.ep_ctl.is_stalled(self.ep_in)
     }
 
     /// Whether a packet armed on the device-to-host endpoint has yet to be
     /// taken by the host.
     pub(crate) fn in_flight(&self) -> bool {
-        self.halt.in_flight(self.ep_in)
+        self.ep_ctl.in_flight(self.ep_in)
     }
 
     /// Take one packet of what the protocol has queued for the host.
@@ -110,10 +127,10 @@ impl<H: Halt> Xport<H> {
     pub(crate) fn resync(&mut self) {
         let mps = self.max_packet_size;
         if core::mem::take(&mut self.owed_out) {
-            self.halt.resync(self.ep_out, mps);
+            self.ep_ctl.resync(self.ep_out, mps);
         }
         if core::mem::take(&mut self.owed_in) {
-            self.halt.resync(self.ep_in, mps);
+            self.ep_ctl.resync(self.ep_in, mps);
         }
     }
 
@@ -123,7 +140,7 @@ impl<H: Halt> Xport<H> {
     /// controller to fill rather than holding anything the host has yet to
     /// see, so there is nothing there to take back.
     pub(crate) fn retract_in(&mut self) {
-        self.halt.retract(self.ep_in);
+        self.ep_ctl.retract(self.ep_in);
     }
 
     /// Drop whatever both queues are holding, and whatever either endpoint is
@@ -136,7 +153,7 @@ impl<H: Halt> Xport<H> {
     }
 }
 
-impl<H: Halt> Transport for Xport<H> {
+impl<E: EndpointControl> Transport for Xport<E> {
     fn rx_available(&self) -> u32 {
         self.rx.len() as u32
     }
@@ -159,11 +176,8 @@ impl<H: Halt> Transport for Xport<H> {
 
     // Sending is the driver task's, and it takes whatever the queue holds as
     // soon as it next runs, which is after the call that queued it returns.
-    // So there is nothing for a flush to start, and what it reports is what is
-    // waiting to go.
-    fn tx_flush(&mut self) -> u32 {
-        self.tx.len() as u32
-    }
+    // So there is nothing here for a flush to start.
+    fn tx_flush(&mut self) {}
 
     fn tx_clear(&mut self) {
         self.tx.clear();
@@ -174,7 +188,7 @@ impl<H: Halt> Transport for Xport<H> {
     }
 
     fn is_stalled(&self, dir: Direction) -> bool {
-        self.halt.is_stalled(self.addr(dir))
+        self.ep_ctl.is_stalled(self.addr(dir))
     }
 
     // Unhalting drops what the endpoint's queue is holding as well, so a
@@ -183,7 +197,7 @@ impl<H: Halt> Transport for Xport<H> {
     // for the refusal is answered over the control endpoint and the queues are
     // not read again until the host puts the pipe back.
     fn set_stalled(&mut self, dir: Direction, stalled: bool) {
-        self.halt.set_stalled(self.addr(dir), stalled);
+        self.ep_ctl.set_stalled(self.addr(dir), stalled);
         if stalled {
             // Halting is what leaves an endpoint owing a resync.  Clearing the
             // halt does not settle it — the toggle and the receive buffer are

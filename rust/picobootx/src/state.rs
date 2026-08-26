@@ -16,8 +16,12 @@ use crate::{Result, Status};
 ///
 /// The values are the C library's, so a conformance harness reads the same
 /// number from either.
+///
+/// Reported and not acted on, so it is `non_exhaustive`: a state added later
+/// is not a break for anyone reading this.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum State {
     /// Waiting for a command.
     Idle = 0,
@@ -33,6 +37,29 @@ pub enum State {
     AwaitAck = 5,
     /// Both endpoints halted, waiting to be asked why.
     Stalled = 6,
+}
+
+impl TryFrom<u8> for State {
+    type Error = u8;
+
+    /// The discriminant back to the state, for a reader that took it off a wire
+    /// or out of a diagnostic block.
+    ///
+    /// # Errors
+    ///
+    /// The value itself, when it names no state.
+    fn try_from(v: u8) -> core::result::Result<Self, u8> {
+        match v {
+            0 => Ok(Self::Idle),
+            1 => Ok(Self::DataOut),
+            2 => Ok(Self::DataIn),
+            3 => Ok(Self::CustomIn),
+            4 => Ok(Self::AwaitZlp),
+            5 => Ok(Self::AwaitAck),
+            6 => Ok(Self::Stalled),
+            other => Err(other),
+        }
+    }
 }
 
 /// The two bulk endpoint addresses, as the descriptor gives them.
@@ -561,7 +588,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         }
     }
 
-    fn fill(&mut self, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
+    fn fill(&mut self, buf: &mut [u8]) -> Result<Filled> {
         match self.cmd_id {
             CMD_READ => self.fill_read(buf),
             CMD_GET_INFO => self.fill_get_info(buf),
@@ -574,7 +601,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         }
     }
 
-    fn fill_read(&mut self, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
+    fn fill_read(&mut self, buf: &mut [u8]) -> Result<Filled> {
         let Xfer::Read { addr, remaining } = self.xfer else {
             // Unreachable: fill calls this only for a READ, and prepare_in set
             // Xfer::Read before a READ could start its data phase.
@@ -599,7 +626,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         })
     }
 
-    fn fill_get_info(&mut self, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
+    fn fill_get_info(&mut self, buf: &mut [u8]) -> Result<Filled> {
         let Xfer::GetInfo {
             mut remaining_flags,
             mut transfer_remaining,
@@ -668,7 +695,10 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         }
 
         while remaining_flags != 0 && transfer_remaining > 0 {
-            let flag = remaining_flags.isolate_lowest_one();
+            // The lowest set bit on its own.  Written out rather than
+            // through isolate_lowest_one, which is what the standard library
+            // calls this and would put the crate's minimum Rust at 1.97.
+            let flag = remaining_flags & remaining_flags.wrapping_neg();
             let Some((_, words)) = INFO_FLAGS.iter().copied().find(|(f, _)| *f == flag) else {
                 // A flag the device knows nothing about is dropped rather than
                 // answered, which is what the count in the header already said.
@@ -680,17 +710,14 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 save(self, remaining_flags, transfer_remaining, header_sent);
                 return Ok(Filled::NoRoom);
             }
-            let n = self.ops.get_info_sys(flag, &mut buf[..data_bytes])?;
-            if n != data_bytes {
-                return Err(Status::UnknownError);
-            }
+            self.ops.get_info_sys(flag, &mut buf[..data_bytes])?;
             remaining_flags &= !flag;
-            transfer_remaining = transfer_remaining.saturating_sub(n as u32);
+            transfer_remaining = transfer_remaining.saturating_sub(data_bytes as u32);
             save(self, remaining_flags, transfer_remaining, header_sent);
             return Ok(if remaining_flags == 0 && transfer_remaining == 0 {
-                Filled::Done(n)
+                Filled::Done(data_bytes)
             } else {
-                Filled::More(n)
+                Filled::More(data_bytes)
             });
         }
 
@@ -706,7 +733,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         })
     }
 
-    fn fill_otp(&mut self, buf: &mut [u8]) -> core::result::Result<Filled, Status> {
+    fn fill_otp(&mut self, buf: &mut [u8]) -> Result<Filled> {
         let Xfer::Otp {
             row,
             rows_remaining,
@@ -767,7 +794,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         }
     }
 
-    fn consume(&mut self, buf: &[u8]) -> core::result::Result<bool, Status> {
+    fn consume(&mut self, buf: &[u8]) -> Result<bool> {
         match self.cmd_id {
             CMD_WRITE => self.consume_write(buf),
             CMD_OTP_WRITE => self.consume_otp(buf),
@@ -779,7 +806,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         }
     }
 
-    fn consume_write(&mut self, buf: &[u8]) -> core::result::Result<bool, Status> {
+    fn consume_write(&mut self, buf: &[u8]) -> Result<bool> {
         let Xfer::Write {
             mut addr,
             expected,
@@ -838,7 +865,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         Ok(received == expected)
     }
 
-    fn consume_otp(&mut self, buf: &[u8]) -> core::result::Result<bool, Status> {
+    fn consume_otp(&mut self, buf: &[u8]) -> Result<bool> {
         let Xfer::Otp {
             row,
             rows_remaining,
@@ -901,8 +928,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     // -----------------------------------------------------------------
 
     /// Tell the protocol a transmission finished.
-    pub fn on_tx(&mut self, sent: u32) {
-        let _ = sent;
+    pub fn on_tx(&mut self) {
         if self.state != State::AwaitZlp {
             return;
         }
@@ -915,7 +941,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     }
 
     /// Tell the protocol bytes arrived on the receive endpoint.
-    pub fn on_rx<T: Transport>(&mut self, t: &mut T, available: u32) {
+    ///
+    /// How many is read from the transport rather than passed, so the count
+    /// acted on is the one the transport will hand over.
+    pub fn on_rx<T: Transport>(&mut self, t: &mut T) {
+        let available = t.rx_available();
         if available <= 1 {
             if self.state == State::AwaitAck {
                 // Both an empty packet and a single byte count as the host's

@@ -29,9 +29,7 @@ git push
 Locally:
 
 ```bash
-make test
-make test SANITIZE=1
-make example
+ci/local-checks.sh
 ```
 
 Then tag and push:
@@ -70,24 +68,17 @@ git pull
 git push
 ```
 
-Locally:
+Locally, the same one command:
 
 ```bash
-make test LIB=c
-make test LIB=rust
-make test-unit
-ci/check-ramfunc.sh
+ci/local-checks.sh
 ```
 
-and the lints and cross-builds the crates ship under:
-
-```bash
-(cd rust && cargo fmt --all -- --check)
-(cd rust && cargo clippy --workspace --all-targets --release -- -D warnings)
-(cd examples/embassy && cargo build --release)
-(cd test/hw/device && cargo build --release)
-(cd test/hw/host && cargo build --release)
-```
+It is every gate CI applies that this machine can apply too, the coverage gate
+among them - which is what catches a source nothing reaches, a floor with no
+file behind it, and a file renamed out from under the lists in `ci/`.  The two
+it leaves are the picotool and picoboot-rs bridges, which need Linux, vhci-hcd
+and root.
 
 Then publish.  One command takes all three, packages and verify-builds each,
 and uploads them in dependency order:

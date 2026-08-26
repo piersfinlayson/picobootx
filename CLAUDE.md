@@ -24,6 +24,12 @@ shipped hardware.
 - Hold the existing bar for comments and API documentation.  A comment states
   the contract, and must not date — no "currently", no "yet", no reference to
   work that has not landed.
+- **Run `ci/local-checks.sh` before saying a change is ready.**  It is every
+  gate CI applies that this machine can apply too, in CI's order, stopping at
+  the first failure.  A list of checks assembled by hand each time drifts from
+  what CI gates on, and what drops out is whatever was last inconvenient.  The
+  two it cannot run are the picotool and picoboot-rs bridges, which need Linux,
+  vhci-hcd and root.
 
 ## Writing
 
@@ -93,7 +99,9 @@ shipped hardware.
   below, and `coverage-unmeasured.txt` names the sources that carry no
   executable line, each with the reason.  `check-ramfunc.sh` and
   `ramfunc-probe/` link `picobootx-rp2350` into a bare-metal binary and check
-  where `.ramfunc` landed.
+  where `.ramfunc` landed.  `local-checks.sh` runs every gate CI applies that
+  this machine can apply too, and `rust-docs.sh` builds the crates' documents
+  with warnings as errors.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
 - `CHANGELOG.md` is the C's and `rust/CHANGELOG.md` the Rust crates'.

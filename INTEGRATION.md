@@ -1,4 +1,6 @@
-# Integration Guide
+# Integration Guide - the C library
+
+This is the C picobootx in [src](src) and [include](include).  The Rust crates in [rust](rust) are integrated by adding them to a `Cargo.toml`, and each carries its own documentation on [docs.rs](https://docs.rs/picobootx), with [examples/embassy](examples/embassy) a complete device built on them.
 
 picobootx is designed to be integrated in a larger embedded application, that includes USB.  picobootx was developed specifically to work with the tinyusb USB stack.  The guidance that follows assumes you are using tinyusb, but the general principles should apply to other USB stacks as well.
 

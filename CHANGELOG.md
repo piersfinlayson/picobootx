@@ -1,4 +1,8 @@
-# Changelog
+# Changelog — the C library
+
+This is the C library in [src](src) and [include](include).  The Rust crates in
+[rust](rust) carry their own versions and their own changelog, in
+[rust/CHANGELOG.md](rust/CHANGELOG.md).
 
 picobootx follows [semantic versioning](https://semver.org).  Releases before
 1.0.0 may change the API in a minor version.
@@ -10,24 +14,6 @@ release.
 
 ## Unreleased
 
-- Added the Rust `picobootx-embassy`, which serves picoboot on a device whose
-  USB stack is embassy-usb — a task driving the two bulk endpoints, a transport
-  over the queues it fills, and an `embassy_usb::Handler` for picoboot's control
-  requests.  [examples/embassy](examples/embassy) is a complete device built on
-  it.  Its `rp2350` feature supplies `Rp2350Halt`, the halt control embassy-usb
-  does not hand out, so a device on that part need not write it.  `INTERFACE
-  RESET` takes back a reply the host never collected, the way the RP2350 boot
-  ROM does, so a host that stops part way through does not leave the next one
-  reading a command behind.
-- `picobootx-rp2350` gained a `usb` module reaching the RP2350's endpoint
-  buffer controls, for a USB stack that does not lend out its own halt control.
-- The Rust `picobootx-rp2350` programs a flash page with execute-in-place left
-  and put back around the boot ROM call, from RAM with interrupts off, as it
-  already did for an erase.  Without that bracket the program wrote nothing and
-  reported success, which a host reads as an image written onto blank flash.
-- The Rust `picobootx-rp2350` needs `-C link-arg=-Tpicobootx.x` beside
-  `-Tlink.x` to place its flash erase and program routines in RAM.  Without it
-  they linked into flash and stopped part way through the operation.
 - [INTEGRATION.md](INTEGRATION.md) now says a C integrator's linker script and
   reset handler have to place and copy `.ramfunc`.
 - `picoboot_default_get_info_sys` read past its own buffer for a request of 17

@@ -96,6 +96,9 @@ shipped hardware.
   where `.ramfunc` landed.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
+- `CHANGELOG.md` is the C's and `rust/CHANGELOG.md` the Rust crates'.
+  `INTEGRATION.md` is the C's integration guide, `TESTING.md` what the suites
+  cover and how to run them, and `RELEASE.md` the release process for both.
 
 ## The two boundaries
 
@@ -465,12 +468,24 @@ device does not have.
 
 ## Versioning
 
-- `include/picobootx_version.h` carries the version, and `CHANGELOG.md` has a
-  section per release.  The release workflow refuses a tag that disagrees with
-  either.
-- Semantic versioning.  Before 1.0.0 a minor bump may change the API.
-- Tags are `vX.Y.Z`.  Pushing one runs the release workflow, which builds, runs
-  the suite, and creates the release from the CHANGELOG section.
+The C and the Rust are versioned and released independently, and a version
+number shared between them means nothing.  `RELEASE.md` is the process for both.
+
+- The C: `include/picobootx_version.h` carries the version, and `CHANGELOG.md`
+  has a section per release.  The release workflow refuses a tag that disagrees
+  with either.  Tags are `vX.Y.Z`, and pushing one runs that workflow, which
+  builds, runs the suite, and creates the GitHub release from the CHANGELOG
+  section.
+- The Rust: each crate carries its own version in its own `Cargo.toml`, and
+  `rust/CHANGELOG.md` has a section per crate.  They are published to crates.io
+  by hand and tagged `<crate>-vX.Y.Z`, one tag per crate.  No Rust tag starts
+  with `v`, so none of them reaches the release workflow — a GitHub release in
+  this repository is the C library.
+- `picobootx-rp2350` and `picobootx-embassy` put `picobootx`'s own types in
+  their signatures, so a consumer holding two versions of `picobootx` gets types
+  that do not unify.  A `picobootx` release moves both of them and their
+  requirements in `rust/Cargo.toml`.
+- Semantic versioning throughout.  Before 1.0.0 a minor bump may change the API.
 
 ## CI
 

@@ -12,7 +12,7 @@
 //! advisory commands and refuses everything else.  This is where that is held.
 
 use picobootx::wire::{CMD_LEN, DIR_IN, FLASH_PAGE_SIZE, MAGIC};
-use picobootx::{Command, Custom, Ecc, Exclusive, NoCustom, Ops, Reboot, State, Status};
+use picobootx::{Command, Custom, Ecc, Exclusive, Info, NoCustom, Ops, Reboot, State, Status};
 
 /// A device that writes no operation at all.
 struct Bare;
@@ -94,8 +94,14 @@ fn every_command_that_moves_data_is_refused_as_one_this_device_does_not_serve() 
     assert_eq!(d.otp_write_prepare(0, 1, Ecc::Raw), Err(Status::UnknownCmd));
     assert_eq!(d.otp_write(0, Ecc::Raw, &data), Err(Status::UnknownCmd));
 
-    assert_eq!(d.get_info_sys_prepare(0x0001), Err(Status::UnknownCmd));
-    assert_eq!(d.get_info_sys(0x0001, &mut out), Err(Status::UnknownCmd));
+    assert_eq!(
+        d.get_info_prepare(Info::Sys, 0x0001),
+        Err(Status::UnknownCmd)
+    );
+    assert_eq!(
+        d.get_info(Info::Sys, 0x0001, 0, &mut out),
+        Err(Status::UnknownCmd)
+    );
 
     assert_eq!(d.reboot_prepare(&reboot_args()), Err(Status::UnknownCmd));
 }

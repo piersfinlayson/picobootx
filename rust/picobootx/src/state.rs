@@ -7,9 +7,12 @@
 
 use crate::control::{Control, Recipient, Request, RequestType, Stage};
 use crate::control::{REQUEST_GET_CMD_STATUS, REQUEST_INTERFACE_RESET};
-use crate::ops::{Custom, Ecc, Exclusive, Filled, Ops, Reboot, Target};
+use crate::ops::{Custom, Ecc, Exclusive, Filled, Info, Ops, Reboot, Target};
 use crate::transport::{Direction, Transport};
-use crate::wire::{CMD_LEN, Command, DIR_IN, FLASH_PAGE_SIZE, INFO_FLAGS, MAGIC, StatusBlock};
+use crate::wire::{
+    CMD_LEN, Command, DIR_IN, FLASH_PAGE_SIZE, GET_INFO_MAX_LEN, INFO_MAX_ANSWER_WORDS, MAGIC,
+    StatusBlock,
+};
 use crate::{Result, Status};
 
 /// What the state machine is doing.
@@ -86,18 +89,6 @@ const CMD_READ: u8 = 0x84;
 const CMD_GET_INFO: u8 = 0x8b;
 const CMD_OTP_READ: u8 = 0x8c;
 
-const INFO_SYS: u8 = 0x01;
-const INFO_PARTITION: u8 = 0x02;
-
-// The partition info type answers with this, whatever the device is.
-const PARTITION_DATA: [u32; 5] = [
-    0x0000_0004,
-    0x0000_0031,
-    0x0000_0000,
-    0xffff_e000,
-    0xfc07_8000,
-];
-
 // How a command's declared transfer length is checked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TLen {
@@ -171,10 +162,15 @@ enum Xfer {
         remaining: u32,
     },
     GetInfo {
-        remaining_flags: u32,
+        info: Info,
+        // dParam0, handed back to every get_info call.
+        param0: u32,
         transfer_remaining: u32,
-        header_sent: bool,
-        is_partition: bool,
+        // Words the answer is, as get_info_prepare said, and how many have gone.
+        answer_words: u8,
+        answer_sent: u8,
+        // Whether the leading count word has gone.
+        count_sent: bool,
     },
     Otp {
         row: u16,
@@ -207,6 +203,11 @@ pub struct Picoboot<'a, O: Ops, C: Custom = crate::ops::NoCustom> {
     cmd_id: u8,
     status: StatusBlock,
     xfer: Xfer,
+    // Bytes of the current device to host transfer the host has still to be
+    // sent, counting down from its declared length.  task_data_in offers a fill
+    // no more than this, so no fill can put more on the bulk pipe than the host
+    // asked for.
+    data_in_remaining: u32,
 }
 
 impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
@@ -233,6 +234,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             cmd_id: 0,
             status: StatusBlock::new(),
             xfer: Xfer::None,
+            data_in_remaining: 0,
         }
     }
 
@@ -375,7 +377,10 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             Category::Async => self.action_async(t, cmd),
             Category::Deferred => self.action_deferred(t, cmd),
             Category::DataIn => match self.prepare_in(cmd) {
-                Ok(()) => self.state = State::DataIn,
+                Ok(()) => {
+                    self.data_in_remaining = tlen;
+                    self.state = State::DataIn;
+                }
                 Err(e) => self.stall(t, e),
             },
             Category::DataOut => match self.prepare_out(cmd) {
@@ -450,23 +455,39 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             }
             CMD_GET_INFO => {
                 let tlen = cmd.transfer_len;
-                if tlen == 0 || tlen & 0x3 != 0 || tlen > 256 {
+                if tlen == 0 || tlen & 0x3 != 0 || tlen > GET_INFO_MAX_LEN {
                     return Err(Status::InvalidTransferLen);
                 }
-                let param0 = cmd.arg_u32(4);
-                let is_partition = match cmd.args[0] {
-                    INFO_SYS => {
-                        self.ops.get_info_sys_prepare(param0)?;
-                        false
-                    }
-                    INFO_PARTITION => true,
-                    _ => return Err(Status::UnknownCmd),
+                // The four types the protocol defines.  Gating here rather than
+                // in the callback means a type outside them is refused without
+                // reaching an integrator, and Ops only ever sees a named one.
+                // GET_INFO itself was recognised, so the command identifier was
+                // not the problem — the type asked for is outside the range the
+                // library serves, which is what InvalidArg says.
+                let Some(info) = Info::from_wire(cmd.args[0]) else {
+                    return Err(Status::InvalidArg);
                 };
+                let param0 = cmd.arg_u32(4);
+
+                let words = self.ops.get_info_prepare(info, param0)?;
+                if words as usize > INFO_MAX_ANSWER_WORDS {
+                    return Err(Status::UnknownError);
+                }
+                // The whole answer or none of it, judged against the answer this
+                // device says it will actually give rather than against what was
+                // asked for.  BufferTooSmall is what PICOBOOT carries that
+                // refusal in.
+                if tlen < (1 + words) * 4 {
+                    return Err(Status::BufferTooSmall);
+                }
+
                 self.xfer = Xfer::GetInfo {
-                    remaining_flags: if is_partition { 0 } else { param0 },
+                    info,
+                    param0,
                     transfer_remaining: tlen,
-                    header_sent: false,
-                    is_partition,
+                    answer_words: words as u8,
+                    answer_sent: 0,
+                    count_sent: false,
                 };
                 Ok(())
             }
@@ -529,6 +550,14 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     // Device to host
     // -----------------------------------------------------------------
 
+    // Drives a device to host data phase, calling fill until the transfer
+    // completes or the endpoint runs out of room.
+    //
+    // The host is sent the length it declared and no more (RP2350 datasheet
+    // 5.6.4), and that is held here rather than in each fill: the room offered
+    // is never more than the transfer has left, so no fill can put a further
+    // byte on the pipe — an integrator's own fill included, which is the one
+    // the library cannot reach into.
     fn task_data_in<T: Transport>(&mut self, t: &mut T) {
         let mut buf = [0u8; 64];
         loop {
@@ -537,7 +566,15 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 t.tx_flush();
                 return;
             }
-            let max_len = core::cmp::min(space as usize, buf.len());
+            let mut max_len = core::cmp::min(space as usize, buf.len());
+            // Whether what is left of the transfer, rather than the endpoint,
+            // is what limits the room on offer.  If it is, this is as much room
+            // as there will ever be, and a fill that declines it is asking for
+            // more than the host made room for.
+            let transfer_capped = self.data_in_remaining as usize <= max_len;
+            if transfer_capped {
+                max_len = self.data_in_remaining as usize;
+            }
 
             let filled = if self.state == State::CustomIn {
                 match self.xfer {
@@ -564,7 +601,9 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             };
 
             // The count comes from the integrator, and a count larger than the
-            // buffer it was handed would read past the end of it.
+            // room it was offered would read past the end of the buffer it was
+            // handed and would take the counter below zero, leaving the clamp
+            // above meaningless for the rest of the transfer.
             if written > max_len {
                 self.stall(t, Status::UnknownError);
                 return;
@@ -574,6 +613,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 self.stall(t, Status::UnknownError);
                 return;
             }
+            self.data_in_remaining -= written as u32;
 
             if done {
                 t.tx_flush();
@@ -582,6 +622,13 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             }
 
             if written == 0 {
+                if transfer_capped {
+                    // The fill declined the whole of what the transfer has
+                    // left, and the room on offer cannot grow.  The host asked
+                    // for a length its answer does not fit in.
+                    self.stall(t, Status::BufferTooSmall);
+                    return;
+                }
                 t.tx_flush();
                 return;
             }
@@ -628,10 +675,12 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
 
     fn fill_get_info(&mut self, buf: &mut [u8]) -> Result<Filled> {
         let Xfer::GetInfo {
-            mut remaining_flags,
+            info,
+            param0,
             mut transfer_remaining,
-            mut header_sent,
-            is_partition,
+            answer_words,
+            mut answer_sent,
+            mut count_sent,
         } = self.xfer
         else {
             // Unreachable: fill calls this only for a GET_INFO, and prepare_in
@@ -641,31 +690,42 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             // LCOV_UNREACHABLE_STOP
         };
 
-        let save = |s: &mut Self, rf, tr, hs| {
+        let save = |s: &mut Self, tr, sent, cs| {
             s.xfer = Xfer::GetInfo {
-                remaining_flags: rf,
+                info,
+                param0,
                 transfer_remaining: tr,
-                header_sent: hs,
-                is_partition,
+                answer_words,
+                answer_sent: sent,
+                count_sent: cs,
             };
         };
 
+        // Unreachable.  prepare_in refuses a transfer length of zero before the
+        // command reaches a data phase, so the first call here always has bytes
+        // owed, and each of the three places below that takes the count down
+        // reports Done in the same call when it reaches zero — on which
+        // task_data_in leaves the data-in state.  So there is no call with
+        // nothing left to send.  The arm stays because the same guard opens all
+        // three data-in fills, and READ and OTP_READ do carry a zero-length
+        // transfer.
         if transfer_remaining == 0 {
+            // LCOV_UNREACHABLE_START
             return Ok(Filled::Done(0));
+            // LCOV_UNREACHABLE_STOP
         }
         if buf.len() < 4 {
             return Ok(Filled::NoRoom);
         }
 
-        if is_partition {
-            let word = PARTITION_DATA
-                .get(remaining_flags as usize)
-                .copied()
-                .unwrap_or(0);
-            buf[..4].copy_from_slice(&word.to_le_bytes());
-            remaining_flags += 1;
+        // The count of the significant words that follow.  This word is the
+        // library's, and everything after it is the device's answer, whatever
+        // shape its type gives that.
+        if !count_sent {
+            buf[..4].copy_from_slice(&u32::from(answer_words).to_le_bytes());
+            count_sent = true;
             transfer_remaining -= 4;
-            save(self, remaining_flags, transfer_remaining, header_sent);
+            save(self, transfer_remaining, answer_sent, count_sent);
             return Ok(if transfer_remaining == 0 {
                 Filled::Done(4)
             } else {
@@ -673,59 +733,42 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             });
         }
 
-        if !header_sent {
-            let words: u32 = INFO_FLAGS
-                .iter()
-                .filter(|(f, _)| remaining_flags & f != 0)
-                .map(|(_, w)| w)
-                .sum();
-            buf[..4].copy_from_slice(&words.to_le_bytes());
-            transfer_remaining -= 4;
-            header_sent = true;
-            let done = transfer_remaining == 0 || remaining_flags == 0;
-            if done {
-                transfer_remaining = 0;
+        // The answer, from where the last call left off.  The room offered is
+        // never more than the answer has left to give, so the callback cannot
+        // put a byte past what the count word promised.
+        if answer_sent < answer_words {
+            let owed = usize::from(answer_words - answer_sent) * 4;
+            let room = core::cmp::min(buf.len(), owed) & !3;
+            let written =
+                self.ops
+                    .get_info(info, param0, u32::from(answer_sent), &mut buf[..room])?;
+            // The count comes from the integrator.  More than the room offered
+            // would read past the end of buf, and a part word would leave
+            // at_word naming a boundary that is not one.
+            if written > room || written % 4 != 0 {
+                return Err(Status::UnknownError);
             }
-            save(self, remaining_flags, transfer_remaining, header_sent);
-            return Ok(if done {
-                Filled::Done(4)
+            answer_sent += (written / 4) as u8;
+            transfer_remaining -= written as u32;
+            save(self, transfer_remaining, answer_sent, count_sent);
+            return Ok(if transfer_remaining == 0 {
+                Filled::Done(written)
+            } else if written == 0 {
+                Filled::NoRoom
             } else {
-                Filled::More(4)
+                Filled::More(written)
             });
         }
 
-        while remaining_flags != 0 && transfer_remaining > 0 {
-            // The lowest set bit on its own.  Written out rather than
-            // through isolate_lowest_one, which is what the standard library
-            // calls this and would put the crate's minimum Rust at 1.97.
-            let flag = remaining_flags & remaining_flags.wrapping_neg();
-            let Some((_, words)) = INFO_FLAGS.iter().copied().find(|(f, _)| *f == flag) else {
-                // A flag the device knows nothing about is dropped rather than
-                // answered, which is what the count in the header already said.
-                remaining_flags &= !flag;
-                continue;
-            };
-            let data_bytes = (words * 4) as usize;
-            if buf.len() < data_bytes {
-                save(self, remaining_flags, transfer_remaining, header_sent);
-                return Ok(Filled::NoRoom);
-            }
-            self.ops.get_info_sys(flag, &mut buf[..data_bytes])?;
-            remaining_flags &= !flag;
-            transfer_remaining = transfer_remaining.saturating_sub(data_bytes as u32);
-            save(self, remaining_flags, transfer_remaining, header_sent);
-            return Ok(if remaining_flags == 0 && transfer_remaining == 0 {
-                Filled::Done(data_bytes)
-            } else {
-                Filled::More(data_bytes)
-            });
-        }
-
-        // Whatever the host still expects, and nothing left to say.
-        let chunk = core::cmp::min(transfer_remaining as usize, buf.len());
+        // Whatever the host still expects, and nothing left to say.  Padded in
+        // whole words, like everything else this reply carries, which is what
+        // keeps transfer_remaining a multiple of four: the call above declines
+        // room for less than a word, and a part word left behind here would
+        // leave it declining that room for the rest of the transfer.
+        let chunk = core::cmp::min(transfer_remaining as usize, buf.len()) & !3;
         buf[..chunk].fill(0);
         transfer_remaining -= chunk as u32;
-        save(self, remaining_flags, transfer_remaining, header_sent);
+        save(self, transfer_remaining, answer_sent, count_sent);
         Ok(if transfer_remaining == 0 {
             Filled::Done(chunk)
         } else {
@@ -920,6 +963,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         // fill is handed the command on every call, so it is kept here rather
         // than borrowed from a caller whose copy is about to go out of scope.
         self.xfer = Xfer::Custom(*cmd);
+        self.data_in_remaining = cmd.transfer_len;
         self.state = State::CustomIn;
     }
 

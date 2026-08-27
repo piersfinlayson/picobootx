@@ -47,14 +47,70 @@ _Static_assert(CFG_TUD_ENDPOINT0_SIZE == 64, "The picoboot protocol requires bMa
 // Size of pb_state_block_t in bytes. Use this to allocate storage without
 // needing to include picoboot_private.h. Verified by _Static_assert in
 // picoboot_private.h.
-#define PICOBOOT_STATE_SIZE    76u
+#define PICOBOOT_STATE_SIZE    80u
 
 #define FLASH_SECTOR_SIZE      4096u
 #define FLASH_PAGE_SIZE        256u
 #define FLASH_BLOCK_SIZE       65536u
 
+// The longest data phase GET_INFO accepts, in bytes.  The protocol requires
+// dTransferLength to be a multiple of four (RP2350 datasheet 5.6.4.11), and a
+// longer one is refused with PB_STATUS_INVALID_TRANSFER_LEN.
+#define PICOBOOT_GET_INFO_MAX_LEN 256u
+
+// The most words a GET_INFO answer can be: the longest transfer, less the count
+// word the library puts in front of the answer.  Scratch this size serves every
+// request the library accepts.
+#define PICOBOOT_INFO_MAX_ANSWER_WORDS \
+    ((PICOBOOT_GET_INFO_MAX_LEN / 4u) - 1u)
+
 // ---------------------------------------------------------------------------
 // GET_INFO info types
+//
+// Every type's reply is one shape: a word saying how many significant words
+// follow, then those words, then zeroes to fill dTransferLength (RP2350
+// datasheet 5.6.4.11).  The count word and the padding are the library's.
+// Everything between them is the device's answer, and its shape is the type's
+// business rather than the library's:
+//
+//   PB_INFO_SYS         the answer get_sys_info produces (5.4.8.17) — a first
+//                       word carrying the subset of dParam0 the device
+//                       answered, then the data for each of those flags in
+//                       flag order.
+//   PB_INFO_PARTITION   the answer get_partition_table_info produces
+//                       (5.4.8.16), in the same shape, from
+//                       dParam0 as flags_and_partition.
+//   PB_INFO_UF2_TARGET  the words 5.6.4.11 defines for it, from dParam0 as a
+//                       UF2 family id.  No leading flags word.
+//   PB_INFO_UF2_STATUS  the words 5.6.4.11 defines for it.  No leading flags
+//                       word, and no parameter.
+//
+// A device says which types it serves by refusing the rest from
+// picoboot_ops_t.get_info_prepare, with PB_STATUS_INVALID_ARG.  A type outside
+// this enumeration never reaches it — the library refuses that itself, with the
+// same status.
+//
+// What the RP2350 defaults in picobootx_impl.h answer, and what an integrator
+// writes for the rest:
+//
+//   PB_INFO_SYS         Served.  picoboot_default_get_info passes get_sys_info
+//                       through, so the flags this part cannot answer are
+//                       dropped by the ROM and the rest are still served.
+//   PB_INFO_PARTITION   Served, the same way, through
+//                       get_partition_table_info.
+//   PB_INFO_UF2_TARGET  Served, as nowhere.  A UF2 reaches a device by being
+//                       dragged onto a mass storage drive, and picobootx has
+//                       none and is told of none, so it has nowhere to name.
+//                       The answer is a target of -1 with the unpartitioned
+//                       space beside it, which get_partition_table_info
+//                       reports.  A device that does present such a drive
+//                       answers this itself.
+//   PB_INFO_UF2_STATUS  Not served — refused with PB_STATUS_INVALID_ARG.  It
+//                       reports a UF2 download in progress over the USB drive
+//                       the bootrom presents in BOOTSEL mode, and picobootx has
+//                       no equivalent of that drive, so there is no download for
+//                       it to report on.  An integrator whose device has one
+//                       answers it from that.
 // ---------------------------------------------------------------------------
 
 typedef enum {
@@ -192,10 +248,49 @@ typedef struct {
     pb_status_t (*enter_xip)(void *ctx);
     pb_status_t (*reboot2_prepare)(const pb_reboot2_args_t *args, void *ctx);
     void (*reboot2_execute)(const pb_reboot2_args_t *args, void *ctx);
-    pb_status_t (*get_info_sys)(
-        uint32_t flags,
+
+    // GET_INFO.  Both are needed: with either NULL, GET_INFO returns
+    // PB_STATUS_UNKNOWN_CMD, which is a device that does not serve it at all.
+    // A device that serves some types and not others refuses the rest from
+    // get_info_prepare with PB_STATUS_INVALID_ARG.
+    //
+    // get_info_prepare writes to *words how many words the answer to this
+    // request will be, before any of it goes.  That is the count word the
+    // library puts in front of the answer, and it is also what the library
+    // judges dTransferLength against: a transfer too short for the answer the
+    // device says it will give is refused with PB_STATUS_BUFFER_TOO_SMALL.
+    // Reporting more than PICOBOOT_INFO_MAX_ANSWER_WORDS halts the command with
+    // PB_STATUS_UNKNOWN_ERROR.  Reporting none is a valid answer, and sends a
+    // count of zero.
+    //
+    // get_info produces the answer, from at_word onwards, over as many calls as
+    // it takes.  type and param0 are handed back every time, so the callback
+    // needs to keep nothing between calls.  Write at most max_len bytes, always
+    // a whole number of words, and set *bytes_written to what was written:
+    //
+    //   *bytes_written > 0   data produced, more may follow
+    //   *bytes_written == 0  not enough room for the next piece, call again
+    //                        later with more
+    //
+    // max_len is never more than the answer has left to give, so the last call
+    // offers exactly the bytes still owed.  Writing more than max_len, or a
+    // count that is not a whole number of words, halts the command with
+    // PB_STATUS_UNKNOWN_ERROR and none of those bytes reaches the host.
+    //
+    // The library halts the command on a non-PB_STATUS_OK return from either,
+    // with that status, and the host reads it back with GET_COMMAND_STATUS.
+    pb_status_t (*get_info_prepare)(
+        pb_info_type_t type,
+        uint32_t param0,
+        uint32_t *words,
+        void *ctx
+    );
+    pb_status_t (*get_info)(
+        pb_info_type_t type,
+        uint32_t param0,
+        uint32_t at_word,
         uint8_t *buf,
-        uint32_t buf_len,
+        uint32_t max_len,
         uint32_t *bytes_written,
         void *ctx
     );
@@ -276,6 +371,12 @@ typedef struct {
 //
 // A non-PB_STATUS_OK return from either callback stalls the command with that
 // status, which the host retrieves via GET_COMMAND_STATUS.
+//
+// transfer_len is the whole of what the device may send, and an answer that
+// does not fit it belongs to dispatch to refuse, with
+// PB_STATUS_BUFFER_TOO_SMALL.  A transfer that reaches fill with an answer too
+// large for it is refused there instead, with the same status and once part of
+// the answer may already have gone to the host.
 typedef struct {
     uint32_t    magic;
 
@@ -303,6 +404,11 @@ typedef struct {
     //   *done = false, *bytes_written > 0  : data produced, more may follow
     //   *done = false, *bytes_written == 0 : not enough space for the next
     //                                        item, call again later
+    //
+    // max_len is never more than the transfer has left to send, so the last
+    // call of a transfer offers exactly the bytes still owed to the host.
+    // Reporting more than max_len stalls the command with
+    // PB_STATUS_UNKNOWN_ERROR, and none of those bytes reaches the host.
     //
     // The callee tracks its own position between calls, in its own ctx — the
     // library keeps no per-transfer cursor on its behalf.

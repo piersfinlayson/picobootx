@@ -24,8 +24,9 @@
 #include "pbt.h"
 
 // The GET_INFO SYS flag carrying the most words, so a transmit FIFO can be
-// chosen that has room for the leading count and not for the flag's data.
-#define FLAG_BOOT_INFO 0x0040u
+// chosen that has room for the leading count and flags word and not for the
+// rest of the answer.
+#define FLAG_BOOT_INFO       PBT_SYS_BOOT_INFO
 #define FLAG_BOOT_INFO_WORDS 4u
 
 // Reads a 32-bit word out of the payload the device sent.
@@ -204,13 +205,13 @@ static void scenario_a_short_write_stalls_the_transfer(void) {
 static void scenario_get_info_declines_room_for_less_than_a_word(void) {
     pbt_begin();
     // Ten bytes holds two words and leaves two, which is less than the four a
-    // word needs.  Two bytes of a word cannot be sent, so the fill function has
-    // to decline the call and wait for the endpoint to drain.
+    // word needs.  Two bytes of a word cannot be sent, so the fill has to
+    // decline the call and wait for the endpoint to drain.
     pbt_wire_tx_fifo(10u);
     pbt_start();
 
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&cmd, PB_INFO_PARTITION, 0u);
+    pbt_args_get_info(&cmd, PB_INFO_PARTITION, PBT_PART_SERVED);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
 
@@ -218,7 +219,8 @@ static void scenario_get_info_declines_room_for_less_than_a_word(void) {
     // rather than in the middle of a word.
     PBT_REQUIRE(pbt_payload_len() == 20u);
     const uint32_t expected[] = {
-        0x00000004u, 0x00000031u, 0x00000000u, 0xffffe000u, 0xfc078000u,
+        4u, PBT_PART_SERVED, 0u,
+        PBT_PT_UNPARTITIONED_LOCATION, PBT_PT_UNPARTITIONED_FLAGS,
     };
     for (uint32_t i = 0; i < 5u; i++) {
         PBT_CHECK_EQ(payload_word(i), expected[i]);
@@ -234,47 +236,161 @@ static void scenario_get_info_declines_room_for_less_than_a_word(void) {
     pbt_begin();
     pbt_start();
     picoboot_cmd_t roomy = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&roomy, PB_INFO_PARTITION, 0u);
+    pbt_args_get_info(&roomy, PB_INFO_PARTITION, PBT_PART_SERVED);
     PBT_CHECK_STATUS(pbt_run_cmd(&roomy), PB_STATUS_OK);
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
     PBT_CHECK_EQ(pbt_payload_len(), 20u);
 }
 
-static void scenario_get_info_declines_room_for_less_than_a_flag(void) {
+static void scenario_get_info_is_asked_again_for_what_would_not_fit(void) {
     pbt_begin();
-    // Sixteen bytes is exactly one flag's data and no more, so once the leading
-    // count is in the FIFO there is not room for the flag that follows it.  A
-    // flag's data cannot be split across calls — the callback produces it in
-    // one piece — so the fill function declines and asks to be called again.
-    pbt_wire_tx_fifo(16u);
+    // Eight bytes of FIFO against a twenty-four byte answer, so the transfer
+    // cannot be produced in one call however the callback behaves.
+    //
+    // picobootx.h: "get_info produces the answer, from at_word onwards, over as
+    // many calls as it takes.  type and param0 are handed back every time".  So
+    // the second call carries the same type and param0 as the first and an
+    // at_word that has moved on by what the first call produced.
+    pbt_wire_tx_fifo(8u);
     pbt_start();
 
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
-                                 4u + (FLAG_BOOT_INFO_WORDS * 4u));
+                                 8u + (FLAG_BOOT_INFO_WORDS * 4u));
     pbt_args_get_info(&cmd, PB_INFO_SYS, FLAG_BOOT_INFO);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
 
-    PBT_REQUIRE(pbt_payload_len() == 20u);
-    PBT_CHECK_EQ(payload_word(0), FLAG_BOOT_INFO_WORDS);
+    PBT_REQUIRE(pbt_payload_len() == 24u);
+    PBT_CHECK_EQ(payload_word(0), FLAG_BOOT_INFO_WORDS + 1u);
+    PBT_CHECK_EQ(payload_word(1), FLAG_BOOT_INFO);
     for (uint32_t i = 0; i < FLAG_BOOT_INFO_WORDS; i++) {
-        PBT_CHECK_EQ(payload_word(1u + i), pbt_sys_info_word(FLAG_BOOT_INFO) + i);
+        PBT_CHECK_EQ(payload_word(2u + i),
+                     pbt_sys_info_word(FLAG_BOOT_INFO) + i);
     }
 
-    // The count went out on its own, and the flag's data followed whole.
-    PBT_REQUIRE(pbt_packet_count() == 2u);
-    PBT_CHECK_EQ(pbt_packet(0)->len, 4u);
-    PBT_CHECK_EQ(pbt_packet(1)->len, 16u);
+    // More than one call, each naming the same request and starting where the
+    // one before it stopped.  A library that restarted the answer, or that
+    // asked for a window it had already sent, shows up here.
+    const int calls = pbt_count("op_get_info");
+    PBT_CHECK(calls >= 2);
 
-    // The declined call did not reach the callback and did not move the cursor
-    // on, so the flag was asked for once and answered once.  A decline that
-    // consulted the callback and threw the answer away would show up here as
-    // two calls, and one that advanced the cursor would show up as a missing
-    // flag rather than a second packet.
-    PBT_CHECK_EQ(pbt_count("op_get_info_sys"), 1);
-    PBT_REQUIRE(pbt_nth("op_get_info_sys", 0) != NULL);
-    PBT_CHECK_EQ(pbt_nth("op_get_info_sys", 0)->a0, FLAG_BOOT_INFO);
-    PBT_CHECK_EQ(pbt_nth("op_get_info_sys", 0)->a1, FLAG_BOOT_INFO_WORDS * 4u);
+    uint32_t at = 0u;
+    for (int i = 0; i < calls; i++) {
+        const pbt_event_t *call = pbt_nth("op_get_info", i);
+        if (call == NULL) {
+            pbt_fail(__FILE__, __LINE__, "no call %d", i);
+            continue;
+        }
+        if (call->a0 != PB_INFO_SYS || call->a1 != FLAG_BOOT_INFO) {
+            pbt_fail(__FILE__, __LINE__, "call %d asked for type %u param0 "
+                     "0x%08x, expected type %u param0 0x%08x", i, call->a0,
+                     call->a1, (unsigned)PB_INFO_SYS, FLAG_BOOT_INFO);
+        }
+        if (call->a2 < at) {
+            pbt_fail(__FILE__, __LINE__, "call %d resumed at word %u, behind "
+                     "the %u already produced", i, call->a2, at);
+        }
+        at = call->a2;
+    }
+
+    // The last call started past the first, so the answer really was produced
+    // in pieces rather than the same window asked for twice.
+    PBT_CHECK(at > 0u);
+
+    // With room for the whole transfer it is one packet and one call, so the
+    // pieces above are the FIFO's doing.
+    pbt_begin();
+    pbt_start();
+    picoboot_cmd_t roomy = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                   8u + (FLAG_BOOT_INFO_WORDS * 4u));
+    pbt_args_get_info(&roomy, PB_INFO_SYS, FLAG_BOOT_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&roomy), PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_packet_count(), 1u);
+    PBT_CHECK_EQ(pbt_count("op_get_info"), 1);
+}
+
+// A device whose answer is made of pieces it cannot split.  picobootx.h gives
+// the fill callback three answers, and this is the third: "*bytes_written == 0
+// not enough room for the next piece, call again later with more".  Nothing the
+// default implementations produce needs it — they fill whatever room they are
+// offered — so reaching that arm needs a device shaped like this one.
+#define ITEM_WORDS  3u
+#define ITEM_COUNT  2u
+#define ITEM_ANSWER (ITEM_WORDS * ITEM_COUNT)
+
+static pb_status_t op_items_prepare(pb_info_type_t type, uint32_t param0,
+                                    uint32_t *words, void *ctx) {
+    (void)ctx;
+    *words = ITEM_ANSWER;
+    pbt_log("op_get_info_prepare", type, param0, *words, PB_STATUS_OK);
+    return PB_STATUS_OK;
+}
+
+static pb_status_t op_items_get_info(pb_info_type_t type, uint32_t param0,
+                                     uint32_t at_word, uint8_t *buf,
+                                     uint32_t max_len, uint32_t *bytes_written,
+                                     void *ctx) {
+    (void)ctx;
+    pbt_log("op_get_info", type, param0, at_word, max_len);
+
+    *bytes_written = 0u;
+    if (max_len < ITEM_WORDS * 4u) {
+        // Not enough room for the next item, and an item cannot be cut in
+        // half.  Write nothing and ask to be called again.
+        pbt_log("item_declined", at_word, max_len, 0, 0);
+        return PB_STATUS_OK;
+    }
+    for (uint32_t w = 0; w < ITEM_WORDS; w++) {
+        uint32_t value = 0x54000000u | (at_word + w);
+        memcpy(buf + (w * 4u), &value, sizeof(value));
+    }
+    *bytes_written = ITEM_WORDS * 4u;
+    return PB_STATUS_OK;
+}
+
+static void scenario_get_info_declines_a_call_it_has_no_room_for(void) {
+    pbt_begin();
+    pbt_ops.get_info_prepare = op_items_prepare;
+    pbt_ops.get_info         = op_items_get_info;
+
+    // Fourteen bytes of FIFO.  The count word takes four, leaving ten, of which
+    // the library may offer only whole words — eight, which is less than an
+    // item.  So the first call after the count is one the device cannot answer.
+    pbt_wire_tx_fifo(14u);
+    pbt_start();
+
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, (1u + ITEM_ANSWER) * 4u);
+    pbt_args_get_info(&cmd, PB_INFO_SYS, PBT_SYS_CPU_INFO);
+
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
+
+    // The whole answer arrived, in item order, whatever the declining did to
+    // the packet boundaries.
+    PBT_REQUIRE(pbt_payload_len() == (1u + ITEM_ANSWER) * 4u);
+    PBT_CHECK_EQ(payload_word(0), ITEM_ANSWER);
+    for (uint32_t w = 0; w < ITEM_ANSWER; w++) {
+        PBT_CHECK_EQ(payload_word(1u + w), 0x54000000u | w);
+    }
+
+    // The device declined at least once, and the call it declined produced
+    // nothing — so the library asked again rather than treating an empty answer
+    // as the end of the transfer.
+    PBT_CHECK(pbt_count("item_declined") >= 1);
+    PBT_CHECK(pbt_count("op_get_info") > pbt_count("item_declined"));
+
+    // With room for the whole transfer nothing is declined, so what made the
+    // device decline was the room it was offered and not the request.
+    pbt_begin();
+    pbt_ops.get_info_prepare = op_items_prepare;
+    pbt_ops.get_info         = op_items_get_info;
+    pbt_start();
+    picoboot_cmd_t roomy = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                   (1u + ITEM_ANSWER) * 4u);
+    pbt_args_get_info(&roomy, PB_INFO_SYS, PBT_SYS_CPU_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&roomy), PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_payload_len(), (1u + ITEM_ANSWER) * 4u);
+    PBT_CHECK_EQ(pbt_count("item_declined"), 0);
+    PBT_CHECK_EQ(pbt_packet_count(), 1u);
 }
 
 static void scenario_otp_read_declines_room_for_less_than_a_row(void) {
@@ -322,8 +438,10 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_a_short_write_stalls_the_transfer },
     { "GET_INFO declines a call with room for less than a word",
       scenario_get_info_declines_room_for_less_than_a_word },
-    { "GET_INFO declines a call with room for less than a flag",
-      scenario_get_info_declines_room_for_less_than_a_flag },
+    { "GET_INFO is asked again for what would not fit",
+      scenario_get_info_is_asked_again_for_what_would_not_fit },
+    { "GET_INFO declines a call it has no room to answer",
+      scenario_get_info_declines_a_call_it_has_no_room_for },
     { "OTP_READ declines a call with room for less than a row",
       scenario_otp_read_declines_room_for_less_than_a_row },
 };

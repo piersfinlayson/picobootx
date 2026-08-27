@@ -39,7 +39,7 @@ static void scenario_get_info_accepts_a_256_byte_transfer(void) {
     // 4, and less than 256".  picotool asks for exactly 256.  Refusing it would
     // make every picotool query fail, so 256 is accepted.
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 256u);
-    pbt_args_get_info(&cmd, PB_INFO_SYS, 0x0001u);
+    pbt_args_get_info(&cmd, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
     PBT_CHECK_EQ(pbt_payload_len(), 256u);
@@ -48,13 +48,17 @@ static void scenario_get_info_accepts_a_256_byte_transfer(void) {
 static void scenario_get_info_transfer_length_bounds(void) {
     // Where the accommodation stops.  256 is in and 260 is out, so the bound
     // moved by exactly the one value picotool needs and not by more.
+    //
+    // Four bytes is a length GET_INFO admits and a buffer no INFO_SYS response
+    // fits in, so it comes back with the other reason — which is what says the
+    // length itself passed the check that 0 and 2 fail.
     const struct {
         uint32_t    length;
         pb_status_t expected;
     } cases[] = {
         { 0u,   PB_STATUS_INVALID_TRANSFER_LEN },
         { 2u,   PB_STATUS_INVALID_TRANSFER_LEN },
-        { 4u,   PB_STATUS_OK },
+        { 4u,   PB_STATUS_BUFFER_TOO_SMALL },
         { 254u, PB_STATUS_INVALID_TRANSFER_LEN },
         { 252u, PB_STATUS_OK },
         { 256u, PB_STATUS_OK },
@@ -66,7 +70,7 @@ static void scenario_get_info_transfer_length_bounds(void) {
         pbt_start();
 
         picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, cases[i].length);
-        pbt_args_get_info(&cmd, PB_INFO_SYS, 0x0004u);
+        pbt_args_get_info(&cmd, PB_INFO_SYS, PBT_SYS_CPU_INFO);
 
         pb_status_t got = pbt_run_cmd(&cmd);
         if (got != cases[i].expected) {
@@ -87,15 +91,17 @@ static void scenario_get_info_gives_the_host_the_length_it_asked_for(void) {
     // Every other data-in command derives its length from its arguments and
     // insists the two agree.  This one pads instead.
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 256u);
-    pbt_args_get_info(&cmd, PB_INFO_SYS, 0x0004u);
+    pbt_args_get_info(&cmd, PB_INFO_SYS, PBT_SYS_CPU_INFO);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
     PBT_REQUIRE(pbt_payload_len() == 256u);
 
-    // Eight bytes of answer, then padding to the length asked for.
-    PBT_CHECK_EQ(payload_word(0), 1u);
-    PBT_CHECK_EQ(payload_word(1), pbt_sys_info_word(0x0004u));
-    for (uint32_t i = 2; i < 64u; i++) {
+    // Twelve bytes of answer — the count, the flags word and CPU_INFO's single
+    // word — then padding to the length asked for.
+    PBT_CHECK_EQ(payload_word(0), 2u);
+    PBT_CHECK_EQ(payload_word(1), PBT_SYS_CPU_INFO);
+    PBT_CHECK_EQ(payload_word(2), pbt_sys_info_word(PBT_SYS_CPU_INFO));
+    for (uint32_t i = 3; i < 64u; i++) {
         if (payload_word(i) != 0u) {
             pbt_fail(__FILE__, __LINE__, "word %u of the padding is 0x%08x", i,
                      payload_word(i));
@@ -186,6 +192,8 @@ static void scenario_the_wire_numbers(void) {
     // GET_INFO types, and the flash geometry the arguments are expressed in.
     PBT_CHECK_EQ(PB_INFO_SYS, 0x01u);
     PBT_CHECK_EQ(PB_INFO_PARTITION, 0x02u);
+    PBT_CHECK_EQ(PB_INFO_UF2_TARGET, 0x03u);
+    PBT_CHECK_EQ(PB_INFO_UF2_STATUS, 0x04u);
     PBT_CHECK_EQ(FLASH_PAGE_SIZE, 256u);
     PBT_CHECK_EQ(FLASH_SECTOR_SIZE, 4096u);
     PBT_CHECK_EQ(FLASH_BLOCK_SIZE, 65536u);

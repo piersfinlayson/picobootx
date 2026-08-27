@@ -27,7 +27,8 @@
 
 // Bootrom error codes.  picobootx_impl.c maps these to pb_status_t values, and
 // the model returns them so that mapping is exercised rather than bypassed.
-#define PBT_BOOTROM_ERROR_INVALID_ARG (-5)
+#define PBT_BOOTROM_ERROR_INVALID_ARG      (-5)
+#define PBT_BOOTROM_ERROR_BUFFER_TOO_SMALL (-13)
 
 // OTP access flags, as picobootx_impl.c passes them.
 #define PBT_OTP_FLAG_WRITE 0x00010000u
@@ -134,38 +135,64 @@ static void pbt_rom_put16(uint32_t offs, uint16_t value) {
 #define PBT_DEFAULT_XIP_CLKDIV 7u
 
 // ---------------------------------------------------------------------------
-// GET_INFO SYS data
+// get_sys_info  (RP2350 datasheet 5.4.8.17)
+//
+// The flags and their word counts are the datasheet's, held here rather than
+// taken from the library: the library knows nothing about individual flags, so
+// a table read out of it would be reading the answer off the thing under test.
+//
+// The information returned is chosen by the flags parameter, and "the first
+// word in the returned buffer, is the (sub)set of those flags that the API
+// supports".  So the routine answers whole: that flags word, then "words of
+// data for each present flag in order".  A flag the chip cannot answer is
+// absent from the flags word and contributes no data — it is not a reason to
+// refuse the call.
 // ---------------------------------------------------------------------------
 
-// The flag-to-word-count table is picobootx's own, so the model cannot drift
-// from the library's idea of how many words a flag carries.
 typedef struct {
-    uint32_t flag;
-    uint8_t  words;
+    uint32_t    flag;
+    uint8_t     words;
+    const char *name;
 } pbt_info_entry_t;
 
-#define X(flag, wc, name) { (flag), (wc) },
-static const pbt_info_entry_t k_info[] = { PB_INFO_FLAG_TABLE };
-#undef X
+// 0x0020 NONCE is defined by 5.4.8.17 as "not supported", so it is here as a
+// flag a host may ask for, carrying no data, and outside the set the model
+// answers.  That is the flag a real part drops.
+static const pbt_info_entry_t k_info[] = {
+    { PBT_SYS_CHIP_INFO,      3u, "CHIP_INFO" },
+    { PBT_SYS_CRITICAL,       1u, "CRITICAL" },
+    { PBT_SYS_CPU_INFO,       1u, "CPU_INFO" },
+    { PBT_SYS_FLASH_DEV_INFO, 1u, "FLASH_DEV_INFO" },
+    { PBT_SYS_BOOT_RANDOM,    4u, "BOOT_RANDOM" },
+    { PBT_SYS_NONCE,          0u, "NONCE" },
+    { PBT_SYS_BOOT_INFO,      4u, "BOOT_INFO" },
+};
 
 #define PBT_INFO_COUNT (sizeof(k_info) / sizeof(k_info[0]))
 
-// All flags the table knows about.
-static uint32_t pbt_all_info_flags(void) {
-    uint32_t all = 0u;
-    for (unsigned i = 0; i < PBT_INFO_COUNT; i++) {
-        all |= k_info[i].flag;
-    }
-    return all;
+unsigned pbt_sys_flag_count(void) { return (unsigned)PBT_INFO_COUNT; }
+
+uint32_t pbt_sys_flag_at(unsigned index) {
+    return index < PBT_INFO_COUNT ? k_info[index].flag : 0u;
 }
 
-static uint8_t pbt_info_words(uint32_t flag) {
+const char *pbt_sys_flag_name(uint32_t flag) {
     for (unsigned i = 0; i < PBT_INFO_COUNT; i++) {
         if (k_info[i].flag == flag) {
-            return k_info[i].words;
+            return k_info[i].name;
         }
     }
-    return 0u;
+    return "unnamed";
+}
+
+uint32_t pbt_sys_info_words(uint32_t flags) {
+    uint32_t words = 0u;
+    for (unsigned i = 0; i < PBT_INFO_COUNT; i++) {
+        if ((flags & k_info[i].flag) != 0u) {
+            words += k_info[i].words;
+        }
+    }
+    return words;
 }
 
 uint32_t pbt_sys_info_word(uint32_t flag) {
@@ -173,6 +200,82 @@ uint32_t pbt_sys_info_word(uint32_t flag) {
     // say which flag's data it is looking at rather than only how much of it
     // came back.
     return 0x51000000u | flag;
+}
+
+// ---------------------------------------------------------------------------
+// get_partition_table_info  (RP2350 datasheet 5.4.8.16)
+//
+// Same shape as get_sys_info: a flags word carrying the supported subset of the
+// request, then data per flag.  "With the exception of PT_INFO, all the flags
+// select 'per partition' information, so each field is returned in flag order
+// for one partition after the next", so the partitions are the outer loop and
+// the flags the inner one.  SINGLE_PARTITION narrows that to one partition,
+// named in the top eight bits of flags_and_partition, and carries no data of
+// its own.
+// ---------------------------------------------------------------------------
+
+// How many words each per-partition flag carries for one partition.
+#define PBT_PART_LOC_FLAGS_WORDS 2u
+#define PBT_PART_ID_WORDS        2u
+
+// PT_INFO's three words.
+#define PBT_PART_PT_INFO_WORDS 3u
+
+static unsigned s_partition_count;
+static uint32_t s_partition_supported;
+
+void pbt_set_partitions(unsigned count) {
+    if (count > PBT_PARTITION_MAX) {
+        fprintf(stderr, "pbt: %u partitions asked for, the model holds %u\n",
+                count, PBT_PARTITION_MAX);
+        abort();
+    }
+    s_partition_count = count;
+}
+
+void pbt_set_partition_supported(uint32_t mask) {
+    s_partition_supported = mask;
+}
+
+unsigned pbt_partition_count(void) { return s_partition_count; }
+
+uint32_t pbt_partition_word(unsigned index, uint32_t flag) {
+    // Distinct per partition and per flag, so a scenario can say whose data it
+    // is looking at and in what order it arrived.
+    return 0x52000000u | ((uint32_t)index << 16) | flag;
+}
+
+// The bootrom error the modelled routines refuse with, or zero when they answer
+// normally, and how many calls they answer before they start refusing.
+static int      s_sys_info_rc;
+static unsigned s_sys_info_ok_calls;
+static int      s_partition_rc;
+static unsigned s_partition_ok_calls;
+
+void pbt_sys_info_fail(int rc)  { pbt_sys_info_fail_after(0u, rc); }
+void pbt_partition_fail(int rc) { pbt_partition_fail_after(0u, rc); }
+
+void pbt_sys_info_fail_after(unsigned calls, int rc) {
+    s_sys_info_ok_calls = calls;
+    s_sys_info_rc       = rc;
+}
+
+void pbt_partition_fail_after(unsigned calls, int rc) {
+    s_partition_ok_calls = calls;
+    s_partition_rc       = rc;
+}
+
+// Whether this call is one the routine has been told to refuse.  A part told to
+// answer the first calls counts them down and refuses from then on.
+static bool pbt_refuses_now(int rc, unsigned *ok_calls) {
+    if (rc == 0) {
+        return false;
+    }
+    if (*ok_calls > 0u) {
+        (*ok_calls)--;
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,12 +312,23 @@ void pbt_device_reset(void) {
 
     memset(s_otp, 0, sizeof(s_otp));
 
-    s_irq_disabled       = false;
-    s_xip_active         = true;
-    s_xip_clkdiv         = PBT_DEFAULT_XIP_CLKDIV;
-    s_sys_info_supported = pbt_all_info_flags();
-    s_withheld_count     = 0;
-    s_otp_rc             = 0;
+    s_irq_disabled        = false;
+    s_xip_active          = true;
+    s_xip_clkdiv          = PBT_DEFAULT_XIP_CLKDIV;
+    s_sys_info_supported  = PBT_SYS_SERVED;
+    s_partition_supported = PBT_PART_SERVED;
+
+    // A part with no partition table, which is what the measured RP2350 the
+    // partition expectations come from had.  A scenario that wants per-partition
+    // data asks for partitions.
+    s_partition_count     = 0;
+
+    s_withheld_count      = 0;
+    s_otp_rc              = 0;
+    s_sys_info_rc         = 0;
+    s_sys_info_ok_calls   = 0;
+    s_partition_rc        = 0;
+    s_partition_ok_calls  = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,18 +397,104 @@ static int pbt_rom_get_sys_info(uint32_t *out, uint32_t out_words,
                                 uint32_t flags) {
     pbt_log("rom_get_sys_info", flags, out_words, 0, 0);
 
-    uint8_t words = pbt_info_words(flags);
-    if (words == 0u || out_words < (uint32_t)words + 1u) {
-        return PBT_BOOTROM_ERROR_INVALID_ARG;
+    if (pbt_refuses_now(s_sys_info_rc, &s_sys_info_ok_calls)) {
+        // Refused before anything is written, so a scenario can tell a refusal
+        // apart from a partial answer.
+        return s_sys_info_rc;
     }
 
-    // Word zero reports which of the requested flags were answered, which is
-    // what picobootx checks before trusting the rest.
-    out[0] = flags & s_sys_info_supported;
-    for (uint8_t i = 0; i < words; i++) {
-        out[1 + i] = pbt_sys_info_word(flags) + i;
+    // The subset the chip answers.  A flag outside it — NONCE, or one no
+    // version of the routine defines — is dropped here, and the host learns
+    // that from this word rather than from a refusal.
+    const uint32_t answered = flags & s_sys_info_supported;
+
+    uint32_t words = 1u;
+    for (unsigned i = 0; i < PBT_INFO_COUNT; i++) {
+        if ((answered & k_info[i].flag) != 0u) {
+            words += k_info[i].words;
+        }
     }
-    return (int)words + 1;
+    if (out_words < words) {
+        return PBT_BOOTROM_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    out[0] = answered;
+    uint32_t at = 1u;
+    for (unsigned i = 0; i < PBT_INFO_COUNT; i++) {
+        if ((answered & k_info[i].flag) == 0u) {
+            continue;
+        }
+        for (uint8_t w = 0; w < k_info[i].words; w++) {
+            out[at++] = pbt_sys_info_word(k_info[i].flag) + w;
+        }
+    }
+    return (int)words;
+}
+
+static int pbt_rom_get_partition_table_info(uint32_t *out, uint32_t out_words,
+                                            uint32_t flags_and_partition) {
+    pbt_log("rom_get_partition_table_info", flags_and_partition, out_words, 0,
+            0);
+
+    if (pbt_refuses_now(s_partition_rc, &s_partition_ok_calls)) {
+        return s_partition_rc;
+    }
+
+    const uint32_t answered = flags_and_partition & s_partition_supported;
+    const bool     single   = (answered & PBT_PART_SINGLE) != 0u;
+    const unsigned chosen   = (flags_and_partition >> 24) & 0xFFu;
+
+    // Which partitions the per-partition flags speak for.  SINGLE_PARTITION
+    // names one, and a number the table does not hold speaks for none.
+    unsigned first = 0u;
+    unsigned last  = s_partition_count;   // exclusive
+    if (single) {
+        first = chosen;
+        last  = (chosen < s_partition_count) ? chosen + 1u : chosen;
+    }
+
+    uint32_t per_partition = 0u;
+    if ((answered & PBT_PART_LOC_FLAGS) != 0u) {
+        per_partition += PBT_PART_LOC_FLAGS_WORDS;
+    }
+    if ((answered & PBT_PART_ID) != 0u) {
+        per_partition += PBT_PART_ID_WORDS;
+    }
+
+    uint32_t words = 1u;
+    if ((answered & PBT_PART_PT_INFO) != 0u) {
+        words += PBT_PART_PT_INFO_WORDS;
+    }
+    words += per_partition * (last - first);
+
+    if (out_words < words) {
+        return PBT_BOOTROM_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    out[0] = answered;
+    uint32_t at = 1u;
+    if ((answered & PBT_PART_PT_INFO) != 0u) {
+        // 5.4.8.16: the partition count in the low eight bits and whether a
+        // partition table is present in bit 8, then the two words 5.9.4.2
+        // describes for unpartitioned space.
+        out[at++] = (uint32_t)s_partition_count |
+                    (s_partition_count != 0u ? 0x100u : 0u);
+        out[at++] = PBT_PT_UNPARTITIONED_LOCATION;
+        out[at++] = PBT_PT_UNPARTITIONED_FLAGS;
+    }
+    for (unsigned p = first; p < last; p++) {
+        if ((answered & PBT_PART_LOC_FLAGS) != 0u) {
+            for (uint32_t w = 0; w < PBT_PART_LOC_FLAGS_WORDS; w++) {
+                out[at++] = pbt_partition_word(p, PBT_PART_LOC_FLAGS) + w;
+            }
+        }
+        if ((answered & PBT_PART_ID) != 0u) {
+            for (uint32_t w = 0; w < PBT_PART_ID_WORDS; w++) {
+                out[at++] = pbt_partition_word(p, PBT_PART_ID) + w;
+            }
+        }
+    }
+    return (int)words;
 }
 
 static int pbt_rom_otp_access(uint8_t *buf, uint32_t buf_len,
@@ -413,6 +613,7 @@ void *picobootx_host_test_bootrom_lookup(uint32_t code, uint32_t mask) {
     switch (code) {
         case PBT_ROM_CODE('R', 'B'): return (void *)pbt_rom_reboot;
         case PBT_ROM_CODE('G', 'S'): return (void *)pbt_rom_get_sys_info;
+        case PBT_ROM_CODE('G', 'P'): return (void *)pbt_rom_get_partition_table_info;
         case PBT_ROM_CODE('O', 'A'): return (void *)pbt_rom_otp_access;
         case PBT_ROM_CODE('R', 'E'): return (void *)pbt_rom_flash_range_erase;
         case PBT_ROM_CODE('R', 'P'): return (void *)pbt_rom_flash_range_program;

@@ -33,8 +33,8 @@ repository = "https://github.com/piersfinlayson/picobootx"
 # refuses a dependency with no version, so a crate here cannot reach crates.io
 # without one.
 [workspace.dependencies]
-picobootx = { path = "picobootx", version = "0.1.0" }
-picobootx-rp2350 = { path = "picobootx-rp2350", version = "0.1.0" }
+picobootx = { path = "picobootx", version = "0.2.0" }
+picobootx-rp2350 = { path = "picobootx-rp2350", version = "0.2.0" }
 
 # The shim is linked into a C test binary, which has no unwinder.
 #

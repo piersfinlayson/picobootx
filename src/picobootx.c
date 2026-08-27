@@ -7,31 +7,6 @@
 #include "picobootx_private.h"
 #include "picobootx_vendor.h"
 
-// ---------------------------------------------------------------------------
-// GET_INFO: static flag -> word count table
-// ---------------------------------------------------------------------------
-
-typedef struct {
-    uint32_t flag;
-    uint8_t  word_count;
-} pb_info_flag_entry_t;
-
-// Construct a table of flag -> word count from the PB_INFO_FLAG_TABLE macro,
-// and static assert that no flag exceeds PB_INFO_MAX_WORDS.  This allows the
-// pb_info_count_words and pb_info_words_for_flag functions to be implemented
-// as simple table lookups, without needing to hardcode any flag values or
-// counts in the code itself.
-#define X(flag, wc, name) { flag, wc },
-static const pb_info_flag_entry_t k_info_flag_table[] = { PB_INFO_FLAG_TABLE };
-#undef X
-
-#define X(flag, wc, name) _Static_assert(wc <= PB_INFO_MAX_WORDS, #name " exceeds PB_INFO_MAX_WORDS");
-PB_INFO_FLAG_TABLE
-#undef X
-
-#define INFO_FLAG_TABLE_COUNT \
-    (sizeof(k_info_flag_table) / sizeof(k_info_flag_table[0]))
-
 // picobootx's states as strings for logging
 const char * const pb_state_to_str[] = {
     "IDLE",
@@ -42,25 +17,6 @@ const char * const pb_state_to_str[] = {
     "AWAIT_ACK",
     "STALLED"
 };
-
-static uint32_t pb_info_count_words(uint32_t requested) {
-    uint32_t total = 0u;
-    for (uint32_t i = 0u; i < INFO_FLAG_TABLE_COUNT; i++) {
-        if (requested & k_info_flag_table[i].flag) {
-            total += k_info_flag_table[i].word_count;
-        }
-    }
-    return total;
-}
-
-static uint8_t pb_info_words_for_flag(uint32_t flag) {
-    for (uint32_t i = 0u; i < INFO_FLAG_TABLE_COUNT; i++) {
-        if (k_info_flag_table[i].flag == flag) {
-            return k_info_flag_table[i].word_count;
-        }
-    }
-    return 0u;
-}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -192,33 +148,62 @@ static pb_status_t pb_get_info_prepare(
     const picoboot_cmd_t *cmd,
     void *ctx
 ) {
-    (void)ctx;
     if (cmd->transfer_len == 0u ||
         (cmd->transfer_len & 0x3u) != 0u ||
-        cmd->transfer_len > 256u) {
+        cmd->transfer_len > PICOBOOT_GET_INFO_MAX_LEN) {
         return PB_STATUS_INVALID_TRANSFER_LEN;
     }
     const pb_get_info_args_t *args = (const pb_get_info_args_t *)cmd->args;
+
+    // The four types the protocol defines (RP2350 datasheet 5.6.4.11).  Gating
+    // here rather than in the callback means a type outside them is refused
+    // without reaching an integrator, and the callback only ever sees a value
+    // pb_info_type_t names.  GET_INFO itself was recognised, so the command
+    // identifier was not the problem — the type asked for is outside the range
+    // the library serves, which is what INVALID_ARG says (table 471).
     switch (args->info_type) {
         case PB_INFO_SYS:
-            if (!s->ops->get_info_sys) {
-                return PB_STATUS_UNKNOWN_CMD;
-            }
-            s->xfer.get_info.is_partition       = false;
-            s->xfer.get_info.header_sent        = false;
-            s->xfer.get_info.remaining_flags    = args->param0;
-            s->xfer.get_info.transfer_remaining = cmd->transfer_len;
-            break;
         case PB_INFO_PARTITION:
-            s->xfer.get_info.is_partition       = true;
-            s->xfer.get_info.header_sent        = false;
-            s->xfer.get_info.remaining_flags    = 0u;
-            s->xfer.get_info.transfer_remaining = cmd->transfer_len;
+        case PB_INFO_UF2_TARGET:
+        case PB_INFO_UF2_STATUS:
             break;
         default:
             LOG("Unsupported info_type: 0x%02x", args->info_type);
-            return PB_STATUS_UNKNOWN_CMD;
+            return PB_STATUS_INVALID_ARG;
     }
+
+    if (!s->ops->get_info_prepare || !s->ops->get_info) {
+        return PB_STATUS_UNKNOWN_CMD;
+    }
+
+    uint32_t words = 0u;
+    pb_status_t st = s->ops->get_info_prepare((pb_info_type_t)args->info_type,
+                                              args->param0, &words, ctx);
+    if (st != PB_STATUS_OK) {
+        return st;
+    }
+    if (words > PICOBOOT_INFO_MAX_ANSWER_WORDS) {
+        ERR("GET_INFO type 0x%02x reported %u words, more than a transfer holds",
+            args->info_type, words);
+        return PB_STATUS_UNKNOWN_ERROR;
+    }
+
+    // The whole answer or none of it, judged against the answer this device
+    // says it will actually give rather than against what was asked for.
+    // BUFFER_TOO_SMALL is what PICOBOOT carries that refusal in (table 471).
+    uint32_t needed = (1u + words) * (uint32_t)sizeof(uint32_t);
+    if (cmd->transfer_len < needed) {
+        LOG("GET_INFO needs %u bytes, host asked for %u",
+            needed, cmd->transfer_len);
+        return PB_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    s->xfer.get_info.type               = args->info_type;
+    s->xfer.get_info.param0             = args->param0;
+    s->xfer.get_info.answer_words       = (uint8_t)words;
+    s->xfer.get_info.answer_sent        = 0u;
+    s->xfer.get_info.count_sent         = false;
+    s->xfer.get_info.transfer_remaining = cmd->transfer_len;
     return PB_STATUS_OK;
 }
 
@@ -272,11 +257,6 @@ static pb_status_t pb_read_fill(
     return PB_STATUS_OK;
 }
 
-#define K_PARTITION_DATA_COUNT 5u
-static const uint32_t k_partition_data[K_PARTITION_DATA_COUNT] = {
-    0x00000004u, 0x00000031u, 0x00000000u, 0xffffe000u, 0xfc078000u,
-};
-
 static pb_status_t pb_get_info_fill(
     pb_state_block_t *s,
     uint8_t *buf,
@@ -285,78 +265,80 @@ static pb_status_t pb_get_info_fill(
     bool *done,
     void *ctx
 ) {
-    (void)ctx;
     pb_in_get_info_t *gi = &s->xfer.get_info;
     *bytes_written = 0u;
     *done = false;
 
+    // Unreachable.  pb_get_info_prepare refuses a transfer length of zero
+    // before the command reaches a data phase, so the first call here always
+    // has bytes owed, and each of the three places below that takes the count
+    // down reports done in the same call when it reaches zero — on which the
+    // pump leaves the data-in state.  So there is no call with nothing left to
+    // send.  The arm stays because the same guard opens all three data-in
+    // fills, and READ and OTP_READ do carry a zero-length transfer.
     if (gi->transfer_remaining == 0u) {
+        // LCOV_UNREACHABLE_START
         *done = true;
         return PB_STATUS_OK;
+        // LCOV_UNREACHABLE_STOP
     }
 
     if (max_len < sizeof(uint32_t)) {
         return PB_STATUS_OK;  // signal retry
     }
 
-    // PARTITION mode: stream one word of static data per call
-    if (gi->is_partition) {
-        uint32_t word = (gi->remaining_flags < K_PARTITION_DATA_COUNT)
-                        ? k_partition_data[gi->remaining_flags]
-                        : 0u;
+    // The count of the significant words that follow (RP2350 datasheet
+    // 5.6.4.11).  This word is the library's, and everything after it is the
+    // device's answer, whatever shape its type gives that.
+    if (!gi->count_sent) {
+        uint32_t word = gi->answer_words;
         memcpy(buf, &word, sizeof(uint32_t));
-        gi->remaining_flags++;
+        gi->count_sent = true;
         gi->transfer_remaining -= sizeof(uint32_t);
         *bytes_written = sizeof(uint32_t);
         *done = (gi->transfer_remaining == 0u);
         return PB_STATUS_OK;
     }
 
-    // SYS mode: send header word count first
-    if (!gi->header_sent) {
-        uint32_t word_count = pb_info_count_words(gi->remaining_flags);
-        memcpy(buf, &word_count, sizeof(uint32_t));
-        gi->transfer_remaining -= sizeof(uint32_t);
-        gi->header_sent = true;
-        *bytes_written = sizeof(uint32_t);
-        if (gi->transfer_remaining == 0u || gi->remaining_flags == 0u) {
-            gi->transfer_remaining = 0u;
-            *done = true;
-        }
-        return PB_STATUS_OK;
-    }
+    // The answer, from where the last call left off.  The room offered is never
+    // more than the answer has left to give, so the callback cannot put a byte
+    // past what the count word promised.
+    if (gi->answer_sent < gi->answer_words) {
+        uint32_t owed = (uint32_t)(gi->answer_words - gi->answer_sent)
+                        * (uint32_t)sizeof(uint32_t);
+        uint32_t room = max_len < owed ? max_len : owed;
+        room &= ~(uint32_t)(sizeof(uint32_t) - 1u);
 
-    // SYS mode: send flag data, skipping unknown flags internally
-    while (gi->remaining_flags != 0u && gi->transfer_remaining > 0u) {
-        uint32_t flag = gi->remaining_flags & (~gi->remaining_flags + 1u);
-        uint8_t  wc   = pb_info_words_for_flag(flag);
-        if (wc == 0u) {
-            gi->remaining_flags &= ~flag;
-            continue;
-        }
-        uint32_t data_bytes = (uint32_t)wc * sizeof(uint32_t);
-        if (max_len < data_bytes) {
-            return PB_STATUS_OK;  // signal retry without advancing state
-        }
-        pb_status_t st = s->ops->get_info_sys(flag, buf, data_bytes, bytes_written, ctx);
+        pb_status_t st = s->ops->get_info((pb_info_type_t)gi->type, gi->param0,
+                                          gi->answer_sent, buf, room,
+                                          bytes_written, ctx);
         if (st != PB_STATUS_OK) {
+            *bytes_written = 0u;
             return st;
         }
-        if (data_bytes != *bytes_written) {
-            ERR("get_info_sys for flag 0x%08x wrote %u bytes, expected %u",
-                flag, *bytes_written, data_bytes);
+        // The count comes from the integrator.  More than the room offered
+        // would read past the end of buf, and a part word would leave at_word
+        // naming a boundary that is not one.
+        if (*bytes_written > room || (*bytes_written & 0x3u) != 0u) {
+            ERR("get_info type 0x%02x wrote %u bytes for %u of room",
+                gi->type, *bytes_written, room);
+            *bytes_written = 0u;
             return PB_STATUS_UNKNOWN_ERROR;
         }
-        gi->remaining_flags    &= ~flag;
-        gi->transfer_remaining  = (gi->transfer_remaining > *bytes_written)
-                                  ? gi->transfer_remaining - *bytes_written
-                                  : 0u;
-        *done = (gi->remaining_flags == 0u && gi->transfer_remaining == 0u);
-        return PB_STATUS_OK;
+        gi->answer_sent = (uint8_t)(gi->answer_sent
+                                    + *bytes_written / sizeof(uint32_t));
+        gi->transfer_remaining -= *bytes_written;
+        *done = (gi->transfer_remaining == 0u);
+        return PB_STATUS_OK;  // a count of zero signals retry
     }
 
-    // SYS mode: pad remaining transfer with zeros
+    // Whatever the host still expects, and nothing left to say.  Padded in
+    // whole words, like everything else this reply carries, which is what keeps
+    // transfer_remaining a multiple of four: the call above declines room for
+    // less than a word, and a part word left behind here would leave it
+    // declining that room for the rest of the transfer.
     uint32_t chunk = gi->transfer_remaining < max_len ? gi->transfer_remaining : max_len;
+    chunk &= ~(uint32_t)(sizeof(uint32_t) - 1u);
     memset(buf, 0, chunk);
     gi->transfer_remaining -= chunk;
     *bytes_written = chunk;
@@ -706,6 +688,7 @@ static void pb_handle_data_in(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
         pb_stall(s, st);
         return;
     }
+    s->data_in_remaining = cmd->transfer_len;
     pb_set_state(s, PB_STATE_DATA_IN);
 }
 
@@ -904,6 +887,7 @@ static void pb_dispatch_custom_cmd(pb_state_block_t *s, const picoboot_cmd_t *cm
     // Preserve the command for the duration of the data phase — fill is handed
     // it on every call, and the caller's copy is about to go out of scope.
     s->xfer.custom_cmd = *cmd;
+    s->data_in_remaining = cmd->transfer_len;
     pb_set_state(s, PB_STATE_CUSTOM_IN);
 }
 
@@ -944,6 +928,12 @@ static void pb_task_idle(pb_state_block_t *s) {
 // Drives a device->host data phase: calls fill repeatedly, moving what it
 // produces onto the IN endpoint, until the transfer completes or the endpoint
 // runs out of space.  Shared by built-in and custom data-in commands.
+//
+// The host is sent dTransferLength bytes and no more (RP2350 datasheet 5.6.4),
+// and that is held here rather than in each fill: the room offered is never
+// more than the transfer has left, so no fill can put a further byte on the
+// pipe — an integrator's own fill included, which is the one the library cannot
+// reach into.
 static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
     uint8_t buf[64];
 
@@ -955,12 +945,31 @@ static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
         }
 
         uint32_t max_len      = space < sizeof(buf) ? space : sizeof(buf);
+        // Whether what is left of the transfer, rather than the endpoint, is
+        // what limits the room on offer.  If it is, this is as much room as
+        // there will ever be, and a fill that declines it is asking for more
+        // than the host made room for.
+        bool     transfer_capped = s->data_in_remaining <= max_len;
+        if (transfer_capped) {
+            max_len = s->data_in_remaining;
+        }
         uint32_t bytes_written = 0u;
         bool     done          = false;
 
         pb_status_t st = fill(s, buf, max_len, &bytes_written, &done, s->ctx);
         if (st != PB_STATUS_OK) {
             pb_stall(s, st);
+            return;
+        }
+
+        // The count comes from the fill, and for a custom command that is the
+        // integrator's code.  A count larger than the room it was offered would
+        // read past the end of buf and would take the counter below zero,
+        // leaving the clamp above meaningless for the rest of the transfer.
+        if (bytes_written > max_len) {
+            ERR("pb_task_data_in: fill reported %u bytes for %u of room",
+                bytes_written, max_len);
+            pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
             return;
         }
 
@@ -971,6 +980,7 @@ static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
                 pb_stall(s, PB_STATUS_UNKNOWN_ERROR);
                 return;
             }
+            s->data_in_remaining -= bytes_written;
         }
 
         if (done) {
@@ -981,6 +991,15 @@ static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
 
         if (bytes_written == 0u) {
             // Fill couldn't produce data this call (insufficient space for next item)
+            if (transfer_capped) {
+                // And the room on offer was the whole of what the transfer has
+                // left, so it cannot grow.  The host asked for a length its
+                // answer does not fit in.
+                LOG("Data-in fill declined the last %u bytes of the transfer",
+                    max_len);
+                pb_stall(s, PB_STATUS_BUFFER_TOO_SMALL);
+                return;
+            }
             picoboot_vendor_write_flush();
             return;
         }

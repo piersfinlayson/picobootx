@@ -53,12 +53,27 @@ static void op_reboot2_execute(const pb_reboot2_args_t *args, void *ctx) {
     picoboot_default_reboot2_execute(args, ctx);
 }
 
-static pb_status_t op_get_info_sys(uint32_t flags, uint8_t *buf,
-                                   uint32_t buf_len, uint32_t *bytes_written,
-                                   void *ctx) {
-    pbt_log("op_get_info_sys", flags, buf_len, 0, 0);
-    return picoboot_default_get_info_sys(flags, buf, buf_len, bytes_written,
-                                         ctx);
+// Logged after the call rather than before it, unlike the wrappers around it,
+// because the word count is the whole of what this callback answers and a
+// scenario asserting the new interface has nowhere else to read it.  a2 is that
+// count and a3 the status, both undefined to the caller when the status is not
+// PB_STATUS_OK.
+static pb_status_t op_get_info_prepare(pb_info_type_t type, uint32_t param0,
+                                       uint32_t *words, void *ctx) {
+    pb_status_t st = picoboot_default_get_info_prepare(type, param0, words, ctx);
+    pbt_log("op_get_info_prepare", type, param0, *words, (uint32_t)st);
+    return st;
+}
+
+// The four the contract hands over every call.  at_word and max_len are what
+// say how the answer was windowed, and a call the callback declined shows up as
+// a second entry carrying the same at_word.
+static pb_status_t op_get_info(pb_info_type_t type, uint32_t param0,
+                               uint32_t at_word, uint8_t *buf, uint32_t max_len,
+                               uint32_t *bytes_written, void *ctx) {
+    pbt_log("op_get_info", type, param0, at_word, max_len);
+    return picoboot_default_get_info(type, param0, at_word, buf, max_len,
+                                     bytes_written, ctx);
 }
 
 static pb_status_t op_read_prepare(uint32_t addr, uint32_t size, void *ctx) {
@@ -120,7 +135,8 @@ void pbt_ops_reset(void) {
         .enter_xip           = op_enter_xip,
         .reboot2_prepare     = op_reboot2_prepare,
         .reboot2_execute     = op_reboot2_execute,
-        .get_info_sys        = op_get_info_sys,
+        .get_info_prepare    = op_get_info_prepare,
+        .get_info            = op_get_info,
         .read_prepare        = op_read_prepare,
         .read                = op_read,
         .otp_read            = op_otp_read,
@@ -131,6 +147,96 @@ void pbt_ops_reset(void) {
         .write               = op_write,
         .otp_write           = op_otp_write,
     };
+}
+
+// ---------------------------------------------------------------------------
+// An integrator that serves the two UF2 info types
+//
+// picobootx.h has a device say which GET_INFO types it serves by refusing the
+// rest from get_info_prepare, and the default RP2350 implementations serve the
+// two the bootrom has a routine for.  The two UF2 types have no bootrom routine
+// behind them, so the only way to reach them is an integrator that answers them
+// itself — this is that integrator, and it is the harness's own the way the
+// sample custom command implementation is.
+//
+// The words are 5.6.4.11's.  UF2_TARGET carries the target partition number and
+// then that partition's two words, and UF2_STATUS the four words describing a
+// download.  Neither has a leading flags word: that word belongs to the two
+// bootrom routines, and 5.6.4.11 does not put one in front of these.
+// ---------------------------------------------------------------------------
+
+// pbt.h holds the family ids and the four UF2_STATUS words this answers with.
+// The measured part answered UF2_STATUS as four zeroes, which is a part with no
+// download to report.  The model answers a download in progress instead,
+// because 5.6.4.11's padding rule fills the tail of a transfer with zeroes and
+// an all-zero answer cannot be told apart from that fill.
+
+// Writes the whole answer for a UF2 type and returns how many words it is.
+static uint32_t pbt_uf2_answer(pb_info_type_t type, uint32_t param0,
+                               uint32_t *out) {
+    if (type == PB_INFO_UF2_STATUS) {
+        out[0] = PBT_UF2_STATUS_WORD0;
+        out[1] = PBT_UF2_STATUS_FAMILY;
+        out[2] = PBT_UF2_STATUS_DONE;
+        out[3] = PBT_UF2_STATUS_TOTAL;
+        return PBT_UF2_STATUS_WORDS;
+    }
+
+    // UF2_TARGET.  A family the modelled table has a partition for is
+    // downloaded into it, and any other family has nowhere to go.  So param0
+    // decides the answer, and a request whose family id did not reach the
+    // callback answers differently from one whose did.
+    unsigned count = pbt_partition_count();
+    for (unsigned p = 0; p < count; p++) {
+        if (param0 == PBT_UF2_FAMILY(p)) {
+            out[0] = p;
+            out[1] = pbt_partition_word(p, PBT_PART_LOC_FLAGS) + 0u;
+            out[2] = pbt_partition_word(p, PBT_PART_LOC_FLAGS) + 1u;
+            return PBT_UF2_TARGET_WORDS;
+        }
+    }
+    out[0] = PBT_UF2_TARGET_NOWHERE;
+    out[1] = PBT_PT_UNPARTITIONED_LOCATION;
+    out[2] = PBT_PT_UNPARTITIONED_FLAGS;
+    return PBT_UF2_TARGET_WORDS;
+}
+
+static bool pbt_is_uf2_type(pb_info_type_t type) {
+    return type == PB_INFO_UF2_TARGET || type == PB_INFO_UF2_STATUS;
+}
+
+pb_status_t pbt_uf2_get_info_prepare(pb_info_type_t type, uint32_t param0,
+                                     uint32_t *words, void *ctx) {
+    if (!pbt_is_uf2_type(type)) {
+        return op_get_info_prepare(type, param0, words, ctx);
+    }
+    uint32_t answer[PBT_UF2_STATUS_WORDS];
+    *words = pbt_uf2_answer(type, param0, answer);
+    pbt_log("op_get_info_prepare", type, param0, *words,
+            (uint32_t)PB_STATUS_OK);
+    return PB_STATUS_OK;
+}
+
+pb_status_t pbt_uf2_get_info(pb_info_type_t type, uint32_t param0,
+                             uint32_t at_word, uint8_t *buf, uint32_t max_len,
+                             uint32_t *bytes_written, void *ctx) {
+    if (!pbt_is_uf2_type(type)) {
+        return op_get_info(type, param0, at_word, buf, max_len, bytes_written,
+                           ctx);
+    }
+    pbt_log("op_get_info", type, param0, at_word, max_len);
+
+    uint32_t answer[PBT_UF2_STATUS_WORDS];
+    uint32_t total = pbt_uf2_answer(type, param0, answer);
+
+    uint32_t left  = (at_word < total) ? total - at_word : 0u;
+    uint32_t words = max_len / 4u;
+    if (words > left) {
+        words = left;
+    }
+    memcpy(buf, &answer[at_word], words * 4u);
+    *bytes_written = words * 4u;
+    return PB_STATUS_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +260,8 @@ const picoboot_cmd_t *pbt_custom_last_cmd(void) { return &s_custom_last_cmd; }
 
 uint32_t pbt_custom_fill_calls(void) { return s_custom_fill_calls; }
 
+uint32_t pbt_custom_bytes_produced(void) { return s_custom_produced; }
+
 static pb_status_t custom_dispatch(const picoboot_cmd_t *cmd, uint8_t *buf,
                                    uint32_t buf_len, uint32_t *bytes_written,
                                    void *ctx) {
@@ -173,6 +281,7 @@ static pb_status_t custom_dispatch(const picoboot_cmd_t *cmd, uint8_t *buf,
         case PBT_CUSTOM_CMD_COUNT:
         case PBT_CUSTOM_CMD_STALL:
         case PBT_CUSTOM_CMD_ITEMS:
+        case PBT_CUSTOM_CMD_OVER:
             return PB_STATUS_OK;
         case PBT_CUSTOM_CMD_REFUSE:
             return PBT_CUSTOM_REFUSE_STATUS;
@@ -207,6 +316,31 @@ static pb_status_t custom_fill(const picoboot_cmd_t *cmd, uint8_t *buf,
                 return PBT_CUSTOM_FILL_STATUS;
             }
             break;
+
+        case PBT_CUSTOM_CMD_OVER: {
+            // Writes what there is room for and reports more than it wrote.
+            // The room is the smaller of the buffer it was handed and what the
+            // transfer has left, so on the call that finishes the transfer the
+            // reported figure is past both.
+            //
+            // It writes nothing past what it reports room for.  A callback that
+            // really wrote past the end of the buffer would be corrupting the
+            // library's memory, which no library can defend against — the
+            // number is the only thing it can check.
+            //
+            // done stays clear whatever it has produced, so a library whose
+            // count of the transfer has been pushed past zero asks again and
+            // its next answer reaches the wire as well.  The early return above
+            // is what ends the transfer once the callback has produced all of
+            // it, so a scenario measures an overrun rather than hanging.
+            uint32_t chunk = remaining < max_len ? remaining : max_len;
+            for (uint32_t i = 0; i < chunk; i++) {
+                buf[i] = (uint8_t)(s_custom_produced + i);
+            }
+            s_custom_produced += chunk;
+            *bytes_written = chunk + PBT_CUSTOM_OVERSTATE_BY;
+            return PB_STATUS_OK;
+        }
 
         case PBT_CUSTOM_CMD_ITEMS: {
             // Fixed-size items that cannot be split.  When there is not enough

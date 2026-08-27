@@ -6,7 +6,7 @@
 
 [package]
 name = "picobootx-embassy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Device-side PICOBOOT for embassy-usb: a driver task, a transport and a control handler"
 keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
 categories = ["embedded", "no-std", "asynchronous"]

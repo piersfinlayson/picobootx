@@ -13,9 +13,9 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-use picobootx::{Ecc, Exclusive, Reboot, Result, Status, Target, wire::FLASH_PAGE_SIZE};
+use picobootx::{Ecc, Exclusive, Info, Reboot, Result, Status, Target, wire::FLASH_PAGE_SIZE};
 
-use crate::cabi::{CAddrSizeArgs, CExclusiveArgs, CRebootArgs, CStatus};
+use crate::cabi::{CAddrSizeArgs, CExclusiveArgs, CInfoType, CRebootArgs, CStatus};
 
 /// The status code C reads back from a `Result`.
 fn code(result: Result) -> CStatus {
@@ -212,22 +212,43 @@ pub unsafe extern "C" fn picoboot_default_otp_write(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn picoboot_default_get_info_sys(
-    flag: u32,
+pub unsafe extern "C" fn picoboot_default_get_info_prepare(
+    info: CInfoType,
+    param0: u32,
+    words: *mut u32,
+    ctx: *mut c_void,
+) -> CStatus {
+    let _ = ctx;
+    let Some(info) = Info::from_wire(info) else {
+        return Status::InvalidArg as CStatus;
+    };
+    match picobootx_rp2350::get_info_prepare(info, param0) {
+        Ok(n) => {
+            unsafe { words.write(n) };
+            Status::Ok as CStatus
+        }
+        Err(status) => status as CStatus,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn picoboot_default_get_info(
+    info: CInfoType,
+    param0: u32,
+    at_word: u32,
     buf: *mut u8,
-    buf_size: u32,
+    max_len: u32,
     bytes_written: *mut u32,
     ctx: *mut c_void,
 ) -> CStatus {
     let _ = ctx;
-    let out = unsafe { out_slice(buf, buf_size as usize) };
-    // picobootx.h has this report what it wrote.  The buffer is sized for the
-    // one flag asked for and is filled or the call fails, so what it wrote on
-    // success is the whole of it.
-    let len = out.len() as u32;
-    match picobootx_rp2350::get_info_sys(flag, out) {
-        Ok(()) => {
-            unsafe { bytes_written.write(len) };
+    let Some(info) = Info::from_wire(info) else {
+        return Status::InvalidArg as CStatus;
+    };
+    let out = unsafe { out_slice(buf, max_len as usize) };
+    match picobootx_rp2350::get_info(info, param0, at_word, out) {
+        Ok(n) => {
+            unsafe { bytes_written.write(n as u32) };
             Status::Ok as CStatus
         }
         Err(status) => status as CStatus,

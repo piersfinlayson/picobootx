@@ -12,7 +12,9 @@
 
 use core::ffi::c_void;
 
-use picobootx::{Command, Custom, Ecc, Exclusive, Filled, Ops, Reboot, Result, Status, Target};
+use picobootx::{
+    Command, Custom, Ecc, Exclusive, Filled, Info, Ops, Reboot, Result, Status, Target,
+};
 
 use crate::cabi::{
     CAddrSizeArgs, CCommand, CCustomOps, CExclusiveArgs, COps, CRebootArgs, CStatus,
@@ -192,35 +194,35 @@ impl Ops for OpsTable {
         status(unsafe { f(row, ecc as u8, buf.as_ptr(), buf.len() as u32, self.ctx) })
     }
 
-    fn get_info_sys_prepare(&mut self, _flags: u32) -> Result {
-        if self.t().and_then(|t| t.get_info_sys).is_none() {
+    fn get_info_prepare(&mut self, info: Info, param0: u32) -> Result<u32> {
+        let t = self.t().ok_or(Status::UnknownCmd)?;
+        let (Some(prepare), Some(_)) = (t.get_info_prepare, t.get_info) else {
             return Err(Status::UnknownCmd);
-        }
-        Ok(())
+        };
+        let mut words: u32 = 0;
+        status(unsafe { prepare(info as u8, param0, &mut words, self.ctx) })?;
+        Ok(words)
     }
 
-    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> Result {
+    fn get_info(&mut self, info: Info, param0: u32, at_word: u32, buf: &mut [u8]) -> Result<usize> {
         let f = self
             .t()
-            .and_then(|t| t.get_info_sys)
+            .and_then(|t| t.get_info)
             .ok_or(Status::UnknownCmd)?;
         let mut written: u32 = 0;
+        let len = buf.len() as u32;
         status(unsafe {
             f(
-                flag,
+                info as u8,
+                param0,
+                at_word,
                 buf.as_mut_ptr(),
-                buf.len() as u32,
+                len,
                 &mut written,
                 self.ctx,
             )
         })?;
-        // The C callback reports what it wrote, and the buffer is sized for the
-        // one flag it was asked for, so anything but a full buffer is an
-        // integrator's callback disagreeing with the flag it answered.
-        if written as usize != buf.len() {
-            return Err(Status::UnknownError);
-        }
-        Ok(())
+        Ok(written as usize)
     }
 
     fn reboot_prepare(&mut self, args: &Reboot) -> Result {

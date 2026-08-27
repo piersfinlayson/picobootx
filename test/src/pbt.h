@@ -269,14 +269,114 @@ void pbt_otp_fail(int rc);
 // and hand this same value back to the routine that restores XIP.
 void pbt_set_xip_clkdiv(uint8_t clkdiv);
 
-// Which GET_INFO SYS flags the modelled get_sys_info claims to support.  A flag
-// outside this set makes it report the request as unsupported.
+// ---------------------------------------------------------------------------
+// The modelled get_sys_info  (RP2350 datasheet 5.4.8.17)
+//
+// The flags that section defines, and what the modelled part answers.  These
+// live here rather than being read out of picobootx: the library holds no table
+// of flags, and the suites must say what the datasheet says rather than what
+// the implementation happens to do.
+// ---------------------------------------------------------------------------
+
+#define PBT_SYS_CHIP_INFO      0x0001u  // 3 words
+#define PBT_SYS_CRITICAL       0x0002u  // 1 word
+#define PBT_SYS_CPU_INFO       0x0004u  // 1 word
+#define PBT_SYS_FLASH_DEV_INFO 0x0008u  // 1 word
+#define PBT_SYS_BOOT_RANDOM    0x0010u  // 4 words
+#define PBT_SYS_NONCE          0x0020u  // "not supported"
+#define PBT_SYS_BOOT_INFO      0x0040u  // 4 words
+
+// Every flag 5.4.8.17 names, which is what a host asking for all of them sends.
+#define PBT_SYS_ALL 0x007Fu
+
+// The subset of those the modelled part answers, and so the flags word it
+// replies with when asked for all of them.  NONCE is the one 5.4.8.17 itself
+// marks unsupported, and it is the flag a real RP2350 drops.
+#define PBT_SYS_SERVED (PBT_SYS_ALL & ~PBT_SYS_NONCE)
+
+// How many words of data the served flags carry between them.
+#define PBT_SYS_SERVED_WORDS 14u
+
+// Which flags the modelled get_sys_info answers.  A flag outside this set is
+// dropped from the flags word it replies with and carries no data.  Defaults to
+// PBT_SYS_SERVED.
 void pbt_set_sys_info_supported(uint32_t mask);
 
-// The word the modelled get_sys_info returns for a flag, in each of its data
-// words.  Distinct per flag, so a scenario can tell which flag's data came
-// back rather than only how much did.
+// The word the modelled get_sys_info returns for a flag, in its first data
+// word — the second is that plus one, and so on.  Distinct per flag, so a
+// scenario can tell which flag's data came back rather than only how much did.
 uint32_t pbt_sys_info_word(uint32_t flag);
+
+// The flags 5.4.8.17 defines, in ascending order, and how many words of data a
+// set of them carries between them.  One table, held in the device model, so a
+// scenario's expectation and the modelled part cannot disagree about how long a
+// flag's data is.  The datasheet is what either is checked against.
+unsigned    pbt_sys_flag_count(void);
+uint32_t    pbt_sys_flag_at(unsigned index);
+const char *pbt_sys_flag_name(uint32_t flag);
+uint32_t    pbt_sys_info_words(uint32_t flags);
+
+// Make the modelled get_sys_info refuse with this bootrom error code, as a part
+// does when it will not answer at all.  Zero puts it back to answering
+// normally.
+void pbt_sys_info_fail(int rc);
+
+// The same, after this many calls have been answered.  One GET_INFO reaches the
+// chip twice — once for how long the answer is, once for the answer itself — so
+// a part that answers the first and refuses the second is one whose state moved
+// between them, and it is the only way to reach a refusal partway through.
+void pbt_sys_info_fail_after(unsigned calls, int rc);
+
+// ---------------------------------------------------------------------------
+// The modelled get_partition_table_info  (RP2350 datasheet 5.4.8.16)
+// ---------------------------------------------------------------------------
+
+#define PBT_PART_PT_INFO   0x0001u  // 3 words, about the table as a whole
+#define PBT_PART_LOC_FLAGS 0x0010u  // 2 words per partition
+#define PBT_PART_ID        0x0020u  // 2 words per partition
+#define PBT_PART_SINGLE    0x8000u  // narrows the per-partition flags to one
+
+// The flags the modelled part answers.  0x0040 PARTITION_FAMILY_IDS and 0x0080
+// PARTITION_NAME are defined by 5.4.8.16 and outside this set, so they are the
+// partition side's dropped flags.
+#define PBT_PART_SERVED \
+    (PBT_PART_PT_INFO | PBT_PART_LOC_FLAGS | PBT_PART_ID | PBT_PART_SINGLE)
+
+// The two words 5.4.8.16 reports for unpartitioned space.  Its note fixes the
+// base offset at 0 and the size at 0x2000 sectors, which is what the location
+// word carries.  These are the values a real RP2350 with no partition table
+// answers with.
+#define PBT_PT_UNPARTITIONED_LOCATION 0xFFFFE000u
+#define PBT_PT_UNPARTITIONED_FLAGS    0xFC078000u
+
+// The most partitions the model will hold.  5.4.8.16 numbers partitions 0-15.
+#define PBT_PARTITION_MAX 16u
+
+// How many partitions the modelled table holds.  Defaults to none, which is the
+// part the partition expectations were measured against.
+void     pbt_set_partitions(unsigned count);
+unsigned pbt_partition_count(void);
+
+// Which flags the modelled get_partition_table_info answers.  Defaults to
+// PBT_PART_SERVED.
+void pbt_set_partition_supported(uint32_t mask);
+
+// The word the modelled routine returns for a partition and a per-partition
+// flag, in its first data word.  Distinct per partition and per flag, so a
+// scenario can say whose data arrived and in what order.
+uint32_t pbt_partition_word(unsigned index, uint32_t flag);
+
+// Make the modelled get_partition_table_info refuse with this bootrom error
+// code.  Zero puts it back to answering normally.
+void pbt_partition_fail(int rc);
+
+// The same, after this many calls have been answered.  5.4.8.16 describes
+// exactly this part: the bootrom holds a hash of the partition table as it
+// loaded it, and "If the hash has changed by the time this method is called"
+// the routine returns BOOTROM_ERROR_INVALID_STATE.  A table rewritten between
+// the two calls one GET_INFO makes is a part that answers the first and refuses
+// the second.
+void pbt_partition_fail_after(unsigned calls, int rc);
 
 // True while the model has interrupts disabled, and true while flash is mapped
 // for execute-in-place.  The erase sequence has to move both, in order.
@@ -439,6 +539,39 @@ pb_status_t pbt_run_cmd(const picoboot_cmd_t *cmd);
 void pbt_recover(void);
 
 // ---------------------------------------------------------------------------
+// An integrator that serves the two UF2 GET_INFO types
+//
+// The default implementations answer the two types the bootrom has a routine
+// for, and refuse the two UF2 types, which have none.  A scenario that wants a
+// device serving those puts this pair into pbt_ops before pbt_start.  It hands
+// the other two types to the defaults, so it is a device that serves all four.
+//
+// Both record under the same names as the default wrappers, since the log says
+// which callback the library reached rather than what sits behind it.
+// ---------------------------------------------------------------------------
+
+pb_status_t pbt_uf2_get_info_prepare(pb_info_type_t type, uint32_t param0,
+                                     uint32_t *words, void *ctx);
+pb_status_t pbt_uf2_get_info(pb_info_type_t type, uint32_t param0,
+                             uint32_t at_word, uint8_t *buf, uint32_t max_len,
+                             uint32_t *bytes_written, void *ctx);
+
+// The family id the modelled partition at this index accepts, and what
+// UF2_TARGET answers for a family with nowhere to go.
+#define PBT_UF2_FAMILY(index)  (0x5F320000u + (uint32_t)(index))
+#define PBT_UF2_TARGET_NOWHERE 0xFFFFFFFFu
+
+// UF2_STATUS's four words, as the model answers them.
+#define PBT_UF2_STATUS_WORD0  0x01000000u
+#define PBT_UF2_STATUS_FAMILY PBT_UF2_FAMILY(0)
+#define PBT_UF2_STATUS_DONE   3u
+#define PBT_UF2_STATUS_TOTAL  8u
+
+// How many words each UF2 type answers with.
+#define PBT_UF2_TARGET_WORDS 3u
+#define PBT_UF2_STATUS_WORDS 4u
+
+// ---------------------------------------------------------------------------
 // The sample custom command implementation
 // ---------------------------------------------------------------------------
 
@@ -452,6 +585,9 @@ void pbt_recover(void);
 #define PBT_CUSTOM_CMD_STALL  0x85u  // data in: fill refuses partway through
 #define PBT_CUSTOM_CMD_ITEMS  0x86u  // data in: fixed-size items, so fill has
                                      // to decline a call with too little room
+#define PBT_CUSTOM_CMD_OVER   0x87u  // data in: fill reports writing more than
+                                     // it wrote, and more than the room it was
+                                     // offered
 
 // The status PBT_CUSTOM_CMD_REFUSE's dispatch returns, and the one
 // PBT_CUSTOM_CMD_STALL's fill returns.  Neither is produced by any built-in
@@ -466,6 +602,11 @@ void pbt_recover(void);
 // size, so a boundary lands mid-packet and fill has to decline at least once.
 #define PBT_CUSTOM_ITEM_SIZE 24u
 
+// How many bytes past what it wrote PBT_CUSTOM_CMD_OVER's fill claims.  On the
+// call that finishes the transfer that figure is also past what the transfer
+// had left, which is what pushes a library's count of the remainder below zero.
+#define PBT_CUSTOM_OVERSTATE_BY 8u
+
 // Reset the sample implementation's own progress tracking.  pbt_begin does
 // this.  The callbacks keep their cursor here rather than in the library, which
 // is the contract picoboot_custom_ops_t.fill states.
@@ -476,6 +617,12 @@ void pbt_custom_reset(void);
 // the originating command for the whole transfer.
 const picoboot_cmd_t *pbt_custom_last_cmd(void);
 uint32_t              pbt_custom_fill_calls(void);
+
+// How many bytes the sample fill callback has actually written across this
+// transfer, as opposed to how many it told the library it wrote.  A scenario
+// asserts against this to say that nothing reached the host that the callback
+// never produced.
+uint32_t              pbt_custom_bytes_produced(void);
 
 // ---------------------------------------------------------------------------
 // The suites

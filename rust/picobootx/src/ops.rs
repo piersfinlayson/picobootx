@@ -75,6 +75,56 @@ impl Ecc {
     }
 }
 
+/// What a `GET_INFO` is asking for, and what shape its answer takes.
+///
+/// Every type's reply is a word saying how many significant words follow, then
+/// those words, then padding.  The count word and the padding are the library's.
+/// Everything between them is the device's answer, and its shape is the type's:
+///
+/// - [`Info::Sys`] — what `get_sys_info` produces: a first word carrying the
+///   subset of `param0` the device answered, then the data for each of those
+///   flags in flag order.
+/// - [`Info::Partition`] — what `get_partition_table_info` produces, in the same
+///   shape, from `param0` as `flags_and_partition`.
+/// - [`Info::Uf2Target`] — the words the protocol defines for it, from `param0`
+///   as a UF2 family id.  No leading flags word.
+/// - [`Info::Uf2Status`] — the words the protocol defines for it.  No leading
+///   flags word, and no parameter.
+///
+/// The values are the protocol's `bType`, and a type outside them never reaches
+/// an [`Ops`] — the library refuses it with [`Status::InvalidArg`].
+///
+/// A type added by a later protocol revision is not a break for anyone matching
+/// on this, so it is `non_exhaustive`.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Info {
+    /// System information.
+    Sys = 0x01,
+    /// Partition table information.
+    Partition = 0x02,
+    /// Which partition a UF2 of a given family downloads into.
+    Uf2Target = 0x03,
+    /// How a UF2 download is going.
+    Uf2Status = 0x04,
+}
+
+impl Info {
+    /// The protocol's `bType` back to the type, for a reader that took it off
+    /// the wire.
+    #[must_use]
+    pub const fn from_wire(v: u8) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Sys),
+            0x02 => Some(Self::Partition),
+            0x03 => Some(Self::Uf2Target),
+            0x04 => Some(Self::Uf2Status),
+            _ => None,
+        }
+    }
+}
+
 /// Where a `WRITE` is going, as `Ops::write_prepare` reports it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Target {
@@ -222,21 +272,46 @@ pub trait Ops {
         Err(Status::UnknownCmd)
     }
 
-    /// Whether the device answers `GET_INFO` for the system flags asked for.
+    /// How many words the answer to this information request will be.
     ///
-    /// Only the system info type reaches this.  The partition type is answered
-    /// by the library.
-    fn get_info_sys_prepare(&mut self, flags: u32) -> Result {
-        let _ = flags;
+    /// The library puts that count on the wire ahead of the answer, and judges
+    /// the host's transfer length against it — a transfer too short for the
+    /// answer this device says it will give is refused with
+    /// [`Status::BufferTooSmall`], before any of it goes.
+    ///
+    /// A device says which types it serves by refusing the rest here.  A type
+    /// outside [`Info`] never arrives: the library refuses that itself.
+    ///
+    /// # Errors
+    ///
+    /// [`Status::InvalidArg`] for a type this device does not serve, or
+    /// whatever it refuses this particular request with.  Defaulted to
+    /// [`Status::UnknownCmd`], which is a device that does not serve `GET_INFO`
+    /// at all.
+    fn get_info_prepare(&mut self, info: Info, param0: u32) -> Result<u32> {
+        let _ = (info, param0);
         Err(Status::UnknownCmd)
     }
 
-    /// Write the words one system info flag carries.
+    /// Produce the answer, from `at_word` onwards, and say how many bytes of
+    /// `buf` were written.
     ///
-    /// Exactly one flag per call, and `buf` is sized for it, so the whole of it
-    /// is filled or the call fails.
-    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> Result {
-        let _ = (flag, buf);
+    /// `info` and `param0` are handed back every time, so nothing need be kept
+    /// between calls.  `buf` is always a whole number of words, and never longer
+    /// than the answer has left to give, so the last call offers exactly the
+    /// bytes still owed.  Returning `Ok(0)` says there was not room for the next
+    /// piece and asks to be called again with more.
+    ///
+    /// The shape of what is written belongs to the type, not to the library —
+    /// see [`Info`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Ops::get_info_prepare`].  Writing more than `buf` holds, or a count
+    /// that is not a whole number of words, halts the command with
+    /// [`Status::UnknownError`] and none of those bytes reaches the host.
+    fn get_info(&mut self, info: Info, param0: u32, at_word: u32, buf: &mut [u8]) -> Result<usize> {
+        let _ = (info, param0, at_word, buf);
         Err(Status::UnknownCmd)
     }
 
@@ -281,12 +356,23 @@ pub trait Custom {
 
     /// Serve a command.  For one with a data phase this is where the arguments
     /// are checked and whatever `fill` needs is set up.
+    ///
+    /// The command's `transfer_len` is the whole of what the device may send,
+    /// and an answer that does not fit it is yours to refuse here, with
+    /// [`Status::BufferTooSmall`].  A transfer that reaches `fill` with an
+    /// answer too large for it is refused there instead, with the same status
+    /// and once part of the answer may already have gone to the host.
     fn dispatch(&mut self, cmd: &Command) -> Result;
 
     /// Produce the device-to-host payload, over as many calls as it takes.
     ///
     /// The command is handed back every time, and the position between calls
     /// is yours to keep — the library holds no cursor on your behalf.
+    ///
+    /// `buf` is never longer than the transfer has left to send, so the last
+    /// call of a transfer offers exactly the bytes still owed to the host.
+    /// Reporting more bytes than `buf` holds halts the command with
+    /// [`Status::UnknownError`], and none of them reaches the host.
     ///
     /// Defaulted, so a device with no data-carrying commands need not write it.
     /// Returning data from `dispatch` without writing this is the same

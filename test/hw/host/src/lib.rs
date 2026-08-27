@@ -121,9 +121,22 @@ pub const INFO_ARGS_LEN: usize = 16;
 /// Which kind of information is being asked for, in the first argument byte.
 pub const INFO_SYS: u8 = 0x01;
 pub const INFO_PARTITION: u8 = 0x02;
+pub const INFO_UF2_TARGET: u8 = 0x03;
+pub const INFO_UF2_STATUS: u8 = 0x04;
 
-/// The reply opens with one word saying how many words follow.
-pub const INFO_HEADER_LEN: usize = 4;
+/// The first byte value past the last type the protocol names, which is the one
+/// a device whose test of the type is off by one serves.
+pub const INFO_UNNAMED: u8 = 0x05;
+
+/// The reply opens with a word saying how many words follow, then the flags
+/// word those words belong to.  The flags word is counted by the first, so a
+/// reply carrying no data at all is still these two words.
+pub const INFO_HEADER_LEN: usize = 8;
+
+/// The two UF2 types answer with their words alone (RP2350 datasheet 5.6.4.11),
+/// so there is no flags word in front of them and the reply opens with the
+/// count word by itself.
+pub const INFO_COUNT_LEN: usize = 4;
 
 /// Long enough for a device that is going to answer to have answered.
 pub const TIMEOUT: Duration = Duration::from_millis(2000);
@@ -357,6 +370,27 @@ impl Board {
         Ok(data)
     }
 
+    /// Read a reply and keep every byte of it, however many there are.
+    ///
+    /// [`Board::read_reply`] cuts what came back down to the length asked for,
+    /// which is right for reading an answer and no use for judging one: a
+    /// device sending more than the transfer length allows has the excess
+    /// trimmed away before anything can look at it.  This keeps the lot.
+    ///
+    /// `room` is how much space to offer, and it has to be more than the
+    /// answer is allowed to be, since a transfer ends when the buffer fills as
+    /// well as on a short packet.  A whole spare packet is what leaves an
+    /// overrun somewhere to land.
+    pub fn read_raw(&mut self, room: usize) -> Result<Vec<u8>, String> {
+        let rounded = room.div_ceil(MAX_PACKET) * MAX_PACKET;
+
+        self.ep_in
+            .transfer_blocking(Buffer::new(rounded), TIMEOUT)
+            .into_result()
+            .map(nusb::transfer::Buffer::into_vec)
+            .map_err(|e| format!("{e}"))
+    }
+
     /// Acknowledge a device-to-host phase, which is the host's to send.
     ///
     /// An empty packet, which is what the protocol names.  The device takes a
@@ -535,15 +569,72 @@ impl Board {
         })
     }
 
-    /// Ask for partition information, which the library answers itself.
+    /// Ask for partition information, and return the count word, the flags word
+    /// and the data after them.
     ///
-    /// Unlike the system kind there is no header — the reply is the words
-    /// themselves — so the whole of it is data.
-    pub fn get_info_partition(&mut self, words: u32) -> Result<Vec<u8>, String> {
-        let mut args = [0u8; INFO_ARGS_LEN];
-        args[0] = INFO_PARTITION;
+    /// The part answers this one, so it comes back in the shape the system kind
+    /// does: 5.4.8.16 and 5.4.8.17 both put the subset of the flags that were
+    /// answered in the first word of their own buffer.  What a flag is worth in
+    /// words is a different question in each — a partition flag naming
+    /// something the part does not have is answered with no words at all, so
+    /// what follows the flags word here cannot be worked out from it.
+    pub fn get_info_partition(
+        &mut self,
+        flags_and_partition: u32,
+        words: u32,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        self.get_info_flagged(INFO_PARTITION, flags_and_partition, words)
+    }
 
-        let len = words * 4;
+    /// Ask for information of a type that answers with its words alone, and
+    /// return the count word and the words after it.
+    ///
+    /// The two UF2 types are the ones shaped this way: what they answer is the
+    /// answer itself, with nothing in front of it saying what was asked.
+    /// `words` is how many of them the answer is expected to carry, which is
+    /// what the transfer length is built from.
+    pub fn get_info_words(
+        &mut self,
+        info_type: u8,
+        param0: u32,
+        words: u32,
+    ) -> Result<(u32, Vec<u8>), String> {
+        let len = INFO_COUNT_LEN as u32 + words * 4;
+        let reply = self.get_info_reply(info_type, param0, len)?;
+
+        if reply.len() < INFO_COUNT_LEN {
+            return Err(format!("the reply was {} bytes", reply.len()));
+        }
+        let count = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]);
+        Ok((count, reply[INFO_COUNT_LEN..].to_vec()))
+    }
+
+    /// Ask for information of a type whose answer opens with a flags word, and
+    /// return the count word, that flags word and the data after them.
+    fn get_info_flagged(
+        &mut self,
+        info_type: u8,
+        param0: u32,
+        words: u32,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        let len = INFO_HEADER_LEN as u32 + words * 4;
+        let reply = self.get_info_reply(info_type, param0, len)?;
+
+        if reply.len() < INFO_HEADER_LEN {
+            return Err(format!("the reply was {} bytes", reply.len()));
+        }
+        let count = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]);
+        let answered = u32::from_le_bytes([reply[4], reply[5], reply[6], reply[7]]);
+        Ok((count, answered, reply[INFO_HEADER_LEN..].to_vec()))
+    }
+
+    /// Send one `GET_INFO` at a stated transfer length and take the reply,
+    /// acknowledging it the way the protocol says.
+    fn get_info_reply(&mut self, info_type: u8, param0: u32, len: u32) -> Result<Vec<u8>, String> {
+        let mut args = [0u8; INFO_ARGS_LEN];
+        args[0] = info_type;
+        args[4..8].copy_from_slice(&param0.to_le_bytes());
+
         self.send_cmd(CMD_GET_INFO, len, &args)?;
         let reply = self.read_reply(len as usize)?;
         self.ack()?;
@@ -598,28 +689,19 @@ impl Board {
         self.read_ack()
     }
 
-    /// Ask for system information, and return the reply split into the header
-    /// word and the data after it.
+    /// Ask for system information, and return the count word, the flags word
+    /// and the data after them.
     ///
-    /// `words` is how many words of data the flags asked for are expected to
-    /// carry, which is what the transfer length is built from — the protocol
-    /// leaves that length to the host, so getting it wrong is one of the things
-    /// worth asking a device about.
-    pub fn get_info_sys(&mut self, flags: u32, words: u32) -> Result<(u32, Vec<u8>), String> {
-        let mut args = [0u8; INFO_ARGS_LEN];
-        args[0] = INFO_SYS;
-        args[4..8].copy_from_slice(&flags.to_le_bytes());
-
-        let len = INFO_HEADER_LEN as u32 + words * 4;
-        self.send_cmd(CMD_GET_INFO, len, &args)?;
-        let reply = self.read_reply(len as usize)?;
-        self.ack()?;
-
-        if reply.len() < INFO_HEADER_LEN {
-            return Err(format!("the reply was {} bytes", reply.len()));
-        }
-        let header = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]);
-        Ok((header, reply[INFO_HEADER_LEN..].to_vec()))
+    /// `words` is how many words of data the answer is expected to carry, which
+    /// is what the transfer length is built from — the protocol leaves that
+    /// length to the host, so getting it wrong is one of the things worth asking
+    /// a device about.  A device that cannot fit its answer in the length given
+    /// refuses the command rather than sending part of it.  What the answer
+    /// carries is not what was asked for: a flag the part cannot answer is
+    /// dropped and is worth no words, so a length sized to the request would be
+    /// longer than the reply.
+    pub fn get_info_sys(&mut self, flags: u32, words: u32) -> Result<(u32, u32, Vec<u8>), String> {
+        self.get_info_flagged(INFO_SYS, flags, words)
     }
 
     /// Clear a halt the device raised, in one direction.

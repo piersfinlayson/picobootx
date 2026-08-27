@@ -29,8 +29,8 @@ pub mod usb;
 
 pub use defaults::{
     SERIAL_LEN, enter_xip, exclusive_access, exit_xip, flash_erase, flash_erase_prepare,
-    flash_page_write, get_info_sys, otp_read, otp_write, read, read_prepare, reboot_execute,
-    reboot_prepare, serial, write, write_prepare,
+    flash_page_write, get_info, get_info_prepare, otp_read, otp_write, read, read_prepare,
+    reboot_execute, reboot_prepare, serial, write, write_prepare,
 };
 pub use ops::Rp2350;
 

@@ -14,13 +14,34 @@ release.
 
 ## Unreleased
 
-- [INTEGRATION.md](INTEGRATION.md) now says a C integrator's linker script and
-  reset handler have to place and copy `.ramfunc`.
-- `picoboot_default_get_info_sys` read past its own buffer for a request of 17
-  to 19 bytes, reachable only by an integrator calling it directly.
+picobootx's `GET_INFO` answers did not match the RP2350 datasheet, so a host
+reading them as specified read them wrong.  Fixing it replaced the operations
+table's `GET_INFO` entry with a pair, which is not backwards compatible.
+
+- `GET_INFO` for system information sends the flags word, and the leading count
+  includes it.  Neither was sent before.
+- A flag the device cannot answer is dropped, rather than the command being
+  refused.
+- `picoboot_ops_t` carries `get_info_prepare` and `get_info` in place of
+  `get_info_sys`.
+- The partition table, UF2 target partition and UF2 download status can be
+  served.  The partition table used to answer five hardcoded words.
+- `picoboot_default_get_info_prepare` and `picoboot_default_get_info` replace
+  `picoboot_default_get_info_sys`.  They answer the UF2 target partition as
+  nowhere and refuse the download status.
+- A device-to-host transfer no longer sends more bytes than the host asked for.
+- `GET_INFO` is refused with `PB_STATUS_BUFFER_TOO_SMALL` where
+  `dTransferLength` cannot hold the whole answer.
+- An information type the library does not serve is refused with
+  `PB_STATUS_INVALID_ARG` rather than `PB_STATUS_UNKNOWN_CMD`.
+- `PICOBOOT_STATE_SIZE` is 80 bytes, four more than before.
+- `PICOBOOT_GET_INFO_MAX_LEN` and `PICOBOOT_INFO_MAX_ANSWER_WORDS` say how long
+  a `GET_INFO` transfer and its answer may be.
 - `picoboot_default_read_prepare`, `picoboot_default_write_prepare` and
   `picoboot_default_flash_erase_prepare` accepted a range that wrapped the
   address space.
+- [INTEGRATION.md](INTEGRATION.md) now says a C integrator's linker script and
+  reset handler have to place and copy `.ramfunc`.
 
 ## 0.2.0 - 2026-08-17
 

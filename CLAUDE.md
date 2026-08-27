@@ -25,11 +25,11 @@ shipped hardware.
   the contract, and must not date — no "currently", no "yet", no reference to
   work that has not landed.
 - **Run `ci/local-checks.sh` before saying a change is ready.**  It is every
-  gate CI applies that this machine can apply too, in CI's order, stopping at
-  the first failure.  A list of checks assembled by hand each time drifts from
-  what CI gates on, and what drops out is whatever was last inconvenient.  The
-  two it cannot run are the picotool and picoboot-rs bridges, which need Linux,
-  vhci-hcd and root.
+  gate CI applies, in CI's order, stopping at the first failure.  A list of
+  checks assembled by hand each time drifts from what CI gates on, and what
+  drops out is whatever was last inconvenient.  It runs every one of CI's jobs,
+  the picotool and picoboot-rs bridges included — those go through
+  `ci/bridges-docker.sh`, which needs docker running.
 
 ## Writing
 
@@ -99,9 +99,11 @@ shipped hardware.
   below, and `coverage-unmeasured.txt` names the sources that carry no
   executable line, each with the reason.  `check-ramfunc.sh` and
   `ramfunc-probe/` link `picobootx-rp2350` into a bare-metal binary and check
-  where `.ramfunc` landed.  `local-checks.sh` runs every gate CI applies that
-  this machine can apply too, and `rust-docs.sh` builds the crates' documents
-  with warnings as errors.
+  where `.ramfunc` landed.  `local-checks.sh` runs every gate CI applies, and
+  `rust-docs.sh` builds the crates' documents with warnings as errors.
+  `bridges-docker.sh`, `bridges-run.sh` and `bridges.dockerfile` run the two
+  bridges on a machine that is not Linux, by handing them the Linux kernel the
+  docker daemon already has.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
 - `CHANGELOG.md` is the C's and `rust/CHANGELOG.md` the Rust crates'.
@@ -365,11 +367,11 @@ Two things that build has to keep:
 - **The tests go in `tests/`, not in the measured sources.**  llvm-cov exports
   by file, so a `#[cfg(test)] mod tests` puts its own lines into that file's
   totals — always covered, so they pad the rate of the library lines beside
-  them.  `wire.rs` carries one because `INFO_FLAGS` and `info_max_words` are
-  private and a `const fn` evaluated at compile time is not reached at run time
-  by anything else.  That file is at 100% of its library lines too, so nothing
-  is hidden behind the padding, and that is the condition for putting a test
-  module in a measured file at all.
+  them.  A measured file may carry one only where what it
+  tests is private and nothing reaches it at run time — a `const fn` evaluated
+  at compile time, say — and only where that file is at 100% of its library
+  lines anyway, so nothing is hidden behind the padding.  Those two together
+  are the condition for putting a test module in a measured file at all.
 - **A test binary brings its own profiler runtime**, unlike the archive, which
   is handed one by name.  The profiles are still checked for existence and for
   being non-empty before llvm-profdata is given them, because a build that

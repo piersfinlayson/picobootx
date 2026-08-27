@@ -18,7 +18,9 @@
 #define BOOTROM_ERROR_IO                        (-6)    // Unused in RP2350
 #define BOOTROM_ERROR_BADAUTH                   (-7)    // Unused in RP2350
 #define BOOTROM_ERROR_CONNECT_FAILED            (-8)    // Unused in RP2350
-#define BOOTROM_ERROR_INSUFFICIENT_RESOURCES    (-9)    // Unused in RP2350
+#define BOOTROM_ERROR_INSUFFICIENT_RESOURCES    (-9)    // get_uf2_target_partition
+                                                        // returns it for a work area
+                                                        // too small
 #define BOOTROM_ERROR_INVALID_ADDRESS           (-10)
 #define BOOTROM_ERROR_BAD_ALIGNMENT             (-11)
 #define BOOTROM_ERROR_INVALID_STATE             (-12)
@@ -84,13 +86,10 @@ static get_sys_info_fn_t pb_lookup_get_sys_info_fn(void) {
     return get_sys_info;
 }
 
-#if 0
-// Currnently unused
 typedef int (*get_partition_table_info_fn_t)(uint32_t *out_buffer, uint32_t out_buffer_word_size, uint32_t flags_and_partition);
 static get_partition_table_info_fn_t pb_lookup_get_partition_table_info_fn(void) {
     return (get_partition_table_info_fn_t)picoboot_lookup_boot_fn('G', 'P');
 }
-#endif
 
 typedef int (*otp_access_fn_t)(uint8_t *buf, uint32_t buf_len, uint32_t row_and_flags);
 otp_access_fn_t pb_lookup_otp_access_fn(void) {
@@ -444,44 +443,153 @@ pb_status_t picoboot_default_flash_erase(
     return PB_STATUS_OK;
 }
 
-pb_status_t picoboot_default_get_info_sys(
-    uint32_t  flag,
-    uint8_t  *buf,
-    uint32_t  buf_size,
-    uint32_t *bytes_written,
-    void     *ctx
-) {
-    (void)ctx;
+// PT_INFO, in get_partition_table_info's flags_and_partition (RP2350 datasheet
+// 5.4.8.16).  Its answer is the flags word, a word of partition counts, and two
+// words describing the unpartitioned space.
+#define PB_PT_INFO_FLAG   0x0001u
+#define PB_PT_INFO_WORDS  4u
 
-    get_sys_info_fn_t get_sys_info = pb_lookup_get_sys_info_fn();
-    if (get_sys_info == NULL) {
-        ERR("Unable to find get_sys_info in ROM");
+// Word 0 of a UF2 target answer, saying the family goes nowhere (RP2350
+// datasheet 5.6.4.11).
+#define PB_UF2_TARGET_NONE 0xffffffffu
+
+// Where a UF2 of some family would be downloaded to.
+//
+// Nowhere.  A UF2 is dragged onto a mass storage drive, as it is onto the one
+// BOOTSEL mode presents.  picobootx presents none and is told of none, so there
+// is nowhere for it to name, whatever family was asked about — which is why this
+// ignores the family.  A device that does present such a drive answers this
+// itself rather than taking this default.
+//
+// The two words beside the target describe the unpartitioned space, and
+// get_partition_table_info reports them.  The datasheet marks them meaningful
+// only where the target is not -1, so an answer without them is still a whole
+// answer, and the target alone is sent where that routine did not give them.
+static pb_status_t pb_rom_uf2_target(
+    uint32_t *scratch,
+    uint32_t  scratch_words,
+    uint32_t *filled
+) {
+    get_partition_table_info_fn_t get_partition_table_info =
+        pb_lookup_get_partition_table_info_fn();
+    if (get_partition_table_info == NULL) {
+        ERR("Unable to find get_partition_table_info in ROM");
         return PB_STATUS_NOT_FOUND;
     }
 
-    // Judged in bytes, not in words: the whole of buf is filled from the words
-    // after the leading one, so a size that is a whole number of words and a
-    // part of another would read past the end of tmp.
-    if (buf_size > PB_INFO_MAX_WORDS * sizeof(uint32_t)) {
-        ERR("Buffer too large for get_info_sys: %u bytes", buf_size);
-        return PB_STATUS_UNKNOWN_ERROR;
-    }
-    uint32_t wc = buf_size / sizeof(uint32_t);
-    uint32_t tmp[PB_INFO_MAX_WORDS + 1];
-
-    int ret = get_sys_info(tmp, wc + 1, flag);
+    int ret = get_partition_table_info(scratch, scratch_words, PB_PT_INFO_FLAG);
     if (ret < 0) {
-        ERR("get_sys_info failed: %d", ret);
+        ERR("get_partition_table_info refused PT_INFO: %d", ret);
         return pb_status_from_bootrom(ret);
     }
 
-    if (!(tmp[0] & flag)) {
-        ERR("get_sys_info: flag 0x%08x not supported", flag);
-        return PB_STATUS_INVALID_ARG;
+    if ((uint32_t)ret >= PB_PT_INFO_WORDS) {
+        // Drop the flags word and the partition counts, keeping the two the
+        // answer carries.
+        scratch[1] = scratch[2];
+        scratch[2] = scratch[3];
+        *filled = 3u;
+    } else {
+        *filled = 1u;
+    }
+    scratch[0] = PB_UF2_TARGET_NONE;
+    return PB_STATUS_OK;
+}
+
+// The answer to one information request, in scratch the caller owns.
+//
+// Both routines this wraps have the same shape and the same contract as picoboot
+// itself (RP2350 datasheet 5.4.8.16 and 5.4.8.17): they fill a word buffer,
+// putting the subset of the flags asked for that they answered in its first
+// word, and return how many words they wrote.  So the answer is passed straight
+// through, and a flag this part cannot answer is dropped by the ROM rather than
+// by anything here.
+static pb_status_t pb_rom_info(
+    pb_info_type_t type,
+    uint32_t       param0,
+    uint32_t      *scratch,
+    uint32_t       scratch_words,
+    uint32_t      *filled
+) {
+    int ret;
+    switch (type) {
+        case PB_INFO_SYS: {
+            get_sys_info_fn_t get_sys_info = pb_lookup_get_sys_info_fn();
+            if (get_sys_info == NULL) {
+                ERR("Unable to find get_sys_info in ROM");
+                return PB_STATUS_NOT_FOUND;
+            }
+            ret = get_sys_info(scratch, scratch_words, param0);
+            break;
+        }
+        case PB_INFO_PARTITION: {
+            get_partition_table_info_fn_t get_partition_table_info =
+                pb_lookup_get_partition_table_info_fn();
+            if (get_partition_table_info == NULL) {
+                ERR("Unable to find get_partition_table_info in ROM");
+                return PB_STATUS_NOT_FOUND;
+            }
+            ret = get_partition_table_info(scratch, scratch_words, param0);
+            break;
+        }
+        case PB_INFO_UF2_TARGET:
+            return pb_rom_uf2_target(scratch, scratch_words, filled);
+        default:
+            // PB_INFO_UF2_STATUS reports a download in progress over the drive
+            // BOOTSEL mode presents, and this port has none to report on.
+            return PB_STATUS_INVALID_ARG;
+    }
+    if (ret < 0) {
+        ERR("ROM refused information type 0x%02x: %d", type, ret);
+        return pb_status_from_bootrom(ret);
+    }
+    *filled = (uint32_t)ret;
+    return PB_STATUS_OK;
+}
+
+pb_status_t picoboot_default_get_info_prepare(
+    pb_info_type_t  type,
+    uint32_t        param0,
+    uint32_t       *words,
+    void           *ctx
+) {
+    (void)ctx;
+    uint32_t scratch[PICOBOOT_INFO_MAX_ANSWER_WORDS];
+    return pb_rom_info(type, param0, scratch,
+                       PICOBOOT_INFO_MAX_ANSWER_WORDS, words);
+}
+
+pb_status_t picoboot_default_get_info(
+    pb_info_type_t  type,
+    uint32_t        param0,
+    uint32_t        at_word,
+    uint8_t        *buf,
+    uint32_t        max_len,
+    uint32_t       *bytes_written,
+    void           *ctx
+) {
+    (void)ctx;
+
+    // The ROM fills from the start of the answer every time and takes no
+    // offset, so the whole of it is produced again and the window copied out.
+    // That leaves this pair with no state between calls, and the ROM guards the
+    // repeat itself: get_partition_table_info hashes the partition table when it
+    // loads it and returns INVALID_STATE if it has changed since, and every
+    // system information flag reads a value fixed for the life of the boot.
+    uint32_t scratch[PICOBOOT_INFO_MAX_ANSWER_WORDS];
+    uint32_t filled = 0u;
+    pb_status_t st = pb_rom_info(type, param0, scratch,
+                                 PICOBOOT_INFO_MAX_ANSWER_WORDS, &filled);
+    if (st != PB_STATUS_OK) {
+        return st;
     }
 
-    memcpy(buf, &tmp[1], buf_size);
-    *bytes_written = buf_size;
+    *bytes_written = 0u;
+    if (at_word < filled) {
+        uint32_t left = (filled - at_word) * (uint32_t)sizeof(uint32_t);
+        *bytes_written = left < max_len ? left : max_len;
+        memcpy(buf, &scratch[at_word], *bytes_written);
+    }
     return PB_STATUS_OK;
 }
 

@@ -258,13 +258,31 @@ pb_status_t picoboot_default_otp_write(
     void *ctx
 );
 
-// Retrieves system information using the ROM's get_sys_info function
-pb_status_t picoboot_default_get_info_sys(
-    uint32_t  flag,
-    uint8_t  *buf,
-    uint32_t  buf_size,
-    uint32_t *bytes_written,
-    void     *ctx
+// Reports how many words this part's answer to an information request will be,
+// by asking the ROM routine that answers it.  PB_INFO_SYS goes to get_sys_info
+// and PB_INFO_PARTITION to get_partition_table_info.  PB_INFO_UF2_TARGET is
+// answered as nowhere: picobootx presents no mass storage drive for a UF2 to be
+// dragged onto and is told of none, so it has nowhere to name.
+// PB_INFO_UF2_STATUS is refused with PB_STATUS_INVALID_ARG, since it reports a
+// download over such a drive.  A device that presents one answers both itself.
+pb_status_t picoboot_default_get_info_prepare(
+    pb_info_type_t  type,
+    uint32_t        param0,
+    uint32_t       *words,
+    void           *ctx
+);
+
+// Produces that answer, from at_word onwards.  Keeps no state between calls:
+// the ROM routine takes no offset, so the whole answer is produced again and
+// the window copied out.
+pb_status_t picoboot_default_get_info(
+    pb_info_type_t  type,
+    uint32_t        param0,
+    uint32_t        at_word,
+    uint8_t        *buf,
+    uint32_t        max_len,
+    uint32_t       *bytes_written,
+    void           *ctx
 );
 
 // Retrieve the device's serial number, as UTF-16, for inclusion in a USB

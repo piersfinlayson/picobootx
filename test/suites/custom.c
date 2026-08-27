@@ -162,6 +162,119 @@ static void scenario_fill_may_decline_a_call(void) {
     PBT_CHECK_EQ(pbt_custom_fill_calls(), items + 3u);
 }
 
+static void scenario_fill_with_no_room_for_the_rest_is_refused(void) {
+    pbt_begin();
+    pbt_use_custom = true;
+    pbt_start();
+
+    // Items that cannot be split, in a transfer that is not a whole number of
+    // them.  Eight bytes are left that no item fits in, so the fill function
+    // can never fill them and asking it again would never end.  Table 471's
+    // BUFFER_TOO_SMALL — "The provided buffer was too small to hold the result"
+    // — is the reason for that, and it is the same one GET_INFO gives for an
+    // answer that will not fit the transfer.
+    const uint32_t length = (2u * PBT_CUSTOM_ITEM_SIZE) + 8u;
+
+    picoboot_cmd_t cmd = pbt_custom_cmd(PBT_CUSTOM_CMD_ITEMS, 0x00u, length);
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_BUFFER_TOO_SMALL);
+
+    // 5.6.4 gives the host dTransferLength bytes and then the completion, so
+    // rounding the last item up past the length is not the answer either.
+    PBT_CHECK(pbt_payload_len() <= length);
+    PBT_CHECK_EQ(pbt_packet_count(), 0u);
+    PBT_CHECK(pbt_ep_stalled(PBT_EP_IN));
+
+    // A whole number of the same items is served, so what was refused was the
+    // eight bytes and not the command.
+    pbt_begin();
+    pbt_use_custom = true;
+    pbt_start();
+    picoboot_cmd_t whole = pbt_custom_cmd(PBT_CUSTOM_CMD_ITEMS, 0x00u,
+                                          2u * PBT_CUSTOM_ITEM_SIZE);
+    PBT_CHECK_STATUS(pbt_run_cmd(&whole), PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_payload_len(), 2u * PBT_CUSTOM_ITEM_SIZE);
+}
+
+static void scenario_fill_that_overstates_its_write_is_refused(void) {
+    // A fill is handed a buffer and the room in it, and answers with how much
+    // it wrote.  Only the callee knows what it really wrote, so the reported
+    // figure is the one thing the library can check, and an integrator's fill
+    // can report anything.  Reported past the room, it is refused with
+    // UNKNOWN_ERROR.
+    //
+    // Two lengths, because the overstatement lands differently in each.  At
+    // eight bytes the reported figure still fits the endpoint, so nothing but
+    // the library's own check stands between it and the wire.  At sixty it does
+    // not fit, which is a second way to arrive at the same refusal.  A library
+    // that only ever caught the second would serve the first.
+    const uint32_t lengths[] = { 8u, 60u };
+
+    for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+        pbt_begin();
+        pbt_use_custom = true;
+        pbt_start();
+
+        picoboot_cmd_t cmd = pbt_custom_cmd(PBT_CUSTOM_CMD_OVER, 0x00u,
+                                            lengths[i]);
+        pb_status_t got = pbt_run_cmd(&cmd);
+
+        if (got != PB_STATUS_UNKNOWN_ERROR) {
+            pbt_fail(__FILE__, __LINE__, "%u bytes: expected %s, got %s",
+                     lengths[i], pbt_status_name((int)PB_STATUS_UNKNOWN_ERROR),
+                     pbt_status_name((int)got));
+        }
+
+        // The bound, which is the half a refusal on its own does not give.
+        // Believing the reported figure takes the count of what is left to send
+        // below zero, and an unsigned count below zero is an enormous one, so
+        // the transfer length stops bounding anything after it.  Asserting the
+        // status alone would pass against a library that refused this call and
+        // left that count wrong.
+        if (pbt_payload_len() > lengths[i]) {
+            pbt_fail(__FILE__, __LINE__, "%u bytes: %u reached a host that "
+                     "asked for %u", lengths[i], pbt_payload_len(),
+                     lengths[i]);
+        }
+
+        // And nothing reached the host that the callback never wrote.  The
+        // bytes an overstatement adds are whatever the buffer held.
+        if (pbt_payload_len() > pbt_custom_bytes_produced()) {
+            pbt_fail(__FILE__, __LINE__, "%u bytes: %u reached the host and "
+                     "the callback wrote %u", lengths[i], pbt_payload_len(),
+                     pbt_custom_bytes_produced());
+        }
+
+        if (pbt_packet_count() != 0u) {
+            pbt_fail(__FILE__, __LINE__, "%u bytes: %u packets went out",
+                     lengths[i], pbt_packet_count());
+        }
+        if (!pbt_ep_stalled(PBT_EP_IN)) {
+            pbt_fail(__FILE__, __LINE__, "%u bytes: the endpoint was not "
+                     "halted", lengths[i]);
+        }
+    }
+
+    // A fill that reports what it wrote is served at both of those lengths, so
+    // what was refused was the figure and not the transfer.
+    for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+        pbt_begin();
+        pbt_use_custom = true;
+        pbt_start();
+
+        picoboot_cmd_t honest = pbt_custom_cmd(PBT_CUSTOM_CMD_COUNT, 0x00u,
+                                               lengths[i]);
+        pb_status_t got = pbt_run_cmd(&honest);
+        if (got != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%u honest bytes: %s", lengths[i],
+                     pbt_status_name((int)got));
+        }
+        if (pbt_payload_len() != lengths[i]) {
+            pbt_fail(__FILE__, __LINE__, "%u honest bytes: %u reached the host",
+                     lengths[i], pbt_payload_len());
+        }
+    }
+}
+
 static void scenario_fill_refusal_carries_its_own_status(void) {
     pbt_begin();
     pbt_use_custom = true;
@@ -296,6 +409,10 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_fill_is_handed_the_original_command },
     { "fill may decline a call and be asked again",
       scenario_fill_may_decline_a_call },
+    { "a fill with no room left for its next item is refused",
+      scenario_fill_with_no_room_for_the_rest_is_refused },
+    { "a fill that reports writing more than its room is refused",
+      scenario_fill_that_overstates_its_write_is_refused },
     { "a refusal from fill reaches the host as the integrator's status",
       scenario_fill_refusal_carries_its_own_status },
     { "a device-to-host custom command without fill is refused",

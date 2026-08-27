@@ -103,15 +103,44 @@ address space.  That last is done in wider arithmetic than the addresses
 themselves, because it has to be, and because it was once accepted.
 
 **`get-info`** — what the device says about itself, and what it does with a
-request it cannot answer.  The values come from the boot ROM rather than from
-picobootx, so what is asked is not whether they are right but whether the device
-assembles them correctly: the reply is a word saying how many words follow and
-then each flag's words in the protocol's order, and asking for two flags at once
-has to give exactly what asking for each separately gave.  A flag the part does
-not carry is counted as no words.  The transfer length is the host's to state,
-so a length of nothing, one that is not a whole number of words, and one longer
-than the reply can be are each refused, as is an information type the protocol
-does not name.
+request it cannot answer.  The protocol names four kinds of information.  The
+part answers two of them, and the other two ask about dragging a UF2 onto a mass
+storage drive, which this device presents none of.
+
+For the two the part answers — system and partition — the values come from the
+boot ROM rather than from picobootx, so what is asked is not whether they are
+right but whether the device assembles them correctly: the reply is a word saying
+how many words follow, then the flags word naming which of the flags asked for
+were answered, then each answered flag's words in the protocol's order.  The
+flags word is counted by the first, so the count is one more than the data words.
+The two kinds come from different boot ROM routines, and a request worth the same
+number of words under each has to give different data, or one source is
+answering both.  Asking for two flags at once has to give exactly what asking for
+each separately gave, and asking for every flag the protocol names has to give
+them all bar the one the datasheet marks unsupported.  A flag dropped that way,
+and one the part simply does not carry, are both absent from the flags word and
+counted as no words, and either leaves a flag beside it whole.  A request naming
+no flags at all still gets the flags word, empty, and a partition flag with
+nothing to report gets the same — so the count cannot be derived from the flags
+word.
+
+Of the two UF2 questions, where a family would be downloaded to is answered, as
+nowhere, with the unpartitioned space beside it and the family asked about not
+consulted — different families have to give identical replies.  How a download
+is progressing is refused as a bad argument, there being no download.  Neither
+carries a flags word.
+
+The transfer length is the host's to state, so the device has to judge it twice
+over.  A length of nothing, one that is not a whole number of words, and one
+longer than the reply can be are each refused for their shape.  A well formed
+length that the answer does not fit in is refused too, as a buffer too small —
+a different refusal, checked on both sides of its boundary.  It is the answer
+that settles it rather than the request: a length sized to what the device will
+actually say is served even where the request named more.  What the host asked
+for also bounds what it gets: the reply is that many bytes and no more, padded
+with zeroes where the answer is shorter.  An information type the protocol does
+not name is refused as a bad argument, the command itself having been
+recognised.
 
 Whether the values themselves are right is a question for the boot ROM, on the
 same part, and not one this group can answer.

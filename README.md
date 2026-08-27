@@ -81,7 +81,17 @@ picobootx is licensed under the MIT License.  See [LICENSE](LICENSE) for details
 
 ## picotool/tinyusb Quirks
 
-Some notable quirks were discovered in picotool and tinyusb during picobootx's development, which are documented here.  picobootx works around all of these quirks, providing a fully compatible implementation.
+Some notable quirks were discovered in picotool and tinyusb during picobootx's development, which are documented here.  picobootx works around all of these quirks, providing a fully compatible implementation.  The PICOBOOT specification itself leaves some behaviour undefined, and those gaps are recorded here too, alongside what picobootx does about each.
+
+### PICOBOOT Specification Deficiencies
+
+- The specification does not say what a device does when dTransferLength is too small to hold the answer a GET_INFO command has for the flags requested.  The spec states:
+
+  "The transfer length indicates the maximum number of bytes to be retrieved. The fist word returned indicates the number of significant words of data that follow. A full "transfer length" is always returned, padding with zeroes as necessary."
+
+  That admits two readings, and does not choose between them.  The device could truncate and let the count word describe what it managed to send, or truncate and let the count word state the full size, so the host learns its buffer was short.
+
+  The bootrom API the command draws on points elsewhere again.  get_sys_info takes an out_buffer_word_size and has BOOTROM_ERROR_BUFFER_TOO_SMALL for a buffer that cannot hold the result, and the PICOBOOT status codes include BUFFER_TOO_SMALL, "The provided buffer was too small to hold the result", which no other command in the interface plausibly produces.  picobootx refuses the command with that status rather than sending a partial answer, on the grounds that a host cannot tell a truncated response from a complete one.
 
 ### picotool Specification Deficiencies
 

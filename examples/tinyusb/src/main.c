@@ -31,7 +31,11 @@ static const picoboot_ops_t picoboot_ops = {
     .write              = picoboot_default_write,
     .otp_read           = picoboot_default_otp_read,
     .otp_write          = picoboot_default_otp_write,
-    .get_info_sys       = picoboot_default_get_info_sys,
+    // GET_INFO takes a pair, one for every information type.  These serve
+    // system and partition table information from the boot ROM, and the UF2
+    // target partition as nowhere - see picobootx.h for what each answers.
+    .get_info_prepare   = picoboot_default_get_info_prepare,
+    .get_info           = picoboot_default_get_info,
 };
 
 // Ensure 4 byte alignment and use PICOBOOT_STATE_SIZE from picobootx.h to
@@ -59,7 +63,9 @@ void example_main(void) {
         picoboot_state,
         &picoboot_ops,
         NULL,                   // No custom protocol support
-        NULL,                   // Flash/OTP write not supported
+        NULL,                   // No flash page buffer, so WRITE to flash is
+                                // refused.  WRITE to memory and OTP_WRITE are
+                                // unaffected and are served above.
         BOARD_TUD_RHPORT,       // Always 0 on RP2350
         EPNUM_PICOBOOTX_OUT,    // EP OUT
         EPNUM_PICOBOOTX_IN,     // EP IN

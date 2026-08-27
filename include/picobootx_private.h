@@ -38,20 +38,6 @@ extern void picoboot_error(const char *msg, ...);
 #endif // ERR
 #endif // PICOBOOT_LOGGING
 
-//
-// GET_INFO flag table and helpers
-//
-
-// None of the entries below can have a value greater than PB_INFO_MAX_WORDS
-#define PB_INFO_MAX_WORDS 4
-#define PB_INFO_FLAG_TABLE \
-    X(0x0001u, 3u, CHIP_INFO)      \
-    X(0x0002u, 1u, CRITICAL)       \
-    X(0x0004u, 1u, CPU_INFO)       \
-    X(0x0008u, 1u, FLASH_DEV_INFO) \
-    X(0x0010u, 4u, BOOT_RANDOM)    \
-    X(0x0040u, 4u, BOOT_INFO)
-
 // ---------------------------------------------------------------------------
 // Command IDs — internal to the library
 // ---------------------------------------------------------------------------
@@ -156,11 +142,15 @@ typedef struct {
 } pb_in_read_t;
 
 typedef struct {
-    uint32_t remaining_flags;    // bitmask of flags not yet sent (SYS), or word index (PARTITION)
+    uint32_t param0;             // dParam0, handed back to every get_info call
     uint32_t transfer_remaining; // bytes still owed to host
-    bool     header_sent;        // true once the leading word count has been sent (SYS only)
-    bool     is_partition;       // true for PARTITION info type
+    uint8_t  answer_words;       // words the answer is, as get_info_prepare said
+    uint8_t  answer_sent;        // words of it already sent
+    uint8_t  type;               // pb_info_type_t, one of the four the library gates to
+    bool     count_sent;         // whether the leading count word has gone
 } pb_in_get_info_t;
+_Static_assert(PICOBOOT_INFO_MAX_ANSWER_WORDS <= 255u,
+               "answer_words and answer_sent must hold an answer's word count");
 
 typedef struct {
     uint16_t current_row;        // next row to access
@@ -188,6 +178,7 @@ struct pb_state_block {
     uint8_t                     *flash_write_buf; // 4 bytes; NULL = WRITE disabled
     void                        *ctx;             // 4 bytes
 
+
     // State machine
     pb_state_t                   state;           // 4 bytes (enum)
 
@@ -200,6 +191,12 @@ struct pb_state_block {
 
     // Status returned by GET_COMMAND_STATUS
     picoboot_status_t            status;          // 16 bytes (packed struct)
+
+    // Bytes of the current device->host transfer the host has still to be
+    // sent, counting down from dTransferLength.  The pump offers a fill no
+    // more than this, so no fill can put more on the bulk pipe than the host
+    // asked for.
+    uint32_t                     data_in_remaining; // 4 bytes
 
     // Per-command state — only one member is ever live at a time.  These are
     // mutually exclusive by command category: read/get_info/otp/write belong

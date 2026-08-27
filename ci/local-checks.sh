@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every gate CI applies that this machine can apply too, in CI's order.
+# Every gate CI applies, in CI's order.
 #
 # Usage: ci/local-checks.sh
 #
@@ -11,8 +11,11 @@
 #
 # Stops at the first failure, so what you see last is what to fix.
 #
-# Two of CI's jobs are not here.  The picotool and picoboot-rs bridges need
-# Linux, its vhci-hcd module and root.  Everything else is.
+# Every one of CI's jobs is here.  The picotool and picoboot-rs bridges want a
+# Linux kernel with vhci-hcd and root, which this machine has not got directly
+# — but Docker runs one, and ci/bridges-docker.sh gates them through it.  Like
+# the minimum-Rust check below, they are skipped rather than failed when what
+# they need is absent, and said out loud either way.
 set -e
 
 cd "$(dirname "$0")/.."
@@ -116,8 +119,22 @@ fi
 step "Coverage, both languages, gated"
 make cov
 
+# --- bridges ----------------------------------------------------------------
+# picobootx on a real USB bus, driven by real picotool and by picoboot-rs.  The
+# kernel is the one Docker is running, reached by ci/bridges-docker.sh — read
+# its header for what that needs and why it is not a stand-in for the gate.
+# Skipped rather than failed with no docker, since the rest of this list wants
+# nothing but a compiler and cargo.
+
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    step "The picotool and picoboot-rs bridges, on a real bus"
+    ci/bridges-docker.sh
+    BRIDGES_RAN="ran"
+else
+    BRIDGES_RAN="SKIPPED - start docker and run: ci/bridges-docker.sh"
+fi
+
 echo
 echo "=== all local checks passed ==="
 echo "  minimum Rust: ${MSRV_RAN}"
-echo "  not run here: the picotool and picoboot-rs bridges, which need Linux,"
-echo "                vhci-hcd and root"
+echo "  bridges: ${BRIDGES_RAN}"

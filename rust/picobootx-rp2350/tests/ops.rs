@@ -12,7 +12,10 @@
 //! answer or leaves it at the trait's refusing default.  That is what this
 //! asks, one command at a time, by showing an answer only the part gives.
 //!
-//! The free functions themselves are the suite's to test, and it does.  What
+//! The free functions themselves are the suite's to test, and it does, with one
+//! exception: the library asks the part's information routine twice for one
+//! request, once for the answer's length and again for the answer, and no host
+//! can make the second answer differ from the first.  What
 //! stands in for the chip here is a recorder, not a model of a part: it says
 //! which seam was reached and with what, and its bootrom publishes one routine
 //! so that a lookup which finds something and a lookup which does not are both
@@ -23,8 +26,11 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use picobootx::{Ecc, Exclusive, Ops, Reboot, Status, Target};
-use picobootx_rp2350::{FLASH_BASE, Rp2350, SRAM_BASE, bootrom::RebootFn};
+use picobootx::{Ecc, Exclusive, Info, Ops, Reboot, Status, Target};
+use picobootx_rp2350::{
+    FLASH_BASE, Rp2350, SRAM_BASE,
+    bootrom::{GetSysInfoFn, RebootFn},
+};
 
 /// How much of SRAM and of flash the stand-in answers for, from each base.
 const MAPPED: usize = 0x200;
@@ -65,11 +71,23 @@ static PUBLISH_REBOOT: AtomicBool = AtomicBool::new(true);
 /// What the reboot routine was called with, if it was.
 static REBOOTED: Mutex<Option<[u32; 4]>> = Mutex::new(None);
 
+/// Whether the stand-in bootrom publishes a system information routine, and
+/// how many words that routine answers when it does.
+///
+/// The count is settable between calls because the library asks the routine
+/// twice for one request — once for the answer's length and again for the
+/// answer — and a part whose second answer is shorter than its first is what
+/// the guard in `get_info` is there for.
+static PUBLISH_SYS_INFO: AtomicBool = AtomicBool::new(false);
+static SYS_INFO_WORDS: AtomicUsize = AtomicUsize::new(0);
+
 /// Take the chip, and put it back the way a part comes out of its packaging.
 fn chip() -> MutexGuard<'static, ()> {
     let guard = CHIP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     DEV_PTR_CALLS.store(0, Ordering::SeqCst);
     PUBLISH_REBOOT.store(true, Ordering::SeqCst);
+    PUBLISH_SYS_INFO.store(false, Ordering::SeqCst);
+    SYS_INFO_WORDS.store(0, Ordering::SeqCst);
     *REBOOTED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -106,6 +124,37 @@ extern "C" fn reboot_stub(flags: u32, delay_ms: u32, p0: u32, p1: u32) -> c_int 
     0
 }
 
+/// The word the stand-in information routine puts at one index.  Distinct per
+/// index, so a test can say which word of the answer it is looking at rather
+/// than only how many came back.
+fn info_word(at: usize) -> u32 {
+    0x5100_0000 | at as u32
+}
+
+/// One word of what a fill wrote, as the wire carries it.
+fn word(buf: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(buf[at * 4..at * 4 + 4].try_into().expect("four bytes"))
+}
+
+/// Publish the information routine, answering this many words from now on.
+fn publish_sys_info(words: usize) {
+    SYS_INFO_WORDS.store(words, Ordering::SeqCst);
+    PUBLISH_SYS_INFO.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn get_sys_info_stub(out: *mut u32, out_words: u32, _flags: u32) -> c_int {
+    let words = SYS_INFO_WORDS.load(Ordering::SeqCst);
+    assert!(
+        words <= out_words as usize,
+        "the routine was offered {out_words} words and asked to write {words}"
+    );
+    for at in 0..words {
+        // SAFETY: the assertion above is what says out has room for this.
+        unsafe { out.add(at).write(info_word(at)) };
+    }
+    c_int::try_from(words).expect("a word count that fits a return code")
+}
+
 /// The bootrom code two characters make, as `bootrom::lookup` assembles it.
 fn code(a: u8, b: u8) -> u32 {
     (u32::from(b) << 8) | u32::from(a)
@@ -122,6 +171,10 @@ extern "C" fn picobootx_host_test_bootrom_lookup(asked: u32, mask: u32) -> *cons
 
     if asked == code(b'R', b'B') && PUBLISH_REBOOT.load(Ordering::SeqCst) {
         let f: RebootFn = reboot_stub;
+        return f as *const ();
+    }
+    if asked == code(b'G', b'S') && PUBLISH_SYS_INFO.load(Ordering::SeqCst) {
+        let f: GetSysInfoFn = get_sys_info_stub;
         return f as *const ();
     }
     core::ptr::null()
@@ -253,20 +306,111 @@ fn an_erase_is_judged_by_the_sectors_the_range_covers() {
 }
 
 #[test]
-fn otp_and_system_information_are_served_whatever_is_asked_for() {
+fn otp_is_served_whatever_is_asked_for() {
     let _chip = chip();
     let mut d = Rp2350;
 
-    // These three say only whether the part serves the command, and it serves
-    // all three.  A device left at the trait's default refuses every one of
-    // them, so an Ok here is the part's answer and not the default's.  What a
-    // request asks for is judged where it is acted on.
+    // These say only whether the part serves the command, and it serves both.
+    // A device left at the trait's default refuses every one of them, so an Ok
+    // here is the part's answer and not the default's.  What a request asks for
+    // is judged where it is acted on.
     assert_eq!(d.otp_read_prepare(0, 0xffff, Ecc::Raw), Ok(()));
     assert_eq!(d.otp_read_prepare(0xffff, 1, Ecc::Ecc), Ok(()));
     assert_eq!(d.otp_write_prepare(0, 0xffff, Ecc::Raw), Ok(()));
     assert_eq!(d.otp_write_prepare(0xffff, 1, Ecc::Ecc), Ok(()));
-    assert_eq!(d.get_info_sys_prepare(0), Ok(()));
-    assert_eq!(d.get_info_sys_prepare(0xffff_ffff), Ok(()));
+}
+
+#[test]
+fn the_information_types_the_part_answers_reach_its_own_routines() {
+    let _chip = chip();
+    let mut d = Rp2350;
+
+    // The stand-in bootrom publishes the reboot routine and nothing else, so a
+    // request routed to the part reports the routine it wanted as missing.  The
+    // trait's default refuses with UnknownCmd, so NotFound is the part
+    // answering rather than the default.
+    assert_eq!(
+        d.get_info_prepare(Info::Sys, 0xffff_ffff),
+        Err(Status::NotFound)
+    );
+    assert_eq!(
+        d.get_info_prepare(Info::Partition, 0x0001),
+        Err(Status::NotFound)
+    );
+    assert_eq!(
+        d.get_info(Info::Sys, 0x0001, 0, &mut [0u8; 32]),
+        Err(Status::NotFound)
+    );
+
+    // The UF2 target is answered from the partition table routine too, so it
+    // reports that routine missing rather than refusing the type.
+    assert_eq!(
+        d.get_info_prepare(Info::Uf2Target, 0x1234),
+        Err(Status::NotFound)
+    );
+}
+
+#[test]
+fn the_uf2_download_status_is_refused_before_any_lookup() {
+    let _chip = chip();
+    let mut d = Rp2350;
+
+    // It reports a download over the drive BOOTSEL mode presents, and this
+    // crate has none.  InvalidArg is what says the part does not serve the
+    // type, and it is not NotFound, which is what a routine asked for and
+    // missing would give — so this refusal is reached without a lookup.
+    assert_eq!(
+        d.get_info_prepare(Info::Uf2Status, 0),
+        Err(Status::InvalidArg)
+    );
+    assert_eq!(
+        d.get_info(Info::Uf2Status, 0, 0, &mut [0u8; 32]),
+        Err(Status::InvalidArg)
+    );
+}
+
+#[test]
+fn an_information_answer_that_shrinks_between_calls_is_not_read_past() {
+    let _chip = chip();
+    let mut d = Rp2350;
+
+    // One request reaches the ROM routine more than once: the library asks how
+    // long the answer is, then asks for the answer itself a piece at a time.
+    // The routine fills from the start every call and reports afresh how much
+    // it wrote, and nothing holds it to the same figure twice — so a part that
+    // answers less the second time leaves the library asking for a word that is
+    // no longer there.
+
+    // A part that answers the same both times, taken whole.
+    publish_sys_info(4);
+    assert_eq!(d.get_info_prepare(Info::Sys, 0x0001), Ok(4));
+    let mut buf = [0xa5u8; 32];
+    assert_eq!(d.get_info(Info::Sys, 0x0001, 0, &mut buf), Ok(16));
+    assert_eq!(word(&buf, 0), info_word(0));
+    assert_eq!(word(&buf, 3), info_word(3));
+
+    // The same part now answers two words, and the library asks for the fourth
+    // — an index the first answer covered and this one does not.
+    publish_sys_info(2);
+    let mut buf = [0xa5u8; 32];
+    assert_eq!(d.get_info(Info::Sys, 0x0001, 3, &mut buf), Ok(0));
+    assert!(
+        buf.iter().all(|b| *b == 0xa5),
+        "an index past the answer wrote bytes rather than reporting none"
+    );
+
+    // The index the shorter answer ends at is refused the same way, so the
+    // refusal covers the boundary and not only what lies beyond it.
+    assert_eq!(d.get_info(Info::Sys, 0x0001, 2, &mut buf), Ok(0));
+    assert!(
+        buf.iter().all(|b| *b == 0xa5),
+        "the index the answer ends at wrote bytes rather than reporting none"
+    );
+
+    // An index the shorter answer does cover is served from it, so what was
+    // refused was the index rather than the answer having changed.
+    assert_eq!(d.get_info(Info::Sys, 0x0001, 1, &mut buf), Ok(4));
+    assert_eq!(word(&buf, 0), info_word(1));
 }
 
 #[test]
@@ -316,7 +460,10 @@ fn a_routine_the_bootrom_does_not_publish_is_reported_as_one_that_is_not_there()
         Err(Status::NotFound)
     );
     assert_eq!(d.flash_erase(FLASH_BASE, 4096), Err(Status::NotFound));
-    assert_eq!(d.get_info_sys(0x0001, &mut [0u8; 4]), Err(Status::NotFound));
+    assert_eq!(
+        d.get_info(Info::Sys, 0x0001, 0, &mut [0u8; 4]),
+        Err(Status::NotFound)
+    );
 
     // None of it reached the chip through an address, either.
     assert_eq!(dev_ptr_calls(), 0);

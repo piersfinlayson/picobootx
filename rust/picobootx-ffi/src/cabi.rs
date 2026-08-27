@@ -54,7 +54,12 @@ type FnExclusive = unsafe extern "C" fn(*const CExclusiveArgs, *mut c_void) -> C
 type FnVoidCtx = unsafe extern "C" fn(*mut c_void) -> CStatus;
 type FnRebootPrepare = unsafe extern "C" fn(*const CRebootArgs, *mut c_void) -> CStatus;
 type FnRebootExecute = unsafe extern "C" fn(*const CRebootArgs, *mut c_void);
-type FnGetInfoSys = unsafe extern "C" fn(u32, *mut u8, u32, *mut u32, *mut c_void) -> CStatus;
+/// `pb_info_type_t`, one byte under `-fshort-enums`.
+pub type CInfoType = u8;
+
+type FnGetInfoPrepare = unsafe extern "C" fn(CInfoType, u32, *mut u32, *mut c_void) -> CStatus;
+type FnGetInfo =
+    unsafe extern "C" fn(CInfoType, u32, u32, *mut u8, u32, *mut u32, *mut c_void) -> CStatus;
 type FnReadPrepare = unsafe extern "C" fn(u32, u32, *mut c_void) -> CStatus;
 type FnRead = unsafe extern "C" fn(u32, *mut u8, u32, *mut c_void) -> CStatus;
 type FnOtpRead = unsafe extern "C" fn(u16, u8, *mut u8, u32, *mut c_void) -> CStatus;
@@ -72,7 +77,8 @@ pub struct COps {
     pub enter_xip: Option<FnVoidCtx>,
     pub reboot2_prepare: Option<FnRebootPrepare>,
     pub reboot2_execute: Option<FnRebootExecute>,
-    pub get_info_sys: Option<FnGetInfoSys>,
+    pub get_info_prepare: Option<FnGetInfoPrepare>,
+    pub get_info: Option<FnGetInfo>,
     pub read_prepare: Option<FnReadPrepare>,
     pub read: Option<FnRead>,
     pub otp_read: Option<FnOtpRead>,

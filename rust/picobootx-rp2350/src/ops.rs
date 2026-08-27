@@ -5,16 +5,23 @@
 //! An RP2350 as one type, for a device that wants the whole default set.
 
 use picobootx::wire::FLASH_PAGE_SIZE;
-use picobootx::{Ecc, Exclusive, Ops, Reboot, Result, Target};
+use picobootx::{Ecc, Exclusive, Info, Ops, Reboot, Result, Target};
 
 use crate::defaults;
 
 /// Every default implementation in this crate, as one `Ops`.
 ///
 /// Hand this to `Picoboot` and the device serves the whole of the protocol on
-/// an RP2350's own terms.  The free functions beside it are the same work a
-/// piece at a time, for a device that answers some commands its own way — an
-/// `Ops` of your own can call whichever of them you are not replacing.
+/// an RP2350's own terms.
+///
+/// For `GET_INFO` that means [`Info::Sys`] and [`Info::Partition`], each passed
+/// straight through to the ROM routine that answers it, and [`Info::Uf2Target`]
+/// answered as nowhere — a UF2 reaches a device by being dragged onto a mass
+/// storage drive, and this crate presents none and is told of none, so it has
+/// nowhere to name.  [`Info::Uf2Status`] is refused with
+/// [`picobootx::Status::InvalidArg`], since it reports a download over such a
+/// drive.  A device that presents one writes both in an `Ops` of its own and
+/// calls the free functions here for the rest.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rp2350;
 
@@ -69,11 +76,10 @@ impl Ops for Rp2350 {
         defaults::flash_erase(addr, size)
     }
 
-    // The three prepares below say only whether the device serves the command
-    // at all, and an RP2350 serves all three.  What a request asks for is
-    // judged where it is acted on: a length that is not a whole number of rows
-    // by otp_read and otp_write, and a flag the part does not carry by the
-    // bootrom itself.
+    // The two prepares below say only whether the device serves the command at
+    // all, and an RP2350 serves both.  What a request asks for is judged where
+    // it is acted on: a length that is not a whole number of rows by otp_read
+    // and otp_write.
     fn otp_read_prepare(&mut self, row: u16, count: u16, ecc: Ecc) -> Result {
         let _ = (row, count, ecc);
         Ok(())
@@ -92,13 +98,15 @@ impl Ops for Rp2350 {
         defaults::otp_write(row, ecc, buf)
     }
 
-    fn get_info_sys_prepare(&mut self, flags: u32) -> Result {
-        let _ = flags;
-        Ok(())
+    // The two information types a ROM routine answers reach it as they stand.
+    // The two UF2 types are left to the trait's defaults, which refuse: both
+    // describe a mass storage download, and this crate has no drive.
+    fn get_info_prepare(&mut self, info: Info, param0: u32) -> Result<u32> {
+        defaults::get_info_prepare(info, param0)
     }
 
-    fn get_info_sys(&mut self, flag: u32, buf: &mut [u8]) -> Result {
-        defaults::get_info_sys(flag, buf)
+    fn get_info(&mut self, info: Info, param0: u32, at_word: u32, buf: &mut [u8]) -> Result<usize> {
+        defaults::get_info(info, param0, at_word, buf)
     }
 
     fn reboot_prepare(&mut self, args: &Reboot) -> Result {

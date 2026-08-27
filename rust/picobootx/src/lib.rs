@@ -16,7 +16,7 @@ pub use control::{
     Control, REQUEST_GET_CMD_STATUS, REQUEST_INTERFACE_RESET, Recipient, Request, RequestType,
     Stage,
 };
-pub use ops::{Custom, Ecc, Exclusive, Filled, NoCustom, Ops, Reboot, Target};
+pub use ops::{Custom, Ecc, Exclusive, Filled, Info, NoCustom, Ops, Reboot, Target};
 pub use state::{Endpoints, Picoboot, State};
 pub use status::{Result, Status};
 pub use transport::{Direction, Transport};

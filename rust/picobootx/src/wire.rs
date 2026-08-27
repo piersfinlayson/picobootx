@@ -25,39 +25,16 @@ pub const FLASH_PAGE_SIZE: usize = 256;
 /// One flash block, the unit a bulk erase works in.
 pub const FLASH_BLOCK_SIZE: u32 = 65536;
 
-/// Which system information flags exist, and how many words each carries.
+/// The longest data phase `GET_INFO` accepts, in bytes.
 ///
-/// The protocol names the flags and the device answers whichever of them it was
-/// asked for, one after another, so the word counts are what a host reads the
-/// answer apart by.
-pub(crate) const INFO_FLAGS: [(u32, u32); 6] = [
-    (0x0001, 3), // chip info
-    (0x0002, 1), // critical
-    (0x0004, 1), // cpu info
-    (0x0008, 1), // flash device info
-    (0x0010, 4), // boot random
-    (0x0040, 4), // boot info
-];
+/// The protocol requires the length to be a multiple of four, and a longer one
+/// is refused with [`Status::InvalidTransferLen`](crate::Status).
+pub const GET_INFO_MAX_LEN: u32 = 256;
 
-/// The most words any one system information flag carries.
-///
-/// This is what a buffer serving one flag has to be able to hold, and it is
-/// taken from the table above rather than written out beside it, so a flag with
-/// a longer answer widens the buffers that carry it instead of being quietly
-/// refused by them.
-pub const INFO_MAX_WORDS: usize = info_max_words();
-
-const fn info_max_words() -> usize {
-    let mut max = 0;
-    let mut i = 0;
-    while i < INFO_FLAGS.len() {
-        if INFO_FLAGS[i].1 as usize > max {
-            max = INFO_FLAGS[i].1 as usize;
-        }
-        i += 1;
-    }
-    max
-}
+/// The most words a `GET_INFO` answer can be: the longest transfer, less the
+/// count word the library puts in front of the answer.  Scratch this size serves
+/// every request the library accepts.
+pub const INFO_MAX_ANSWER_WORDS: usize = (GET_INFO_MAX_LEN as usize / 4) - 1;
 
 /// The 32 bytes a host sends to start a command.
 ///
@@ -156,24 +133,5 @@ impl StatusBlock {
 
     pub(crate) fn code(&self) -> u32 {
         u32::from_le_bytes([self.0[4], self.0[5], self.0[6], self.0[7]])
-    }
-}
-
-// INFO_FLAGS and the function that reads it are both private, so this is here
-// rather than in tests/.  Everything else about the wire is public and is
-// tested from there.
-#[cfg(test)]
-mod tests {
-    use super::{INFO_FLAGS, INFO_MAX_WORDS, info_max_words};
-
-    #[test]
-    fn the_widest_flag_in_the_table_is_what_sizes_a_buffer() {
-        let widest = INFO_FLAGS
-            .iter()
-            .map(|(_, words)| *words as usize)
-            .max()
-            .expect("the table names at least one flag");
-        assert_eq!(info_max_words(), widest);
-        assert_eq!(INFO_MAX_WORDS, widest);
     }
 }

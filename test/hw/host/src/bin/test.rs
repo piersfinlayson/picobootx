@@ -27,7 +27,8 @@ use picobootx_hw_host::{
     ACCESS_EXCLUSIVE, ACCESS_EXCLUSIVE_AND_EJECT, ACCESS_NOT_EXCLUSIVE, Board, CMD_ENTER_XIP,
     CMD_EXCLUSIVE_ACCESS, CMD_EXEC, CMD_EXIT_XIP, CMD_FLASH_ERASE, CMD_GET_INFO, CMD_READ,
     CMD_REBOOT_OLD, CMD_REBOOT2, CMD_VECTORIZE_FLASH, CMD_WRITE, EP_IN, EP_OUT, FLASH_BLOCK,
-    FLASH_PAGE, FLASH_SECTOR, INFO_ARGS_LEN, INFO_SYS, MAX_PACKET, REBOOT_ARGS_LEN, REBOOT_NORMAL,
+    FLASH_PAGE, FLASH_SECTOR, INFO_ARGS_LEN, INFO_COUNT_LEN, INFO_HEADER_LEN, INFO_SYS,
+    INFO_UF2_STATUS, INFO_UF2_TARGET, INFO_UNNAMED, MAX_PACKET, REBOOT_ARGS_LEN, REBOOT_NORMAL,
     wait_back, wait_gone,
 };
 
@@ -56,9 +57,50 @@ const FLAG_CPU: u32 = 0x0004;
 const FLAG_CPU_WORDS: u32 = 1;
 const FLAG_BOOT_RANDOM: u32 = 0x0010;
 const FLAG_BOOT_RANDOM_WORDS: u32 = 4;
+const FLAG_BOOT_INFO: u32 = 0x0040;
+const FLAG_BOOT_INFO_WORDS: u32 = 4;
 
 /// A flag no part carries, for asking what the device does with one.
 const FLAG_UNKNOWN: u32 = 0x0080;
+
+/// The flag 5.4.8.17 names and says is not supported.  A part that answers
+/// every other documented flag still cannot answer this one, so it is the
+/// part's own refusal rather than a flag nothing has heard of.
+const FLAG_NONCE: u32 = 0x0020;
+
+/// Every flag 5.4.8.17 names, and the words the ones a part can answer carry
+/// between them: three for CHIP_INFO, one each for CRITICAL, CPU_INFO and
+/// FLASH_DEV_INFO, four each for BOOT_RANDOM and BOOT_INFO, and none for
+/// NONCE.  Asking for the lot at once is where a wrongly composed flags word
+/// or a miscounted answer has the most room to show.
+const FLAG_ALL_DOCUMENTED: u32 = 0x007f;
+const FLAG_ALL_DOCUMENTED_WORDS: u32 = 14;
+
+/// Where BOOT_INFO's four words land in that answer: after CHIP_INFO's three,
+/// CRITICAL's one, CPU_INFO's one, FLASH_DEV_INFO's one and BOOT_RANDOM's
+/// four, with NONCE between them contributing nothing.
+const BOOT_INFO_AT_WORD: usize = 10;
+
+/// Partition information about the table as a whole (5.4.8.16 PT_INFO): the
+/// partition count and present bit, then the unpartitioned space's two words.
+const PART_PT_INFO: u32 = 0x0001;
+const PART_PT_INFO_WORDS: u32 = 3;
+
+/// A per-partition flag, which a part with no partitions answers with no words
+/// at all — the flags word says it was answered and nothing follows for it.
+const PART_LOCATION_AND_FLAGS: u32 = 0x0010;
+
+/// What the UF2 target question answers with: a target partition, then that
+/// partition's two words.  A device serving picobootx has no drive to drag a
+/// UF2 onto, so the target is always -1 and the two words beside it are the
+/// unpartitioned space the partition question reports.
+const UF2_TARGET_WORDS: u32 = 3;
+const UF2_TARGET_NOWHERE: u32 = 0xffff_ffff;
+
+/// Three UF2 family ids that have nothing in common: the two this part's own
+/// architectures use, and one no family register names.  The answer may not
+/// depend on which of them was asked about.
+const UF2_FAMILIES: [u32; 3] = [0xe48b_ff59, 0xe48b_ff5a, 0x0000_0000];
 
 /// How long the device waits before rebooting, so the acknowledgement has time
 /// to be collected first.  Long enough to be the device's wait rather than a
@@ -658,10 +700,102 @@ async fn refusal_code_magic(
 
 /// `GET_INFO` arguments asking for these system flags.
 fn info_args(flags: u32) -> [u8; INFO_ARGS_LEN] {
+    info_args_of(INFO_SYS, flags)
+}
+
+/// `GET_INFO` arguments asking for a kind of information, with its parameter.
+fn info_args_of(info_type: u8, param0: u32) -> [u8; INFO_ARGS_LEN] {
     let mut args = [0u8; INFO_ARGS_LEN];
-    args[0] = INFO_SYS;
-    args[4..8].copy_from_slice(&flags.to_le_bytes());
+    args[0] = info_type;
+    args[4..8].copy_from_slice(&param0.to_le_bytes());
     args
+}
+
+/// Hand back what a request that was meant to be served produced, putting the
+/// board back where it was not.
+///
+/// A device that refuses halts both bulk endpoints, and every question here is
+/// one whose answer is meant to be served — so a refusal is the failure being
+/// looked for, and without putting the board back one wrong answer would take
+/// every check after it down with a reason that is not its own.
+async fn served<T>(board: &mut Board, got: Result<T, String>) -> Result<T, String> {
+    match got {
+        Ok(v) => Ok(v),
+        Err(e) => match board.quiesce().await {
+            Ok(()) => Err(e),
+            Err(q) => Err(format!("{e}, and it would not go back to waiting: {q}")),
+        },
+    }
+}
+
+/// Ask for system information at the length its answer exactly fits in,
+/// leaving the board ready for the next command whichever way it went.
+async fn info_sys(
+    board: &mut Board,
+    flags: u32,
+    words: u32,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    let got = board.get_info_sys(flags, words);
+    served(board, got).await
+}
+
+/// The same, for partition information, which comes back in the same shape.
+async fn info_partition(
+    board: &mut Board,
+    flags: u32,
+    words: u32,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    let got = board.get_info_partition(flags, words);
+    served(board, got).await
+}
+
+/// The same, for a kind of information whose answer has no flags word in front
+/// of it, which is how the two UF2 types answer.
+async fn info_words(
+    board: &mut Board,
+    info_type: u8,
+    param0: u32,
+    words: u32,
+) -> Result<(u32, Vec<u8>), String> {
+    let got = board.get_info_words(info_type, param0, words);
+    served(board, got).await
+}
+
+/// Read one word out of a reply's data, counting from the first data word.
+fn word_at(data: &[u8], index: usize) -> Option<u32> {
+    let at = index * 4;
+    let bytes = data.get(at..at + 4)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Ask for system information at a stated transfer length, and report how many
+/// bytes the device actually put on the pipe for it.
+///
+/// The reply is taken with [`Board::read_raw`] rather than [`Board::read_reply`]
+/// because the second cuts what came back down to the length asked for, which
+/// is exactly the excess this is looking for.  What is left queued afterwards
+/// is taken too, since a device sending the answer and then more sends the
+/// second part in packets of its own and the transfer ends on the first short
+/// one.
+async fn info_reply_len(board: &mut Board, flags: u32, tlen: u32) -> Result<usize, String> {
+    board.send_cmd(CMD_GET_INFO, tlen, &info_args(flags))?;
+
+    // A whole spare packet beyond the length asked for, so an overrun has
+    // somewhere to land instead of filling the buffer and looking like an
+    // answer that ended.
+    let reply = board.read_raw(tlen as usize + MAX_PACKET)?;
+    let trailing = board.drain();
+
+    board.ack()?;
+    board.quiesce().await?;
+
+    if trailing > 0 {
+        return Err(format!(
+            "{} bytes came back, and {trailing} more packets were still queued behind them",
+            reply.len()
+        ));
+    }
+    Ok(reply.len())
 }
 
 /// What the device says about itself, and what it does with a request it
@@ -673,16 +807,32 @@ fn info_args(flags: u32) -> [u8; INFO_ARGS_LEN] {
 /// correctly.  The reply is a word saying how many words follow, then each
 /// flag's words in the order the protocol lists them, so the arithmetic joining
 /// those is the device's own and is what can be wrong.
+///
+/// For the two kinds of information the part answers, that count word is
+/// followed by a flags word naming which of the flags asked for were answered.
+/// The flags word is itself counted, so the count is one more than the data
+/// words.  The UF2 kinds have no flags word, so their count is the data words
+/// alone.
+///
+/// Two things the part decides rather than the device.  A flag the part cannot
+/// answer is dropped from the flags word and is worth no words, so what the
+/// answer is worth is not what was asked for — and the transfer length is
+/// judged against the answer.  And a flag the part answers with nothing at all
+/// is named in the flags word and followed by no words, so what follows cannot
+/// be worked out from the flags word either.
 async fn get_info(run: &mut Runner, board: &mut Board) {
-    let chip = match board.get_info_sys(FLAG_CHIP, FLAG_CHIP_WORDS) {
-        Ok((header, data)) => {
+    let chip = match info_sys(board, FLAG_CHIP, FLAG_CHIP_WORDS).await {
+        Ok((count, answered, data)) => {
             run.check(
                 "one flag is answered with the word count it carries",
-                if header == FLAG_CHIP_WORDS && data.len() == FLAG_CHIP_WORDS as usize * 4 {
+                if count == FLAG_CHIP_WORDS + 1
+                    && answered == FLAG_CHIP
+                    && data.len() == FLAG_CHIP_WORDS as usize * 4
+                {
                     Ok(())
                 } else {
                     Err(format!(
-                        "it said {header} words and sent {} bytes",
+                        "it said {count} words, answered {answered:#x} and sent {} bytes",
                         data.len()
                     ))
                 },
@@ -698,15 +848,15 @@ async fn get_info(run: &mut Runner, board: &mut Board) {
         }
     };
 
-    let cpu = match board.get_info_sys(FLAG_CPU, FLAG_CPU_WORDS) {
-        Ok((header, data)) => {
+    let cpu = match info_sys(board, FLAG_CPU, FLAG_CPU_WORDS).await {
+        Ok((count, answered, data)) => {
             run.check(
                 "a flag carrying one word is answered with one word",
-                if header == FLAG_CPU_WORDS && data.len() == 4 {
+                if count == FLAG_CPU_WORDS + 1 && answered == FLAG_CPU && data.len() == 4 {
                     Ok(())
                 } else {
                     Err(format!(
-                        "it said {header} words and sent {} bytes",
+                        "it said {count} words, answered {answered:#x} and sent {} bytes",
                         data.len()
                     ))
                 },
@@ -728,13 +878,22 @@ async fn get_info(run: &mut Runner, board: &mut Board) {
     both.extend_from_slice(&cpu);
     run.check(
         "two flags together are the two flags separately, in order",
-        match board.get_info_sys(FLAG_CHIP | FLAG_CPU, FLAG_CHIP_WORDS + FLAG_CPU_WORDS) {
+        match info_sys(
+            board,
+            FLAG_CHIP | FLAG_CPU,
+            FLAG_CHIP_WORDS + FLAG_CPU_WORDS,
+        )
+        .await
+        {
             Err(e) => Err(e),
-            Ok((header, _)) if header != FLAG_CHIP_WORDS + FLAG_CPU_WORDS => {
-                Err(format!("it said {header} words"))
+            Ok((count, _, _)) if count != FLAG_CHIP_WORDS + FLAG_CPU_WORDS + 1 => {
+                Err(format!("it said {count} words"))
             }
-            Ok((_, data)) if data == both => Ok(()),
-            Ok((_, data)) => Err(format!(
+            Ok((_, answered, _)) if answered != FLAG_CHIP | FLAG_CPU => {
+                Err(format!("it answered {answered:#x}"))
+            }
+            Ok((_, _, data)) if data == both => Ok(()),
+            Ok((_, _, data)) => Err(format!(
                 "it sent {data:02x?} where the two separately gave {both:02x?}"
             )),
         },
@@ -744,37 +903,402 @@ async fn get_info(run: &mut Runner, board: &mut Board) {
     // handing back the same buffer whatever it was asked is caught.
     run.check(
         "a different flag answers with something different",
-        match board.get_info_sys(FLAG_BOOT_RANDOM, FLAG_BOOT_RANDOM_WORDS) {
+        match info_sys(board, FLAG_BOOT_RANDOM, FLAG_BOOT_RANDOM_WORDS).await {
             Err(e) => Err(e),
-            Ok((_, data)) if data[..4] != chip[..4] => Ok(()),
+            Ok((_, _, data)) if data[..4] != chip[..4] => Ok(()),
             Ok(_) => Err("it gave the same first word as the chip flag".into()),
         },
     );
 
-    // A flag the part does not carry is dropped rather than answered, and the
-    // count says so before any of it is sent.
+    // A flag the part does not carry is dropped rather than answered.  The
+    // count says so before any of it is sent, and the flags word says which of
+    // what was asked for survived — here, none of it.
     run.check(
         "a flag the part does not carry is counted as no words",
-        match board.get_info_sys(FLAG_UNKNOWN, 0) {
+        match info_sys(board, FLAG_UNKNOWN, 0).await {
             Err(e) => Err(e),
-            Ok((0, _)) => Ok(()),
-            Ok((header, _)) => Err(format!("it said {header} words")),
+            Ok((1, 0, _)) => Ok(()),
+            Ok((count, answered, _)) => {
+                Err(format!("it said {count} words and answered {answered:#x}"))
+            }
         },
     );
 
-    // The other kind of information, which the library answers itself rather
-    // than asking the part.  There is no header — the reply is the words — and
-    // the same five words come back whatever the device is.
+    // A request naming nothing at all.  The flags word is the head of
+    // get_sys_info's own buffer rather than something the device adds when it
+    // has flags to report, so it is sent for a request that named none, and
+    // the count says one word follows rather than none.
     run.check(
-        "partition information is answered, and is the same words every time",
-        match (board.get_info_partition(5), board.get_info_partition(5)) {
-            (Err(e), _) | (_, Err(e)) => Err(e),
-            (Ok(a), Ok(_)) if a.len() != 20 => Err(format!("{} bytes came back", a.len())),
-            (Ok(a), Ok(b)) if a != b => Err("it answered differently the second time".into()),
-            (Ok(a), Ok(_)) if a.iter().all(|x| *x == 0) => {
-                Err("every word was zero, so nothing was answered".into())
+        "a request for no flags at all is answered with the flags word",
+        match info_sys(board, 0, 0).await {
+            Err(e) => Err(e),
+            Ok((1, 0, data)) if data.is_empty() => Ok(()),
+            Ok((count, answered, data)) => Err(format!(
+                "it said {count} words, answered {answered:#x} and sent {} bytes after them",
+                data.len()
+            )),
+        },
+    );
+
+    // A flag the part does not carry, asked for beside one it does and
+    // numbered above it, so the answer stops short of what was asked for.  The
+    // reply is a whole one - nothing says a flag went unserved except the
+    // flags word, and a device that counted the missing flag's words, or left
+    // its bit set, or shifted the served flag's word along to make room for it,
+    // fails here and passes the flag on its own.
+    run.check(
+        "a flag the part does not carry does not disturb one beside it",
+        match info_sys(board, FLAG_UNKNOWN | FLAG_CPU, FLAG_CPU_WORDS).await {
+            Err(e) => Err(e),
+            Ok((count, _, _)) if count != FLAG_CPU_WORDS + 1 => {
+                Err(format!("it said {count} words"))
             }
-            (Ok(_), Ok(_)) => Ok(()),
+            Ok((_, answered, _)) if answered != FLAG_CPU => {
+                Err(format!("it answered {answered:#x}"))
+            }
+            Ok((_, _, data)) if data == cpu => Ok(()),
+            Ok((_, _, data)) => Err(format!(
+                "it sent {data:02x?} where the flag on its own gave {cpu:02x?}"
+            )),
+        },
+    );
+
+    // The flag 5.4.8.17 names and says the part does not support, which is a
+    // different thing from FLAG_UNKNOWN above: this one the protocol has heard
+    // of and the silicon cannot answer.  A device that decided for itself which
+    // flags exist would refuse the request as naming something it could not
+    // serve, and the whole answer would go with it.
+    run.check(
+        "the flag the part cannot answer is dropped rather than refused",
+        match info_sys(board, FLAG_NONCE, 0).await {
+            Err(e) => Err(e),
+            Ok((1, 0, data)) if data.is_empty() => Ok(()),
+            Ok((count, answered, data)) => Err(format!(
+                "it said {count} words, answered {answered:#x} and sent {} bytes after them",
+                data.len()
+            )),
+        },
+    );
+
+    // The same flag beside one the part does answer, and numbered below it, so
+    // the served flag's words have to move up to where the dropped one would
+    // have been.  A device that left a hole for it, counted its words, or left
+    // its bit in the flags word fails here and passes it on its own.
+    let boot_info = match info_sys(board, FLAG_BOOT_INFO, FLAG_BOOT_INFO_WORDS).await {
+        Ok((_, _, data)) => Some(data),
+        Err(e) => {
+            run.check(
+                "a flag the part cannot answer leaves the one after it whole",
+                Err(e),
+            );
+            None
+        }
+    };
+    if let Some(boot_info) = &boot_info {
+        run.check(
+            "a flag the part cannot answer leaves the one after it whole",
+            match info_sys(board, FLAG_NONCE | FLAG_BOOT_INFO, FLAG_BOOT_INFO_WORDS).await {
+                Err(e) => Err(e),
+                Ok((count, _, _)) if count != FLAG_BOOT_INFO_WORDS + 1 => {
+                    Err(format!("it said {count} words"))
+                }
+                Ok((_, answered, _)) if answered != FLAG_BOOT_INFO => {
+                    Err(format!("it answered {answered:#x}"))
+                }
+                Ok((_, _, data)) if data == *boot_info => Ok(()),
+                Ok((_, _, data)) => Err(format!(
+                    "it sent {data:02x?} where the flag on its own gave {boot_info:02x?}"
+                )),
+            },
+        );
+    }
+
+    // The transfer length is judged against what the answer will be and not
+    // against what was asked for, which are different numbers as soon as a flag
+    // is dropped.  This length has room for the chip flag alone, and the
+    // request names the dropped one beside it - so a device sizing its
+    // judgement by the request refuses a length that is exactly right.
+    run.check(
+        "a length sized to the answer rather than to the request is served",
+        match info_sys(board, FLAG_CHIP | FLAG_NONCE, FLAG_CHIP_WORDS).await {
+            Err(e) => Err(e),
+            Ok((count, _, _)) if count != FLAG_CHIP_WORDS + 1 => {
+                Err(format!("it said {count} words"))
+            }
+            Ok((_, answered, _)) if answered != FLAG_CHIP => {
+                Err(format!("it answered {answered:#x}"))
+            }
+            Ok((_, _, data)) if data == chip => Ok(()),
+            Ok((_, _, data)) => Err(format!(
+                "it sent {data:02x?} where the chip flag on its own gave {chip:02x?}"
+            )),
+        },
+    );
+
+    // And the other side of that boundary, so the length is still being judged
+    // rather than waved through for a request naming a dropped flag.
+    run.check(
+        "and one word less than that answer needs is still refused",
+        match refusal_code(
+            board,
+            CMD_GET_INFO,
+            INFO_ARGS_LEN as u8,
+            INFO_HEADER_LEN as u32 + (FLAG_CHIP_WORDS - 1) * 4,
+            &info_args(FLAG_CHIP | FLAG_NONCE),
+        )
+        .await
+        {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::BufferTooSmall as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+
+    // Every flag the datasheet names, at once.  This is where a wrongly
+    // composed flags word has the most room to show: the one flag 5.4.8.17 says
+    // is not supported has to be the only one missing from it, and the count
+    // has to be what the flags that survived are worth rather than what the
+    // request was worth.
+    let all = match info_sys(board, FLAG_ALL_DOCUMENTED, FLAG_ALL_DOCUMENTED_WORDS).await {
+        Ok((count, answered, data)) => {
+            run.check(
+                "every documented flag but the unsupported one is answered",
+                if count == FLAG_ALL_DOCUMENTED_WORDS + 1
+                    && answered == FLAG_ALL_DOCUMENTED & !FLAG_NONCE
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "it said {count} words and answered {answered:#x}, where {:#x} was asked \
+                         for and {:#x} expected",
+                        FLAG_ALL_DOCUMENTED,
+                        FLAG_ALL_DOCUMENTED & !FLAG_NONCE
+                    ))
+                },
+            );
+            Some(data)
+        }
+        Err(e) => {
+            run.check(
+                "every documented flag but the unsupported one is answered",
+                Err(e),
+            );
+            None
+        }
+    };
+
+    // And what came back is those flags' own words, at the offsets dropping the
+    // unsupported one leaves them at.  A device that reserved words for it puts
+    // everything after it four bytes late, which the flags word and the count
+    // both fail to notice - the first and last flags asked for are what says
+    // where the answer really starts and ends.
+    if let (Some(all), Some(boot_info)) = (&all, &boot_info) {
+        run.check(
+            "and they are those flags' own words, with no room left for the dropped one",
+            match (
+                all.len() == FLAG_ALL_DOCUMENTED_WORDS as usize * 4,
+                all.starts_with(&chip),
+                all.get(BOOT_INFO_AT_WORD * 4..) == Some(&boot_info[..]),
+            ) {
+                (true, true, true) => Ok(()),
+                (false, _, _) => Err(format!("it sent {} bytes of data", all.len())),
+                (_, false, _) => Err(format!(
+                    "it opens {:02x?} where the chip flag gave {chip:02x?}",
+                    &all[..chip.len().min(all.len())]
+                )),
+                (_, _, false) => Err(format!(
+                    "the last four words are {:02x?} where the boot-info flag gave {boot_info:02x?}",
+                    &all[all.len().saturating_sub(16)..]
+                )),
+            },
+        );
+    }
+
+    // The other kind of information the part answers.  PT_INFO describes the
+    // table as a whole, so it is answered whether or not the part has any
+    // partitions, and it comes back in the same shape system information does.
+    let pt_info = match info_partition(board, PART_PT_INFO, PART_PT_INFO_WORDS).await {
+        Ok((count, answered, data)) => {
+            run.check(
+                "partition information is answered with the word count it carries",
+                if count == PART_PT_INFO_WORDS + 1
+                    && answered == PART_PT_INFO
+                    && data.len() == PART_PT_INFO_WORDS as usize * 4
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "it said {count} words, answered {answered:#x} and sent {} bytes",
+                        data.len()
+                    ))
+                },
+            );
+            Some(data)
+        }
+        Err(e) => {
+            run.check(
+                "partition information is answered with the word count it carries",
+                Err(e),
+            );
+            None
+        }
+    };
+
+    // The discriminating one for it.  The same parameter asked of the two kinds
+    // picks two different routines on the part, and both are worth three words
+    // here - so the count and the flags word cannot tell them apart and only
+    // the data can.  A device answering both from one routine, or from
+    // something of its own that does not vary, gives the same bytes twice.
+    if let Some(pt_info) = &pt_info {
+        run.check(
+            "the two kinds of information come from two different places",
+            if *pt_info == chip {
+                Err(format!(
+                    "partition {PART_PT_INFO:#x} and system {FLAG_CHIP:#x} both gave {chip:02x?}"
+                ))
+            } else {
+                Ok(())
+            },
+        );
+    }
+
+    // A partition flag that names something this part does not have.  It is
+    // answered - the flags word says so - and it is worth no words, so what
+    // follows the flags word cannot be worked out from the flags word.  A
+    // device carrying its own table of what each flag is worth, rather than
+    // taking the count from the part, sends words nothing put there.
+    run.check(
+        "a partition flag with nothing to report is answered with no words",
+        match info_partition(board, PART_LOCATION_AND_FLAGS, 0).await {
+            Err(e) => Err(e),
+            Ok((1, PART_LOCATION_AND_FLAGS, data)) if data.is_empty() => Ok(()),
+            Ok((count, answered, data)) => Err(format!(
+                "it said {count} words, answered {answered:#x} and sent {} bytes after them",
+                data.len()
+            )),
+        },
+    );
+
+    // The UF2 target question, which asks where a family would be downloaded
+    // to.  This device presents no mass storage drive for a UF2 to be dragged
+    // onto, and installs no answer of its own, so the default answers nowhere.  This is one the protocol names and the device
+    // answers with its words alone, so a device that put a flags word in front
+    // of them fails on the count as well as on the first word.
+    let target = match info_words(board, INFO_UF2_TARGET, UF2_FAMILIES[0], UF2_TARGET_WORDS).await {
+        Ok((count, data)) => {
+            run.check(
+                "the UF2 target question is answered, as nowhere",
+                match (count, word_at(&data, 0)) {
+                    (UF2_TARGET_WORDS, Some(UF2_TARGET_NOWHERE)) => Ok(()),
+                    (count, Some(w)) => {
+                        Err(format!("it said {count} words and a target of {w:#x}"))
+                    }
+                    (count, None) => Err(format!("it said {count} words and sent none")),
+                },
+            );
+            Some(data)
+        }
+        Err(e) => {
+            run.check("the UF2 target question is answered, as nowhere", Err(e));
+            None
+        }
+    };
+
+    // And the family id is not consulted at all.  Two of the part's own
+    // architectures and one no family register names, which is as far apart as
+    // three families get - a device that looked any of them up would have to
+    // find the same nothing for all three, and one that answered from the
+    // parameter in any way gives three different replies.
+    run.check(
+        "the answer does not depend on which family was asked about",
+        {
+            let mut answers = Vec::new();
+            let mut failure = None;
+            for family in UF2_FAMILIES {
+                match info_words(board, INFO_UF2_TARGET, family, UF2_TARGET_WORDS).await {
+                    Ok(got) => answers.push((family, got)),
+                    Err(e) => {
+                        failure = Some(format!("{family:#x} was not served: {e}"));
+                        break;
+                    }
+                }
+            }
+            match failure {
+                Some(e) => Err(e),
+                None => match answers.iter().find(|(_, got)| *got != answers[0].1) {
+                    None => Ok(()),
+                    Some((family, got)) => Err(format!(
+                        "{family:#x} gave {got:02x?} where {:#x} gave {:02x?}",
+                        answers[0].0, answers[0].1
+                    )),
+                },
+            }
+        },
+    );
+
+    // What sits beside the target is the unpartitioned space, which is what the
+    // partition question reports for a part with no partition table.  Asked of
+    // the device twice by two routes, so what is pinned is that the two agree
+    // rather than a number this test decided in advance.  A device answering
+    // the UF2 question out of anything but the partition table fails here and
+    // passes both checks above.
+    if let (Some(target), Some(pt_info)) = (&target, &pt_info) {
+        run.check(
+            "and the space beside it is the space the partition question reports",
+            if target.len() != UF2_TARGET_WORDS as usize * 4 {
+                Err(format!("the target answer was {} bytes", target.len()))
+            } else if target[4..] == pt_info[4..] {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the target carries {:02x?} where the partition table gave {:02x?}",
+                    &target[4..],
+                    &pt_info[4..]
+                ))
+            },
+        );
+    }
+
+    // The transfer length is judged for this kind too, and its answer has no
+    // flags word - so a device allowing for one it does not send has room for
+    // an answer four bytes longer than the one it gives.
+    run.check(
+        "a length one word short of the UF2 target answer is refused",
+        match refusal_code(
+            board,
+            CMD_GET_INFO,
+            INFO_ARGS_LEN as u8,
+            INFO_COUNT_LEN as u32 + (UF2_TARGET_WORDS - 1) * 4,
+            &info_args_of(INFO_UF2_TARGET, UF2_FAMILIES[0]),
+        )
+        .await
+        {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::BufferTooSmall as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
+        },
+    );
+
+    // The UF2 download question, which the part's own bootrom answers and this
+    // device will not.  It reports on a download over a mass storage drive,
+    // and this device presents none, so there is nothing to report on.  Asked at a length its answer
+    // would fit in, so a device that served it is answered rather than refused
+    // for the length - and the type beside it is served, so a device refusing
+    // every type past the partition one fails the target check above instead.
+    run.check(
+        "the UF2 download question is refused as a bad argument",
+        match refusal_code(
+            board,
+            CMD_GET_INFO,
+            INFO_ARGS_LEN as u8,
+            32,
+            &info_args_of(INFO_UF2_STATUS, 0),
+        )
+        .await
+        {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::InvalidArg as u32 => Ok(()),
+            Ok(code) => Err(format!("it reported {code}")),
         },
     );
 
@@ -802,17 +1326,94 @@ async fn get_info(run: &mut Runner, board: &mut Board) {
         );
     }
 
-    // And a kind of information that is neither of the two the protocol names.
-    let mut args = info_args(FLAG_CHIP);
-    args[0] = 0x03;
+    // A length the protocol allows and the answer will not fit in, which is a
+    // different judgement from the three above: those are lengths no GET_INFO
+    // could ever be served at, and this one is refused for what was asked for
+    // rather than for its shape.  Both sides of the boundary, because a device
+    // that refused every length but the one it liked would pass the refusal on
+    // its own.
     run.check(
-        "an information type the protocol does not name is refused",
-        match refusal_code(board, CMD_GET_INFO, INFO_ARGS_LEN as u8, 8, &args).await {
+        "a transfer length the answer exactly fits in is served",
+        match info_sys(board, FLAG_CHIP, FLAG_CHIP_WORDS).await {
             Err(e) => Err(e),
-            Ok(code) if code == Status::UnknownCmd as u32 => Ok(()),
+            Ok((count, answered, _)) if count == FLAG_CHIP_WORDS + 1 && answered == FLAG_CHIP => {
+                Ok(())
+            }
+            Ok((count, answered, _)) => {
+                Err(format!("it said {count} words and answered {answered:#x}"))
+            }
+        },
+    );
+    run.check(
+        "and one word less than the answer needs is refused",
+        match refusal_code(
+            board,
+            CMD_GET_INFO,
+            INFO_ARGS_LEN as u8,
+            INFO_HEADER_LEN as u32 + (FLAG_CHIP_WORDS - 1) * 4,
+            &info_args(FLAG_CHIP),
+        )
+        .await
+        {
+            Err(e) => Err(e),
+            Ok(code) if code == Status::BufferTooSmall as u32 => Ok(()),
             Ok(code) => Err(format!("it reported {code}")),
         },
     );
+
+    // What reached the bus, rather than what the device meant to send.  The
+    // protocol gives the host the length and says that many bytes are then
+    // transferred, so a reply longer than the length asked for is bytes no
+    // host has anywhere to put - and a host reading the answer never sees
+    // them, because it takes the length it asked for and leaves the rest.
+    // Asked at the length the answer exactly fits and at one with room to
+    // spare, since a device sending its own idea of the answer and a device
+    // filling the length it was given go wrong at different lengths.
+    for (tlen, what) in [
+        (
+            INFO_HEADER_LEN as u32 + FLAG_CHIP_WORDS * 4,
+            "exactly the answer's size",
+        ),
+        (
+            INFO_HEADER_LEN as u32 + (FLAG_CHIP_WORDS + 3) * 4,
+            "with room to spare",
+        ),
+    ] {
+        run.check(
+            &format!("a transfer length {what} gets that many bytes and no more"),
+            match info_reply_len(board, FLAG_CHIP, tlen).await {
+                Err(e) => Err(e),
+                Ok(got) if got as u32 == tlen => Ok(()),
+                Ok(got) => Err(format!("{got} bytes came back for a length of {tlen}")),
+            },
+        );
+    }
+
+    // And a kind of information that is none of the four the protocol names.
+    // The one immediately past the last of them and one nowhere near it, since
+    // a device whose test of the type is off by one refuses the second and
+    // serves the first.  Zero as well, because it is what an argument block
+    // nobody filled in carries.
+    for info_type in [0x00, INFO_UNNAMED, 0xff] {
+        run.check(
+            &format!(
+                "information type {info_type:#04x}, which the protocol does not name, is refused"
+            ),
+            match refusal_code(
+                board,
+                CMD_GET_INFO,
+                INFO_ARGS_LEN as u8,
+                8,
+                &info_args_of(info_type, FLAG_CHIP),
+            )
+            .await
+            {
+                Err(e) => Err(e),
+                Ok(code) if code == Status::InvalidArg as u32 => Ok(()),
+                Ok(code) => Err(format!("it reported {code}")),
+            },
+        );
+    }
 }
 
 /// `REBOOT2` args: how to reboot, how long to wait first, and two parameters.

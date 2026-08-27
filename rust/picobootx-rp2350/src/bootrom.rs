@@ -29,7 +29,8 @@ const ERROR_INVALID_ARG: c_int = -5;
 const ERROR_IO: c_int = -6; // unused on RP2350
 const ERROR_BADAUTH: c_int = -7; // unused on RP2350
 const ERROR_CONNECT_FAILED: c_int = -8; // unused on RP2350
-const ERROR_INSUFFICIENT_RESOURCES: c_int = -9; // unused on RP2350
+// get_uf2_target_partition returns this for a work area too small.
+const ERROR_INSUFFICIENT_RESOURCES: c_int = -9;
 const ERROR_INVALID_ADDRESS: c_int = -10;
 const ERROR_BAD_ALIGNMENT: c_int = -11;
 const ERROR_INVALID_STATE: c_int = -12;
@@ -55,6 +56,10 @@ pub type RebootFn = unsafe extern "C" fn(flags: u32, delay_ms: u32, p0: u32, p1:
 
 /// Answer one or more system information flags into a word buffer.
 pub type GetSysInfoFn = unsafe extern "C" fn(out: *mut u32, out_words: u32, flags: u32) -> c_int;
+
+/// Answer one or more partition table flags into a word buffer.
+pub type GetPartitionTableInfoFn =
+    unsafe extern "C" fn(out: *mut u32, out_words: u32, flags_and_partition: u32) -> c_int;
 
 /// Read or write whole OTP rows.
 pub type OtpAccessFn =
@@ -150,6 +155,11 @@ routine!(
 routine!(
     /// The routine that answers system information, if it publishes one.
     get_sys_info, GetSysInfoFn, b'G', b'S'
+);
+routine!(
+    /// The routine that answers partition table information, if it publishes
+    /// one.
+    get_partition_table_info, GetPartitionTableInfoFn, b'G', b'P'
 );
 routine!(
     /// The routine that reads and writes OTP, if it publishes one.

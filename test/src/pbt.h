@@ -588,6 +588,8 @@ pb_status_t pbt_uf2_get_info(pb_info_type_t type, uint32_t param0,
 #define PBT_CUSTOM_CMD_OVER   0x87u  // data in: fill reports writing more than
                                      // it wrote, and more than the room it was
                                      // offered
+#define PBT_CUSTOM_CMD_BIG_ITEM 0x88u // data in: one indivisible item, of a size
+                                     // a scenario chooses
 
 // The status PBT_CUSTOM_CMD_REFUSE's dispatch returns, and the one
 // PBT_CUSTOM_CMD_STALL's fill returns.  Neither is produced by any built-in
@@ -602,10 +604,21 @@ pb_status_t pbt_uf2_get_info(pb_info_type_t type, uint32_t param0,
 // size, so a boundary lands mid-packet and fill has to decline at least once.
 #define PBT_CUSTOM_ITEM_SIZE 24u
 
+// The two sizes PBT_CUSTOM_CMD_BIG_ITEM's item is given.  One is larger than
+// the buffer the library fills, so no call can ever hold it, and the other is
+// exactly that buffer, so every call can.  The item size is the only thing
+// between them.
+#define PBT_CUSTOM_BIG_ITEM_SIZE 68u
+#define PBT_CUSTOM_BIG_ITEM_FITS 64u
+
 // How many bytes past what it wrote PBT_CUSTOM_CMD_OVER's fill claims.  On the
 // call that finishes the transfer that figure is also past what the transfer
 // had left, which is what pushes a library's count of the remainder below zero.
 #define PBT_CUSTOM_OVERSTATE_BY 8u
+
+// The size of PBT_CUSTOM_CMD_BIG_ITEM's item.  pbt_begin puts it back to
+// PBT_CUSTOM_BIG_ITEM_SIZE.
+void pbt_custom_set_big_item(uint32_t size);
 
 // Reset the sample implementation's own progress tracking.  pbt_begin does
 // this.  The callbacks keep their cursor here rather than in the library, which

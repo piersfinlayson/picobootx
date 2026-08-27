@@ -622,10 +622,12 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             }
 
             if written == 0 {
-                if transfer_capped {
-                    // The fill declined the whole of what the transfer has
-                    // left, and the room on offer cannot grow.  The host asked
-                    // for a length its answer does not fit in.
+                if transfer_capped || max_len == buf.len() {
+                    // What it was offered was the largest offer this loop can
+                    // make — the whole of what the transfer has left, or the
+                    // whole of the buffer the fill is handed.  Asking again
+                    // offers no more, so the answer would be the same one for
+                    // ever.
                     self.stall(t, Status::BufferTooSmall);
                     return;
                 }

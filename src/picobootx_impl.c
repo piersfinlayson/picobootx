@@ -584,10 +584,15 @@ pb_status_t picoboot_default_get_info(
         return st;
     }
 
+    // Whole words only.  The library offers a whole number of them, so this
+    // matters to a caller reaching the default directly.  A length that is not
+    // a whole number of words has the remainder left alone rather than filled
+    // with part of a word.
     *bytes_written = 0u;
     if (at_word < filled) {
         uint32_t left = (filled - at_word) * (uint32_t)sizeof(uint32_t);
-        *bytes_written = left < max_len ? left : max_len;
+        uint32_t room = max_len & ~(uint32_t)(sizeof(uint32_t) - 1u);
+        *bytes_written = left < room ? left : room;
         memcpy(buf, &scratch[at_word], *bytes_written);
     }
     return PB_STATUS_OK;

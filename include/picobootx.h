@@ -277,6 +277,11 @@ typedef struct {
     // count that is not a whole number of words, halts the command with
     // PB_STATUS_UNKNOWN_ERROR and none of those bytes reaches the host.
     //
+    // A decline has to be one a later call can satisfy.  The largest buffer
+    // this ever hands over is 64 bytes, so a fill declining that much is asking
+    // for room that does not exist, and the command is stalled with
+    // PB_STATUS_BUFFER_TOO_SMALL rather than called again.
+    //
     // The library halts the command on a non-PB_STATUS_OK return from either,
     // with that status, and the host reads it back with GET_COMMAND_STATUS.
     pb_status_t (*get_info_prepare)(
@@ -409,6 +414,11 @@ typedef struct {
     // call of a transfer offers exactly the bytes still owed to the host.
     // Reporting more than max_len stalls the command with
     // PB_STATUS_UNKNOWN_ERROR, and none of those bytes reaches the host.
+    //
+    // A decline has to be one a later call can satisfy.  The largest buffer
+    // this ever hands over is 64 bytes, so a fill declining that much is asking
+    // for room that does not exist, and the command is stalled with
+    // PB_STATUS_BUFFER_TOO_SMALL rather than called again.
     //
     // The callee tracks its own position between calls, in its own ctx — the
     // library keeps no per-transfer cursor on its behalf.

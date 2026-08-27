@@ -178,7 +178,6 @@ struct pb_state_block {
     uint8_t                     *flash_write_buf; // 4 bytes; NULL = WRITE disabled
     void                        *ctx;             // 4 bytes
 
-
     // State machine
     pb_state_t                   state;           // 4 bytes (enum)
 

@@ -250,9 +250,14 @@ static uint32_t       s_custom_produced;
 static uint32_t       s_custom_fill_calls;
 static picoboot_cmd_t s_custom_last_cmd;
 
+static uint32_t s_big_item_size;
+
+void pbt_custom_set_big_item(uint32_t size) { s_big_item_size = size; }
+
 void pbt_custom_reset(void) {
     s_custom_produced   = 0;
     s_custom_fill_calls = 0;
+    s_big_item_size     = PBT_CUSTOM_BIG_ITEM_SIZE;
     memset(&s_custom_last_cmd, 0, sizeof(s_custom_last_cmd));
 }
 
@@ -282,6 +287,7 @@ static pb_status_t custom_dispatch(const picoboot_cmd_t *cmd, uint8_t *buf,
         case PBT_CUSTOM_CMD_STALL:
         case PBT_CUSTOM_CMD_ITEMS:
         case PBT_CUSTOM_CMD_OVER:
+        case PBT_CUSTOM_CMD_BIG_ITEM:
             return PB_STATUS_OK;
         case PBT_CUSTOM_CMD_REFUSE:
             return PBT_CUSTOM_REFUSE_STATUS;
@@ -339,6 +345,23 @@ static pb_status_t custom_fill(const picoboot_cmd_t *cmd, uint8_t *buf,
             }
             s_custom_produced += chunk;
             *bytes_written = chunk + PBT_CUSTOM_OVERSTATE_BY;
+            return PB_STATUS_OK;
+        }
+
+        case PBT_CUSTOM_CMD_BIG_ITEM: {
+            // One indivisible item, of a size a scenario chooses.  Larger than
+            // the buffer the library fills, no call can ever hold it and the
+            // contract's "call me again" is a request for room that is never
+            // coming.
+            if (max_len < s_big_item_size) {
+                return PB_STATUS_OK;
+            }
+            for (uint32_t i = 0; i < s_big_item_size; i++) {
+                buf[i] = (uint8_t)(s_custom_produced + i);
+            }
+            s_custom_produced += s_big_item_size;
+            *bytes_written = s_big_item_size;
+            *done = (s_custom_produced >= cmd->transfer_len);
             return PB_STATUS_OK;
         }
 

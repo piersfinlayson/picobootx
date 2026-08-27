@@ -302,6 +302,11 @@ pub trait Ops {
     /// bytes still owed.  Returning `Ok(0)` says there was not room for the next
     /// piece and asks to be called again with more.
     ///
+    /// A decline has to be one a later call can satisfy.  The largest `buf`
+    /// this ever hands over is 64 bytes, so declining that much is asking for
+    /// room that does not exist, and the command is halted with
+    /// [`Status::BufferTooSmall`] rather than called again.
+    ///
     /// The shape of what is written belongs to the type, not to the library —
     /// see [`Info`].
     ///
@@ -373,6 +378,11 @@ pub trait Custom {
     /// call of a transfer offers exactly the bytes still owed to the host.
     /// Reporting more bytes than `buf` holds halts the command with
     /// [`Status::UnknownError`], and none of them reaches the host.
+    ///
+    /// A decline has to be one a later call can satisfy.  The largest `buf`
+    /// this ever hands over is 64 bytes, so declining that much is asking for
+    /// room that does not exist, and the command is halted with
+    /// [`Status::BufferTooSmall`] rather than called again.
     ///
     /// Defaulted, so a device with no data-carrying commands need not write it.
     /// Returning data from `dispatch` without writing this is the same

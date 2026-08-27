@@ -777,6 +777,75 @@ static void scenario_the_get_info_defaults_refuse_an_undefined_type(void) {
     PBT_CHECK_EQ(pbt_count("rom_get_partition_table_info"), 1);
 }
 
+// picobootx.h has get_info write "always a whole number of words", and the room
+// the library offers is always one, so through a command a part word never
+// arises.  These are published functions all the same, and an integrator
+// serving a type of its own calls them for the rest with whatever length it
+// has.  Both implementations have to make the same thing of that length.
+static void scenario_the_get_info_default_writes_whole_words(void) {
+    pbt_begin();
+    pbt_start();
+
+    uint32_t words = 0u;
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info_prepare(PB_INFO_SYS, PBT_SYS_CHIP_INFO,
+                                          &words, NULL),
+        PB_STATUS_OK);
+    // The flags word and CHIP_INFO's three.
+    PBT_REQUIRE(words == 4u);
+
+    // A length holding two whole words and part of a third.  Sentinels past
+    // them, so a default that wrote into the part word is visible.
+    uint32_t written = 0xA5A5A5A5u;
+    uint8_t  buf[16];
+    memset(buf, 0xEEu, sizeof(buf));
+
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf, 11u,
+                                  &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, 8u);
+
+    uint32_t first  = 0u;
+    uint32_t second = 0u;
+    memcpy(&first, buf, sizeof(first));
+    memcpy(&second, buf + 4, sizeof(second));
+    PBT_CHECK_EQ(first, PBT_SYS_CHIP_INFO);
+    PBT_CHECK_EQ(second, pbt_sys_info_word(PBT_SYS_CHIP_INFO) + 0u);
+
+    for (unsigned b = 8; b < sizeof(buf); b++) {
+        if (buf[b] != 0xEEu) {
+            pbt_fail(__FILE__, __LINE__, "byte %u past the last whole word is "
+                     "0x%02x", b, buf[b]);
+            break;
+        }
+    }
+
+    // Eight bytes take the same answer, so what the three spare bytes changed
+    // was nothing — which is what says they were rounded away rather than
+    // filled.
+    written = 0u;
+    memset(buf, 0xEEu, sizeof(buf));
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf, 8u,
+                                  &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, 8u);
+    memcpy(&second, buf + 4, sizeof(second));
+    PBT_CHECK_EQ(second, pbt_sys_info_word(PBT_SYS_CHIP_INFO) + 0u);
+
+    // And a length shorter than one word is no words at all rather than a part
+    // of one.
+    written = 0xA5A5A5A5u;
+    memset(buf, 0xEEu, sizeof(buf));
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf, 3u,
+                                  &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, 0u);
+    PBT_CHECK_EQ(buf[0], 0xEEu);
+}
+
 // ---------------------------------------------------------------------------
 // Ranges that wrap the address space
 // ---------------------------------------------------------------------------
@@ -881,6 +950,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_a_refusal_partway_through_an_answer_is_reported },
     { "the GET_INFO defaults refuse an info type outside the four defined",
       scenario_the_get_info_defaults_refuse_an_undefined_type },
+    { "the GET_INFO default writes whole words whatever room it is given",
+      scenario_the_get_info_default_writes_whole_words },
     { "a read range that wraps the address space is refused",
       scenario_a_read_range_that_wraps_is_refused },
     { "a write range that wraps the address space is refused",

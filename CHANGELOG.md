@@ -30,6 +30,9 @@ table's `GET_INFO` entry with a pair, which is not backwards compatible.
   `picoboot_default_get_info_sys`.  They answer the UF2 target partition as
   nowhere and refuse the download status.
 - A device-to-host transfer no longer sends more bytes than the host asked for.
+- A data-in callback that declines the largest buffer the library hands over
+  halts the command with `PB_STATUS_BUFFER_TOO_SMALL`, where the transfer
+  previously went unfinished.
 - `GET_INFO` is refused with `PB_STATUS_BUFFER_TOO_SMALL` where
   `dTransferLength` cannot hold the whole answer.
 - An information type the library does not serve is refused with

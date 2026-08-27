@@ -1175,6 +1175,48 @@ static pb_status_t op_get_info_refusing(pb_info_type_t type, uint32_t param0,
     return REFUSE_FILL_STATUS;
 }
 
+// "*bytes_written == 0 ... not enough room for the next piece, call again later
+// with more."  For GET_INFO there is no later.  The room offered is never more
+// than the answer has left to give and never less than one word, so a callback
+// that declines it is asking for room the library will never offer.  This pair
+// reports four words and produces two, so the two it still owes are asked for
+// and declined.
+#define UNDER_DELIVER_WORDS   12u
+#define UNDER_DELIVER_PRODUCE 2u
+
+static pb_status_t op_prepare_four_words(pb_info_type_t type, uint32_t param0,
+                                         uint32_t *words, void *ctx) {
+    (void)ctx;
+    *words = UNDER_DELIVER_WORDS;
+    pbt_log("op_get_info_prepare", type, param0, *words, PB_STATUS_OK);
+    return PB_STATUS_OK;
+}
+
+static pb_status_t op_get_info_under_delivering(pb_info_type_t type,
+                                                uint32_t param0,
+                                                uint32_t at_word, uint8_t *buf,
+                                                uint32_t max_len,
+                                                uint32_t *bytes_written,
+                                                void *ctx) {
+    (void)ctx;
+    pbt_log("op_get_info", type, param0, at_word, max_len);
+
+    *bytes_written = 0u;
+    if (at_word >= UNDER_DELIVER_PRODUCE) {
+        return PB_STATUS_OK;
+    }
+    uint32_t words = UNDER_DELIVER_PRODUCE - at_word;
+    if (words * 4u > max_len) {
+        words = max_len / 4u;
+    }
+    for (uint32_t i = 0; i < words; i++) {
+        uint32_t value = 0x54000000u | (at_word + i);
+        memcpy(buf + (i * 4u), &value, sizeof(value));
+    }
+    *bytes_written = words * 4u;
+    return PB_STATUS_OK;
+}
+
 static void scenario_get_info_prepare_reporting_too_many_words_is_refused(void) {
     pbt_begin();
     pbt_ops.get_info_prepare = op_prepare_too_many_words;
@@ -1266,6 +1308,53 @@ static void scenario_a_get_info_that_fills_the_wrong_amount_is_refused(void) {
     PBT_CHECK_EQ(pbt_payload_len(), 20u);
     PBT_CHECK_EQ(payload_word(0), 4u);
     PBT_CHECK_EQ(payload_word(1), PBT_SYS_CHIP_INFO);
+}
+
+static void scenario_a_get_info_that_declines_its_room_is_refused(void) {
+    pbt_begin();
+    pbt_ops.get_info_prepare = op_prepare_four_words;
+    pbt_ops.get_info         = op_get_info_under_delivering;
+    pbt_start();
+
+    // A transfer with padding after the answer, so what is left of it never
+    // becomes the smaller of the two and every call carries a whole buffer.
+    // That is the most this transfer will ever offer, and a callback declining
+    // it is asking for room that is never coming — unlike the device in the
+    // transport suite, which declines a part-drained endpoint and is rightly
+    // asked again.
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                 PICOBOOT_GET_INFO_MAX_LEN);
+    pbt_args_get_info(&cmd, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_BUFFER_TOO_SMALL);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_STALLED);
+
+    // Three calls: one that produced two words, one that declined a
+    // part-drained endpoint and was rightly asked again, and one that declined
+    // a whole buffer and was refused.  A library that took every decline at its
+    // word would still be counting.
+    PBT_CHECK_EQ(pbt_count("op_get_info"), 3);
+
+    // What had already gone is on the wire, and the halt is what tells the host
+    // the rest is not coming.  The transfer the host asked for did not arrive,
+    // which is the difference between this and a transfer that ended.
+    PBT_CHECK(pbt_payload_len() < PICOBOOT_GET_INFO_MAX_LEN);
+    PBT_CHECK(pbt_ep_stalled(PBT_EP_IN));
+
+    // The same prepare, against a callback that produces every word it
+    // promised, is served — so what was refused was the decline and not the
+    // count the prepare reported.
+    pbt_begin();
+    pbt_ops.get_info_prepare = op_prepare_four_words;
+    pbt_ops.get_info         = op_get_info_counting;
+    pbt_start();
+    picoboot_cmd_t again = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                   PICOBOOT_GET_INFO_MAX_LEN);
+    pbt_args_get_info(&again, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&again), PB_STATUS_OK);
+    PBT_CHECK_EQ(payload_word(0), UNDER_DELIVER_WORDS);
+    PBT_CHECK_EQ(payload_word(UNDER_DELIVER_WORDS),
+                 0x53000000u | (UNDER_DELIVER_WORDS - 1u));
 }
 
 static void scenario_a_get_info_callback_that_refuses_carries_its_status(void) {
@@ -2216,6 +2305,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_get_info_prepare_reporting_too_many_words_is_refused },
     { "a GET_INFO callback that fills the wrong amount is refused",
       scenario_a_get_info_that_fills_the_wrong_amount_is_refused },
+    { "a GET_INFO callback that declines the room it is offered is refused",
+      scenario_a_get_info_that_declines_its_room_is_refused },
     { "a GET_INFO callback that refuses carries its status",
       scenario_a_get_info_callback_that_refuses_carries_its_status },
     { "GET_INFO PARTITION sends a word count, the flags word, then the data",

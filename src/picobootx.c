@@ -991,11 +991,12 @@ static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
 
         if (bytes_written == 0u) {
             // Fill couldn't produce data this call (insufficient space for next item)
-            if (transfer_capped) {
-                // And the room on offer was the whole of what the transfer has
-                // left, so it cannot grow.  The host asked for a length its
-                // answer does not fit in.
-                LOG("Data-in fill declined the last %u bytes of the transfer",
+            if (transfer_capped || max_len == sizeof(buf)) {
+                // And what it was offered was the largest offer this loop can
+                // make — the whole of what the transfer has left, or the whole
+                // of the buffer the fill is handed.  Asking again offers no
+                // more, so the answer would be the same one for ever.
+                LOG("Data-in fill declined %u bytes, the largest offer there is",
                     max_len);
                 pb_stall(s, PB_STATUS_BUFFER_TOO_SMALL);
                 return;

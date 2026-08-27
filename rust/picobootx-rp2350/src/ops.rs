@@ -98,9 +98,10 @@ impl Ops for Rp2350 {
         defaults::otp_write(row, ecc, buf)
     }
 
-    // The two information types a ROM routine answers reach it as they stand.
-    // The two UF2 types are left to the trait's defaults, which refuse: both
-    // describe a mass storage download, and this crate has no drive.
+    // Every type is answered here rather than left to the trait's defaults.
+    // The two a ROM routine answers reach it as they stand.  The UF2 target is
+    // answered as nowhere and the UF2 download status is refused, both because
+    // they describe a mass storage download and this crate has no drive.
     fn get_info_prepare(&mut self, info: Info, param0: u32) -> Result<u32> {
         defaults::get_info_prepare(info, param0)
     }

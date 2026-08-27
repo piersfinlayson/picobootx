@@ -626,6 +626,9 @@ pub fn get_info_prepare(info: Info, param0: u32) -> Result<u32> {
 /// Produce that answer, from `at_word` onwards, and say how many bytes were
 /// written.
 ///
+/// Whole words only, so a `buf` that is not a whole number of them has the
+/// remainder left alone.
+///
 /// The ROM routine fills from the start of the answer every time and takes no
 /// offset, so the whole of it is produced again and the window copied out.  That
 /// leaves this pair with no state between calls, and the ROM guards the repeat
@@ -644,14 +647,18 @@ pub fn get_info(info: Info, param0: u32, at_word: u32, buf: &mut [u8]) -> Result
         return Ok(0);
     }
     let left = &scratch[at..filled];
-    let n = core::cmp::min(left.len() * 4, buf.len());
+    // Whole words only.  The library offers a whole number of them, so this
+    // matters to a caller reaching this directly.  A length that is not a whole
+    // number of words has the remainder left alone rather than filled with part
+    // of a word.
+    let n = core::cmp::min(left.len() * 4, buf.len() & !3);
     for (dst, word) in buf[..n].chunks_mut(4).zip(left) {
         dst.copy_from_slice(&word.to_le_bytes());
     }
     Ok(n)
 }
 
-/// Write this part's identifier into `buf` as UTF-16/// Write this part's identifier into `buf` as UTF-16, for a USB string
+/// Write this part's identifier into `buf` as UTF-16, for a USB string
 /// descriptor, and say how many code units it takes.
 ///
 /// Sixteen hex digits, most significant word first, followed by a terminator.

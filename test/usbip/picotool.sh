@@ -78,6 +78,28 @@ else
     fail "picotool info -a walks the bootrom table and reports what is in it"
 fi
 
+# Everything in picotool's Device Information block comes off GET_INFO, and
+# nothing else in this run reads that command.  The modelled part answers each
+# system information flag with words carrying that flag's own number - 0x51000000
+# with the flag in the low bits, and one more for each word the flag carries - so
+# what picotool prints says where in the reply it found each of them.  A reply
+# whose leading count is out by one, or which leaves out the flags word
+# get_sys_info puts in front of its data, shifts every value here by a word, and
+# picotool reads all of them from the wrong place.
+#
+# Four flags, spanning the answer: the first, one in the middle, one carrying
+# four words, and the last.  A shift anywhere between them moves at least one.
+if grep -q "chipid: *0x5100000351000002" "$work/info_all.txt" &&
+    grep -q "flash devinfo: *0x51000008" "$work/info_all.txt" &&
+    grep -q "boot_random: *51000010:51000011:51000012:51000013" \
+        "$work/info_all.txt" &&
+    grep -q "last boot diagnostics: *0x51000041" "$work/info_all.txt"; then
+    ok "picotool reads each GET_INFO flag's words from where the reply put them"
+else
+    cat "$work/info_all.txt"
+    fail "picotool reads each GET_INFO flag's words from where the reply put them"
+fi
+
 # ---------------------------------------------------------------------------
 # Flash
 # ---------------------------------------------------------------------------

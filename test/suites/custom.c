@@ -195,6 +195,41 @@ static void scenario_fill_with_no_room_for_the_rest_is_refused(void) {
     PBT_CHECK_EQ(pbt_payload_len(), 2u * PBT_CUSTOM_ITEM_SIZE);
 }
 
+static void scenario_fill_whose_item_never_fits_a_call_is_refused(void) {
+    pbt_begin();
+    pbt_use_custom = true;
+    pbt_start();
+
+    // An item larger than the buffer the library fills, in a transfer long
+    // enough that what is left of it never becomes the smaller of the two.  So
+    // every call offers a full buffer, every call is declined, and the room the
+    // callback is waiting for is room the library has no way to offer.  The
+    // sibling scenario above catches this where the transfer runs the room
+    // down.  Nothing runs it down here, which is why that one passes over this.
+    const uint32_t length = 2u * PBT_CUSTOM_BIG_ITEM_SIZE;
+
+    picoboot_cmd_t cmd = pbt_custom_cmd(PBT_CUSTOM_CMD_BIG_ITEM, 0x00u, length);
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_BUFFER_TOO_SMALL);
+
+    PBT_CHECK_EQ(pbt_packet_count(), 0u);
+    PBT_CHECK(pbt_ep_stalled(PBT_EP_IN));
+
+    // Refused on the call that declined, rather than asked over and over.
+    PBT_CHECK_EQ(pbt_custom_fill_calls(), 1u);
+
+    // The same command with an item the buffer does hold is served, at the same
+    // transfer length — so what was refused was the size of the item and not
+    // the length or the command.
+    pbt_begin();
+    pbt_use_custom = true;
+    pbt_custom_set_big_item(PBT_CUSTOM_BIG_ITEM_FITS);
+    pbt_start();
+    picoboot_cmd_t fits = pbt_custom_cmd(PBT_CUSTOM_CMD_BIG_ITEM, 0x00u,
+                                         2u * PBT_CUSTOM_BIG_ITEM_FITS);
+    PBT_CHECK_STATUS(pbt_run_cmd(&fits), PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_payload_len(), 2u * PBT_CUSTOM_BIG_ITEM_FITS);
+}
+
 static void scenario_fill_that_overstates_its_write_is_refused(void) {
     // A fill is handed a buffer and the room in it, and answers with how much
     // it wrote.  Only the callee knows what it really wrote, so the reported
@@ -411,6 +446,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_fill_may_decline_a_call },
     { "a fill with no room left for its next item is refused",
       scenario_fill_with_no_room_for_the_rest_is_refused },
+    { "a fill whose next item never fits a call is refused",
+      scenario_fill_whose_item_never_fits_a_call_is_refused },
     { "a fill that reports writing more than its room is refused",
       scenario_fill_that_overstates_its_write_is_refused },
     { "a refusal from fill reaches the host as the integrator's status",

@@ -38,6 +38,9 @@ pair, which is not backwards compatible.
 - `Info` names the four information types the protocol defines.
 - `wire::GET_INFO_MAX_LEN` and `wire::INFO_MAX_ANSWER_WORDS` say how long a
   `GET_INFO` transfer and its answer may be.  `wire::INFO_MAX_WORDS` is gone.
+- A data-in callback that declines the largest `buf` the library hands over
+  halts the command with `Status::BufferTooSmall`, where the transfer
+  previously went unfinished.
 
 ### 0.1.0 - 2026-08-26
 

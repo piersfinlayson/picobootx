@@ -272,7 +272,9 @@ pb_status_t picoboot_default_get_info_prepare(
     void           *ctx
 );
 
-// Produces that answer, from at_word onwards.  Keeps no state between calls:
+// Produces that answer, from at_word onwards, in whole words — a max_len that
+// is not a whole number of them has the remainder left alone.  Keeps no state
+// between calls:
 // the ROM routine takes no offset, so the whole answer is produced again and
 // the window copied out.
 pb_status_t picoboot_default_get_info(

@@ -24,6 +24,14 @@ shipped hardware.
 - Hold the existing bar for comments and API documentation.  A comment states
   the contract, and must not date — no "currently", no "yet", no reference to
   work that has not landed.
+- **No new stack allocation over 32 bytes, and no new static RAM, without my
+  sign-off.**  picobootx runs in whatever stack its integrator has, which on a
+  One ROM plugin is about a kilobyte, and it holds no memory of its own beyond
+  the state block the integrator allocates.  A change needing more than that is
+  changing what picobootx costs to host, which is my call before it is written.
+  Say the size, where it lives, and what else is live at the same time — the
+  pump's own buffer is live while a data-in callback runs, so a buffer inside
+  one of those adds to it rather than replacing it.
 - **Run `ci/local-checks.sh` before saying a change is ready.**  It is every
   gate CI applies, in CI's order, stopping at the first failure.  A list of
   checks assembled by hand each time drifts from what CI gates on, and what

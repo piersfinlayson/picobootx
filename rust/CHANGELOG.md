@@ -16,7 +16,7 @@ that do not unify.  A `picobootx` release therefore moves both of them too.
 
 ## picobootx
 
-### Unreleased
+### 0.2.0 - 2026-08-28
 
 `GET_INFO` answers did not match the RP2350 datasheet, so a host reading them as
 specified read them wrong.  Fixing it replaced `Ops`'s `GET_INFO` methods with a
@@ -49,7 +49,7 @@ stack or an executor.
 
 ## picobootx-rp2350
 
-### Unreleased
+### 0.2.0 - 2026-08-28
 
 - `get_info_prepare` and `get_info` replace `get_info_sys`.  They answer system
   and partition table information by passing the ROM's routines through.
@@ -62,7 +62,7 @@ stack or an executor.
 
 ## picobootx-embassy
 
-### Unreleased
+### 0.2.0 - 2026-08-28
 
 - Tracks `picobootx`'s `GET_INFO` operations change.  A device handing
   `PicobootClass::new` an `Ops` of its own writes the new pair.

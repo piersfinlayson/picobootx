@@ -12,7 +12,7 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
-## Unreleased
+## 0.3.0 - 2026-08-28
 
 picobootx's `GET_INFO` answers did not match the RP2350 datasheet, so a host
 reading them as specified read them wrong.  Fixing it replaced the operations

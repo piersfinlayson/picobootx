@@ -210,8 +210,11 @@ static void scenario_get_info_declines_room_for_less_than_a_word(void) {
     pbt_wire_tx_fifo(10u);
     pbt_start();
 
+    const uint32_t param0 = PBT_PART_PT_INFO | PBT_PART_LOC_FLAGS |
+                            PBT_PART_ID;
+
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&cmd, PB_INFO_PARTITION, PBT_PART_SERVED);
+    pbt_args_get_info(&cmd, PB_INFO_PARTITION, param0);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
 
@@ -219,8 +222,8 @@ static void scenario_get_info_declines_room_for_less_than_a_word(void) {
     // rather than in the middle of a word.
     PBT_REQUIRE(pbt_payload_len() == 20u);
     const uint32_t expected[] = {
-        4u, PBT_PART_SERVED, 0u,
-        PBT_PT_UNPARTITIONED_LOCATION, PBT_PT_UNPARTITIONED_FLAGS,
+        4u, param0, PBT_DEFAULT_PT_TABLE,
+        PBT_DEFAULT_PT_LOCATION, PBT_DEFAULT_PT_FLAGS,
     };
     for (uint32_t i = 0; i < 5u; i++) {
         PBT_CHECK_EQ(payload_word(i), expected[i]);
@@ -236,77 +239,10 @@ static void scenario_get_info_declines_room_for_less_than_a_word(void) {
     pbt_begin();
     pbt_start();
     picoboot_cmd_t roomy = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&roomy, PB_INFO_PARTITION, PBT_PART_SERVED);
+    pbt_args_get_info(&roomy, PB_INFO_PARTITION, param0);
     PBT_CHECK_STATUS(pbt_run_cmd(&roomy), PB_STATUS_OK);
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
     PBT_CHECK_EQ(pbt_payload_len(), 20u);
-}
-
-static void scenario_get_info_is_asked_again_for_what_would_not_fit(void) {
-    pbt_begin();
-    // Eight bytes of FIFO against a twenty-four byte answer, so the transfer
-    // cannot be produced in one call however the callback behaves.
-    //
-    // picobootx.h: "get_info produces the answer, from at_word onwards, over as
-    // many calls as it takes.  type and param0 are handed back every time".  So
-    // the second call carries the same type and param0 as the first and an
-    // at_word that has moved on by what the first call produced.
-    pbt_wire_tx_fifo(8u);
-    pbt_start();
-
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
-                                 8u + (FLAG_BOOT_INFO_WORDS * 4u));
-    pbt_args_get_info(&cmd, PB_INFO_SYS, FLAG_BOOT_INFO);
-
-    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
-
-    PBT_REQUIRE(pbt_payload_len() == 24u);
-    PBT_CHECK_EQ(payload_word(0), FLAG_BOOT_INFO_WORDS + 1u);
-    PBT_CHECK_EQ(payload_word(1), FLAG_BOOT_INFO);
-    for (uint32_t i = 0; i < FLAG_BOOT_INFO_WORDS; i++) {
-        PBT_CHECK_EQ(payload_word(2u + i),
-                     pbt_sys_info_word(FLAG_BOOT_INFO) + i);
-    }
-
-    // More than one call, each naming the same request and starting where the
-    // one before it stopped.  A library that restarted the answer, or that
-    // asked for a window it had already sent, shows up here.
-    const int calls = pbt_count("op_get_info");
-    PBT_CHECK(calls >= 2);
-
-    uint32_t at = 0u;
-    for (int i = 0; i < calls; i++) {
-        const pbt_event_t *call = pbt_nth("op_get_info", i);
-        if (call == NULL) {
-            pbt_fail(__FILE__, __LINE__, "no call %d", i);
-            continue;
-        }
-        if (call->a0 != PB_INFO_SYS || call->a1 != FLAG_BOOT_INFO) {
-            pbt_fail(__FILE__, __LINE__, "call %d asked for type %u param0 "
-                     "0x%08x, expected type %u param0 0x%08x", i, call->a0,
-                     call->a1, (unsigned)PB_INFO_SYS, FLAG_BOOT_INFO);
-        }
-        if (call->a2 < at) {
-            pbt_fail(__FILE__, __LINE__, "call %d resumed at word %u, behind "
-                     "the %u already produced", i, call->a2, at);
-        }
-        at = call->a2;
-    }
-
-    // The last call started past the first, so the answer really was produced
-    // in pieces rather than the same window asked for twice.
-    PBT_CHECK(at > 0u);
-
-    // With room for the whole transfer it is one packet and one call, so the
-    // pieces above are the FIFO's doing.
-    pbt_begin();
-    pbt_start();
-    picoboot_cmd_t roomy = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
-                                   8u + (FLAG_BOOT_INFO_WORDS * 4u));
-    pbt_args_get_info(&roomy, PB_INFO_SYS, FLAG_BOOT_INFO);
-    PBT_CHECK_STATUS(pbt_run_cmd(&roomy), PB_STATUS_OK);
-    PBT_CHECK_EQ(pbt_packet_count(), 1u);
-    PBT_CHECK_EQ(pbt_count("op_get_info"), 1);
 }
 
 // A device whose answer is made of pieces it cannot split.  picobootx.h gives
@@ -438,8 +374,6 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_a_short_write_stalls_the_transfer },
     { "GET_INFO declines a call with room for less than a word",
       scenario_get_info_declines_room_for_less_than_a_word },
-    { "GET_INFO is asked again for what would not fit",
-      scenario_get_info_is_asked_again_for_what_would_not_fit },
     { "GET_INFO declines a call it has no room to answer",
       scenario_get_info_declines_a_call_it_has_no_room_for },
     { "OTP_READ declines a call with room for less than a row",

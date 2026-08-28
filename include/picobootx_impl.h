@@ -258,13 +258,47 @@ pb_status_t picoboot_default_otp_write(
     void *ctx
 );
 
+// The words get_sys_info answers each flag with (RP2350 datasheet 5.4.8.17).
+// NONCE is the flag that section marks unsupported, and it carries none.
+//
+// These size a bound and nothing else.  No default consults them to produce or
+// to measure an answer — picoboot_default_get_info_prepare asks the ROM about
+// one flag at a time and adds up what it reports, so a flag a part answers
+// differently, or at all, is counted from the part rather than from here.
+#define PB_SYS_CHIP_INFO_WORDS      3u
+#define PB_SYS_CRITICAL_WORDS       1u
+#define PB_SYS_CPU_INFO_WORDS       1u
+#define PB_SYS_FLASH_DEV_INFO_WORDS 1u
+#define PB_SYS_BOOT_RANDOM_WORDS    4u
+#define PB_SYS_NONCE_WORDS          0u
+#define PB_SYS_BOOT_INFO_WORDS      4u
+
+// The longest system information answer — the flags word, then every flag's
+// data.  A host asking for all of them gets this, and it is the room
+// picoboot_default_get_info needs in a single call.
+#define PICOBOOT_SYS_INFO_MAX_WORDS                                     \
+    (1u + PB_SYS_CHIP_INFO_WORDS + PB_SYS_CRITICAL_WORDS +              \
+     PB_SYS_CPU_INFO_WORDS + PB_SYS_FLASH_DEV_INFO_WORDS +              \
+     PB_SYS_BOOT_RANDOM_WORDS + PB_SYS_NONCE_WORDS +                    \
+     PB_SYS_BOOT_INFO_WORDS)
+
+#define PICOBOOT_SYS_INFO_MAX_BYTES \
+    (PICOBOOT_SYS_INFO_MAX_WORDS * (uint32_t)sizeof(uint32_t))
+
 // Reports how many words this part's answer to an information request will be,
-// by asking the ROM routine that answers it.  PB_INFO_SYS goes to get_sys_info
-// and PB_INFO_PARTITION to get_partition_table_info.  PB_INFO_UF2_TARGET is
-// answered as nowhere: picobootx presents no mass storage drive for a UF2 to be
-// dragged onto and is told of none, so it has nowhere to name.
+// without producing any of it.
+//
+// PB_INFO_SYS asks get_sys_info about one flag at a time, since the ROM reports
+// each flag's own length, and adds them up.  PB_INFO_PARTITION and
+// PB_INFO_UF2_TARGET are constants, so their lengths are arithmetic.
 // PB_INFO_UF2_STATUS is refused with PB_STATUS_INVALID_ARG, since it reports a
-// download over such a drive.  A device that presents one answers both itself.
+// download over a mass storage drive picobootx does not present.  A device that
+// presents one answers both it and the UF2 target itself.
+//
+// So get_sys_info is the only ROM routine either of these two reaches, and only
+// PB_INFO_SYS reaches it.  On a part that publishes no bootrom routine at all,
+// PB_INFO_SYS is refused with PB_STATUS_NOT_FOUND and the other two are answered
+// as usual.
 pb_status_t picoboot_default_get_info_prepare(
     pb_info_type_t  type,
     uint32_t        param0,
@@ -274,9 +308,35 @@ pb_status_t picoboot_default_get_info_prepare(
 
 // Produces that answer, from at_word onwards, in whole words — a max_len that
 // is not a whole number of them has the remainder left alone.  Keeps no state
-// between calls:
-// the ROM routine takes no offset, so the whole answer is produced again and
-// the window copied out.
+// between calls.  Neither ROM routine takes an offset, so what it produces is
+// produced again.
+//
+// PB_INFO_SYS is written straight into buf, which the library guarantees is word
+// aligned.  It is written whole, in one call.  The ROM routine produces the
+// answer from its start and takes no offset, so this default cannot hand out a
+// piece of one and has nothing to keep the rest in.  A max_len too short for the
+// whole answer is declined — nothing is written and zero reported.
+//
+// So the transmit FIFO has to hold a whole answer, PICOBOOT_SYS_INFO_MAX_BYTES
+// of it, since the room the library offers is bounded by that FIFO.  A build
+// whose CFG_TUD_PICOBOOT_TX_BUFSIZE is smaller is refused by a _Static_assert in
+// picobootx_impl.c rather than left to hang on the wire.
+//
+// An integrator who cannot give it that much writes get_info themselves and
+// serves the answer in pieces.  Every callback is handed the ctx passed to
+// picoboot_init, so a get_info of one's own produces the answer once, keeps it
+// there, and hands out the window at_word names.  These defaults cannot — they
+// are free functions with no context of their own.
+//
+// PB_INFO_PARTITION says no partitions, no partition table loaded, and all of
+// flash unpartitioned and readable and writable by everyone.  It reads no
+// partition table, and a device that has one answers the type itself.
+//
+// PB_INFO_UF2_TARGET is three words — a target of -1, then the two
+// PB_INFO_PARTITION gives for the unpartitioned space, so the same region reads
+// the same way whichever question a host asks.  All three go however little the
+// last two have to say, since picotool checks the reply is three words before it
+// reads the first.
 pb_status_t picoboot_default_get_info(
     pb_info_type_t  type,
     uint32_t        param0,

@@ -207,6 +207,7 @@ picoboot_ops_t        pbt_ops;
 picoboot_custom_ops_t pbt_custom_ops;
 bool                  pbt_use_custom;
 bool                  pbt_use_flash_buf;
+void                 *pbt_ctx;
 
 // The library's state block is allocated where the entry points are called
 // from — pbt_flow.c for the core suite, usb/usbt_app.c for the other two — and

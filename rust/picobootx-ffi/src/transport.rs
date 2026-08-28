@@ -37,6 +37,10 @@ impl VendorTransport {
 }
 
 impl Transport for VendorTransport {
+    // CFG_TUD_PICOBOOT_TX_BUFSIZE, the size the C driver gives the transmit FIFO.
+    // The C library asserts its own defaults against the same number.
+    const TX_CAPACITY: usize = 64;
+
     fn rx_available(&self) -> u32 {
         unsafe { picoboot_vendor_available() }
     }

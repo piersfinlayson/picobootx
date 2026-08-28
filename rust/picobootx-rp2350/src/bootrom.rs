@@ -34,7 +34,7 @@ const ERROR_INSUFFICIENT_RESOURCES: c_int = -9;
 const ERROR_INVALID_ADDRESS: c_int = -10;
 const ERROR_BAD_ALIGNMENT: c_int = -11;
 const ERROR_INVALID_STATE: c_int = -12;
-const ERROR_BUFFER_TOO_SMALL: c_int = -13;
+pub(crate) const ERROR_BUFFER_TOO_SMALL: c_int = -13;
 const ERROR_PRECONDITION_NOT_MET: c_int = -14;
 const ERROR_MODIFIED_DATA: c_int = -15;
 const ERROR_INVALID_DATA: c_int = -16;
@@ -56,10 +56,6 @@ pub type RebootFn = unsafe extern "C" fn(flags: u32, delay_ms: u32, p0: u32, p1:
 
 /// Answer one or more system information flags into a word buffer.
 pub type GetSysInfoFn = unsafe extern "C" fn(out: *mut u32, out_words: u32, flags: u32) -> c_int;
-
-/// Answer one or more partition table flags into a word buffer.
-pub type GetPartitionTableInfoFn =
-    unsafe extern "C" fn(out: *mut u32, out_words: u32, flags_and_partition: u32) -> c_int;
 
 /// Read or write whole OTP rows.
 pub type OtpAccessFn =
@@ -155,11 +151,6 @@ routine!(
 routine!(
     /// The routine that answers system information, if it publishes one.
     get_sys_info, GetSysInfoFn, b'G', b'S'
-);
-routine!(
-    /// The routine that answers partition table information, if it publishes
-    /// one.
-    get_partition_table_info, GetPartitionTableInfoFn, b'G', b'P'
 );
 routine!(
     /// The routine that reads and writes OTP, if it publishes one.

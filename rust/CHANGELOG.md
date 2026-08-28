@@ -16,6 +16,21 @@ that do not unify.  A `picobootx` release therefore moves both of them too.
 
 ## picobootx
 
+### Unreleased
+
+`Transport` gains a required associated const, so every implementor has to
+declare its transmit buffer's size.  That is not backwards compatible.
+
+- `Transport::TX_CAPACITY` is how many bytes the transmit FIFO holds.  It has
+  no default, so an implementor cannot skip it.
+- `Ops::MIN_TX_CAPACITY` is the room an `Ops` needs offered in a single call,
+  defaulting to none.
+- `Picoboot::poll` fails the build where the transport cannot hold what the
+  operations answer whole, rather than leaving the transfer to make no
+  progress.
+- The buffer a data-in fill is handed is word aligned.
+- `Ops::get_info` documents serving an answer in pieces from `&mut self`.
+
 ### 0.2.0 - 2026-08-28
 
 `GET_INFO` answers did not match the RP2350 datasheet, so a host reading them as
@@ -49,6 +64,28 @@ stack or an executor.
 
 ## picobootx-rp2350
 
+### Unreleased
+
+`Info::Partition` and `Info::Uf2Target` no longer read the partition table, and
+system information is answered whole, so a device that has a partition table or
+a small transmit FIFO serves those types itself.
+
+- `get_info_prepare` and `get_info` use 32 bytes of stack at most, where they
+  each used 252.
+- `Info::Partition` is answered with a constant — the flags asked for echoed
+  back, no partitions, no partition table loaded, and all of flash
+  unpartitioned and readable and writable by everyone.  A device with a real
+  partition table must serve the type itself.
+- `SYS_INFO_MAX_BYTES` is the longest system information answer, which
+  `get_info` produces in one call.  A device whose transmit FIFO holds less
+  must serve `Info::Sys` itself.
+- `Rp2350` declares `Ops::MIN_TX_CAPACITY`, so a transport too small for that
+  answer fails the build.
+- `Info::Uf2Target` takes the two words behind its target from the same constant
+  `Info::Partition` uses, so the unpartitioned space reads the same way
+  whichever question a host asks.  It reads no partition table, and both types
+  are answered on a part that publishes no bootrom routine.
+
 ### 0.2.0 - 2026-08-28
 
 - `get_info_prepare` and `get_info` replace `get_info_sys`.  They answer system
@@ -61,6 +98,11 @@ stack or an executor.
 ### 0.1.0 - 2026-08-26
 
 ## picobootx-embassy
+
+### Unreleased
+
+- `Xport` declares `Transport::TX_CAPACITY`, which its transmit queue's 64
+  bytes answer.
 
 ### 0.2.0 - 2026-08-28
 

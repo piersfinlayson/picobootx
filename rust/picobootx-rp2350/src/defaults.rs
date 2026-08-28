@@ -4,9 +4,7 @@
 
 //! What an RP2350 does when a host asks it something.
 
-use picobootx::wire::{
-    FLASH_BLOCK_SIZE, FLASH_PAGE_SIZE, FLASH_SECTOR_SIZE, INFO_MAX_ANSWER_WORDS,
-};
+use picobootx::wire::{FLASH_BLOCK_SIZE, FLASH_PAGE_SIZE, FLASH_SECTOR_SIZE};
 use picobootx::{Ecc, Exclusive, Info, Reboot, Result, Status, Target};
 
 use crate::bootrom::{
@@ -541,10 +539,197 @@ pub fn otp_write(row: u16, ecc: Ecc, buf: &[u8]) -> Result {
 const PT_INFO_FLAG: u32 = 0x0001;
 const PT_INFO_WORDS: usize = 4;
 
+/// The rest of the partition table flags.  The first four ask for a field of a
+/// partition rather than of the table.  `SINGLE` narrows those four to the one
+/// partition named in the top byte of `flags_and_partition`.
+const PT_LOCATION_AND_FLAGS: u32 = 0x0010;
+const PT_ID: u32 = 0x0020;
+const PT_FAMILY_IDS: u32 = 0x0040;
+const PT_NAME: u32 = 0x0080;
+const PT_SINGLE: u32 = 0x8000;
+
+/// The flags this crate answers.  A flag outside the set is dropped from the
+/// answer, as `get_partition_table_info` drops one the part cannot answer.
+///
+/// `SINGLE` is answered like the rest.  The boot ROM echoes it whenever it is
+/// asked for, including on its own with nothing to answer, and narrowing to one
+/// partition is honoured by a device with none.  Masking with this also drops
+/// the partition number, which the boot ROM leaves out of the answered-flags
+/// word too.  Asked about partition 3 with `0x0300_8030` it answers `0x8030`.
+const PT_ANSWERED_FLAGS: u32 =
+    PT_INFO_FLAG | PT_LOCATION_AND_FLAGS | PT_ID | PT_FAMILY_IDS | PT_NAME | PT_SINGLE;
+
+/// Where the unpartitioned space of an RP2350 with no partition table is, and
+/// who may touch it.
+///
+/// First sector 0 and last sector 8191, which is every bit of the 13-bit field
+/// and the largest range it can express, with all six permissions set — secure,
+/// non-secure and NS boot may each read and write.  All of flash, unpartitioned,
+/// open to everyone, which is what having no partition table means and is the
+/// same on every RP2350.
+const UNPARTITIONED_LOCATION: u32 = 0xffff_e000;
+
+/// Which UF2 families that unpartitioned space accepts.
+///
+/// The same six permissions, and every family bit clear.  A family bit says a
+/// UF2 of that family would be accepted, and a UF2 reaches a device by being
+/// dragged onto a mass storage drive.  The bootrom sets four of them because
+/// BOOTSEL mode presents such a drive.  A device running picobootx is running
+/// its application and presents none, so it accepts no family, and the RP2040
+/// family was never this part's.
+const UNPARTITIONED_FLAGS: u32 = 0xfc00_0000;
+
 /// Word 0 of a UF2 target answer, saying the family goes nowhere.
 const UF2_TARGET_NONE: u32 = 0xffff_ffff;
 
-/// Where a UF2 of some family would be downloaded to.
+/// The words of an answer from `at_word` on, copied into the caller's buffer,
+/// and how many bytes that was.
+///
+/// Whole words only, so a `buf` that is not a whole number of them has the
+/// remainder left alone.
+fn copy_answer(answer: &[u32], at_word: u32, buf: &mut [u8]) -> usize {
+    let at = at_word as usize;
+    if at >= answer.len() {
+        return 0;
+    }
+    let left = &answer[at..];
+    let n = core::cmp::min(left.len() * 4, buf.len() & !3);
+    for (dst, word) in buf[..n].chunks_mut(4).zip(left) {
+        dst.copy_from_slice(&word.to_le_bytes());
+    }
+    n
+}
+
+/// The words `get_sys_info` answers each flag with.  `NONCE` is the flag the
+/// datasheet marks unsupported, and it carries none.
+///
+/// These size a bound and nothing else.  Nothing here consults them to produce
+/// or to measure an answer — [`get_info_prepare`] asks the ROM about one flag at
+/// a time and adds up what it reports, so a flag a part answers differently, or
+/// at all, is counted from the part rather than from here.
+const SYS_CHIP_INFO_WORDS: usize = 3;
+const SYS_CRITICAL_WORDS: usize = 1;
+const SYS_CPU_INFO_WORDS: usize = 1;
+const SYS_FLASH_DEV_INFO_WORDS: usize = 1;
+const SYS_BOOT_RANDOM_WORDS: usize = 4;
+const SYS_NONCE_WORDS: usize = 0;
+const SYS_BOOT_INFO_WORDS: usize = 4;
+
+/// The longest system information answer, in bytes — the flags word, then
+/// every flag's data.
+///
+/// A host asking for all of them gets this, and it is the room [`get_info`]
+/// needs in a single call — it produces a system information answer whole and
+/// declines a buffer too short for it.  A transport whose transmit FIFO holds
+/// less than this can never offer enough, so a device built on one makes no
+/// progress on the request.
+pub const SYS_INFO_MAX_BYTES: usize = (1
+    + SYS_CHIP_INFO_WORDS
+    + SYS_CRITICAL_WORDS
+    + SYS_CPU_INFO_WORDS
+    + SYS_FLASH_DEV_INFO_WORDS
+    + SYS_BOOT_RANDOM_WORDS
+    + SYS_NONCE_WORDS
+    + SYS_BOOT_INFO_WORDS)
+    * 4;
+
+/// How many words this part's system information answer will be, without
+/// producing any of it.
+///
+/// `get_sys_info` answers a single flag as the flags word followed by that
+/// flag's data, so a probe of one flag returns one more word than the flag
+/// contributes, and one word for a flag the part does not answer.  Summing the
+/// contributions over the flags asked for gives the length of the answer to all
+/// of them, with the ROM saying how long each is — so a flag a future part adds
+/// is counted here with no change to this.
+///
+/// `tmp` holds one flag's data at a time.  The widest flag the datasheet defines
+/// is four words.
+fn sys_info_words(param0: u32) -> Result<u32> {
+    let Some(f) = bootrom::get_sys_info() else {
+        return Err(Status::NotFound);
+    };
+
+    let mut tmp = [0u32; 8];
+    let mut total = 1; // the flags word, which every answer carries
+
+    for bit in 0..u32::BITS {
+        let flag = 1u32 << bit;
+        if param0 & flag == 0 {
+            continue;
+        }
+        let ret = unsafe { f(tmp.as_mut_ptr(), tmp.len() as u32, flag) };
+        if ret < 0 {
+            return Err(bootrom::status_from(ret));
+        }
+        if ret > 1 {
+            total += ret as u32 - 1;
+        }
+    }
+
+    Ok(total)
+}
+
+/// The system information answer, written where the caller asked for it, and how
+/// many bytes that was.
+///
+/// The ROM produces the whole answer or none of it, and takes no offset, so this
+/// serves it in one call from its first word and needs no buffer of its own.
+/// `buf` is word aligned, which is what the library promises a fill and what
+/// lets the ROM write through it.
+///
+/// Room too small for the whole answer is declined rather than refused.
+/// Nothing is written, and the caller offers more next time.  So the transmit FIFO has
+/// to hold [`SYS_INFO_MAX_BYTES`] — see [`crate::Rp2350`] for what a FIFO that
+/// does not means.
+fn sys_info_fill(param0: u32, at_word: u32, buf: &mut [u8]) -> Result<usize> {
+    // The answer goes in one call, so there is no later window to serve.
+    if at_word != 0 {
+        return Ok(0);
+    }
+
+    let Some(f) = bootrom::get_sys_info() else {
+        return Err(Status::NotFound);
+    };
+
+    let words = buf.len() / 4;
+    // SAFETY: the ROM writes at most that many whole words into buf, and the
+    // library hands a fill a word aligned buffer.
+    let ret = unsafe { f(buf.as_mut_ptr().cast::<u32>(), words as u32, param0) };
+    if ret == bootrom::ERROR_BUFFER_TOO_SMALL {
+        // Not room for the whole answer, and the ROM writes none of it rather
+        // than what fits.
+        return Ok(0);
+    }
+    if ret < 0 {
+        return Err(bootrom::status_from(ret));
+    }
+    Ok(ret as usize * 4)
+}
+
+/// The partition table answer, in `answer`, and how many words it is.
+///
+/// A constant.  This crate does not read a partition table, so this says the one
+/// thing true of every RP2350 without one — no partitions, no table loaded,
+/// and all of flash unpartitioned and open to everyone.  A device that does have a
+/// partition table answers [`Info::Partition`] itself rather than taking this
+/// default.
+///
+/// A per-partition field — location and flags, id, family ids, name —
+/// contributes no words, there being no partitions, and the flags word still
+/// names it as answered.
+fn partition_answer(param0: u32, answer: &mut [u32; PT_INFO_WORDS]) -> usize {
+    answer[0] = param0 & PT_ANSWERED_FLAGS;
+    if param0 & PT_INFO_FLAG == 0 {
+        return 1;
+    }
+    answer[1] = 0; // no partitions, and no partition table loaded
+    answer[2] = UNPARTITIONED_LOCATION;
+    answer[3] = UNPARTITIONED_FLAGS;
+    PT_INFO_WORDS
+}
+
+/// Where a UF2 of some family would be downloaded to, in three words.
 ///
 /// Nowhere.  A UF2 is dragged onto a mass storage drive, as it is onto the one
 /// BOOTSEL mode presents.  This crate presents none and is told of none, so
@@ -552,75 +737,44 @@ const UF2_TARGET_NONE: u32 = 0xffff_ffff;
 /// why this takes no family id.  A device that does present such a drive answers
 /// this itself rather than taking this default.
 ///
-/// The two words beside the target describe the unpartitioned space, and
-/// `get_partition_table_info` reports them.  The datasheet marks them meaningful
-/// only where the target is not -1, so an answer without them is still a whole
-/// answer, and the target alone is sent where that routine did not give them.
-fn rom_uf2_target(scratch: &mut [u32]) -> Result<usize> {
-    let Some(f) = bootrom::get_partition_table_info() else {
-        return Err(Status::NotFound);
-    };
-    let ret = unsafe { f(scratch.as_mut_ptr(), scratch.len() as u32, PT_INFO_FLAG) };
-    if ret < 0 {
-        return Err(bootrom::status_from(ret));
-    }
-
-    let filled = if ret as usize >= PT_INFO_WORDS {
-        // Drop the flags word and the partition counts, keeping the two the
-        // answer carries.
-        scratch[1] = scratch[2];
-        scratch[2] = scratch[3];
-        3
-    } else {
-        1
-    };
-    scratch[0] = UF2_TARGET_NONE;
-    Ok(filled)
-}
-
-/// The answer to one information request, in scratch the caller owns, and how
-/// many words of it were filled.
+/// The two words behind the target are the unpartitioned space, and they are the
+/// two [`Info::Partition`] reports for it.  The datasheet makes them the target
+/// partition's own location "if the partition number is not -1", and it is -1,
+/// so they describe a download that cannot happen — which leaves agreeing with
+/// what this device says about that region when asked directly as the one thing
+/// they can usefully do.  Reading them from the ROM instead made the same region
+/// come back two ways, differing in the accept-family bits this device has no
+/// drive to accept a family onto.
 ///
-/// Both routines this wraps have the same shape and the same contract as
-/// picoboot itself: they fill a word buffer, putting the subset of the flags
-/// asked for that they answered in its first word, and return how many words
-/// they wrote.  So the answer is passed straight through, and a flag this part
-/// cannot answer is dropped by the ROM rather than by anything here.
-fn rom_info(info: Info, param0: u32, scratch: &mut [u32]) -> Result<usize> {
-    let ret = match info {
-        Info::Sys => {
-            let Some(f) = bootrom::get_sys_info() else {
-                return Err(Status::NotFound);
-            };
-            unsafe { f(scratch.as_mut_ptr(), scratch.len() as u32, param0) }
-        }
-        Info::Partition => {
-            let Some(f) = bootrom::get_partition_table_info() else {
-                return Err(Status::NotFound);
-            };
-            unsafe { f(scratch.as_mut_ptr(), scratch.len() as u32, param0) }
-        }
-        Info::Uf2Target => return rom_uf2_target(scratch),
-        // Info::Uf2Status reports a download in progress over the drive BOOTSEL
-        // mode presents, and this crate has none to report on.
-        _ => return Err(Status::InvalidArg),
-    };
-    if ret < 0 {
-        return Err(bootrom::status_from(ret));
-    }
-    Ok(ret as usize)
+/// All three go, short of anything to say with the last two — picotool checks
+/// the reply is three words before it reads the first.
+const UF2_TARGET_WORDS: usize = 3;
+
+fn uf2_target_answer() -> [u32; UF2_TARGET_WORDS] {
+    [UF2_TARGET_NONE, UNPARTITIONED_LOCATION, UNPARTITIONED_FLAGS]
 }
 
 /// How many words this part's answer to an information request will be.
 ///
 /// # Errors
 ///
-/// [`Status::InvalidArg`] for a type no ROM routine answers,
-/// [`Status::NotFound`] when the part publishes no routine for one it does, and
-/// whatever [`bootrom::status_from`] makes of a refusal by that routine.
+/// [`Status::InvalidArg`] for a type this crate does not answer,
+/// [`Status::NotFound`] when the part publishes no `get_sys_info`, and whatever
+/// [`bootrom::status_from`] makes of a refusal by it.  [`Info::Partition`] and
+/// [`Info::Uf2Target`] are constants and reach no ROM routine, so neither can
+/// fail.
 pub fn get_info_prepare(info: Info, param0: u32) -> Result<u32> {
-    let mut scratch = [0u32; INFO_MAX_ANSWER_WORDS];
-    Ok(rom_info(info, param0, &mut scratch)? as u32)
+    match info {
+        Info::Sys => sys_info_words(param0),
+        Info::Partition => {
+            let mut answer = [0u32; PT_INFO_WORDS];
+            Ok(partition_answer(param0, &mut answer) as u32)
+        }
+        Info::Uf2Target => Ok(UF2_TARGET_WORDS as u32),
+        // Info::Uf2Status reports a download in progress over the drive BOOTSEL
+        // mode presents, and this crate has none to report on.
+        _ => Err(Status::InvalidArg),
+    }
 }
 
 /// Produce that answer, from `at_word` onwards, and say how many bytes were
@@ -629,33 +783,32 @@ pub fn get_info_prepare(info: Info, param0: u32) -> Result<u32> {
 /// Whole words only, so a `buf` that is not a whole number of them has the
 /// remainder left alone.
 ///
-/// The ROM routine fills from the start of the answer every time and takes no
-/// offset, so the whole of it is produced again and the window copied out.  That
-/// leaves this pair with no state between calls, and the ROM guards the repeat
-/// itself: `get_partition_table_info` hashes the partition table when it loads
-/// it and returns `INVALID_STATE` if it has changed since, and every system
-/// information flag reads a value fixed for the life of the boot.
+/// Nothing is kept between calls.  Only system information comes from the ROM,
+/// its routine takes no offset, so what it produces is produced again — and
+/// every system information flag reads a value fixed for the life of the boot.
+/// The other two types are constants, so a repeat is the same arithmetic twice.
+///
+/// The system information answer goes in a single call, and a `buf` too short
+/// for the whole of it — shorter than [`SYS_INFO_MAX_BYTES`] where every flag
+/// was asked for — is declined with `Ok(0)`, asking to be called again with
+/// more.  `buf` must be word aligned, which is what the library promises a fill.
+/// [`crate::Rp2350`] says what that asks of a transmit FIFO, and what a device
+/// that cannot meet it does instead.
 ///
 /// # Errors
 ///
 /// As [`get_info_prepare`].
 pub fn get_info(info: Info, param0: u32, at_word: u32, buf: &mut [u8]) -> Result<usize> {
-    let mut scratch = [0u32; INFO_MAX_ANSWER_WORDS];
-    let filled = rom_info(info, param0, &mut scratch)?;
-    let at = at_word as usize;
-    if at >= filled {
-        return Ok(0);
+    match info {
+        Info::Sys => sys_info_fill(param0, at_word, buf),
+        Info::Partition => {
+            let mut answer = [0u32; PT_INFO_WORDS];
+            let filled = partition_answer(param0, &mut answer);
+            Ok(copy_answer(&answer[..filled], at_word, buf))
+        }
+        Info::Uf2Target => Ok(copy_answer(&uf2_target_answer(), at_word, buf)),
+        _ => Err(Status::InvalidArg),
     }
-    let left = &scratch[at..filled];
-    // Whole words only.  The library offers a whole number of them, so this
-    // matters to a caller reaching this directly.  A length that is not a whole
-    // number of words has the remainder left alone rather than filled with part
-    // of a word.
-    let n = core::cmp::min(left.len() * 4, buf.len() & !3);
-    for (dst, word) in buf[..n].chunks_mut(4).zip(left) {
-        dst.copy_from_slice(&word.to_le_bytes());
-    }
-    Ok(n)
 }
 
 /// Write this part's identifier into `buf` as UTF-16, for a USB string

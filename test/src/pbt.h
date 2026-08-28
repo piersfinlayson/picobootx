@@ -207,6 +207,12 @@ extern bool pbt_use_custom;
 // true.  Clearing it is how the WRITE-to-flash refusal path is armed.
 extern bool pbt_use_flash_buf;
 
+// The context pointer picoboot_init is given, which picobootx.h says is "handed
+// back untouched on every call".  Defaults to NULL, which is every scenario
+// whose callbacks keep nothing.  A scenario whose callback holds its answer
+// between calls points this at where it holds it, before pbt_start.
+extern void *pbt_ctx;
+
 // Initialise the library with the above.  Call once, after any overrides.
 void pbt_start(void);
 
@@ -331,14 +337,27 @@ void pbt_sys_info_fail_after(unsigned calls, int rc);
 // The modelled get_partition_table_info  (RP2350 datasheet 5.4.8.16)
 // ---------------------------------------------------------------------------
 
-#define PBT_PART_PT_INFO   0x0001u  // 3 words, about the table as a whole
-#define PBT_PART_LOC_FLAGS 0x0010u  // 2 words per partition
-#define PBT_PART_ID        0x0020u  // 2 words per partition
-#define PBT_PART_SINGLE    0x8000u  // narrows the per-partition flags to one
+#define PBT_PART_PT_INFO    0x0001u  // 3 words, about the table as a whole
+#define PBT_PART_LOC_FLAGS  0x0010u  // 2 words per partition
+#define PBT_PART_ID         0x0020u  // 2 words per partition
+#define PBT_PART_FAMILY_IDS 0x0040u  // per partition, and none without one
+#define PBT_PART_NAME       0x0080u  // per partition, and none without one
+#define PBT_PART_SINGLE     0x8000u  // narrows the per-partition flags to one
 
-// The flags the modelled part answers.  0x0040 PARTITION_FAMILY_IDS and 0x0080
-// PARTITION_NAME are defined by 5.4.8.16 and outside this set, so they are the
-// partition side's dropped flags.
+// Every flag 5.4.8.16 defines, which is what a host asking for all of them
+// sends.
+#define PBT_PART_ALL                                                        \
+    (PBT_PART_PT_INFO | PBT_PART_LOC_FLAGS | PBT_PART_ID |                  \
+     PBT_PART_FAMILY_IDS | PBT_PART_NAME | PBT_PART_SINGLE)
+
+// Every bit of flags_and_partition 5.4.8.16 gives a meaning to: those flags,
+// and the top eight bits, which carry "the partition number" SINGLE_PARTITION
+// selects.  The complement is the bits that section leaves undefined.
+#define PBT_PART_DEFINED_BITS (PBT_PART_ALL | 0xFF000000u)
+
+// The flags the modelled part answers.  PARTITION_FAMILY_IDS and PARTITION_NAME
+// are defined by 5.4.8.16 and outside this set, so they are the partition
+// side's dropped flags.
 #define PBT_PART_SERVED \
     (PBT_PART_PT_INFO | PBT_PART_LOC_FLAGS | PBT_PART_ID | PBT_PART_SINGLE)
 
@@ -348,6 +367,64 @@ void pbt_sys_info_fail_after(unsigned calls, int rc);
 // answers with.
 #define PBT_PT_UNPARTITIONED_LOCATION 0xFFFFE000u
 #define PBT_PT_UNPARTITIONED_FLAGS    0xFC078000u
+
+// ---------------------------------------------------------------------------
+// What the RP2350 default answers for PB_INFO_PARTITION
+//
+// picobootx.h: "Served as a constant — no partitions, no partition table
+// loaded, and all of flash unpartitioned and readable and writable by everyone
+// ... picobootx does not read a partition table, and a device that has one
+// answers this type itself."  So these are the default's own words, and the
+// modelled part above is what a device with a partition table would answer
+// instead.
+//
+// 5.4.8.16 gives PT_INFO's three words: partition_count in the low eight bits
+// and partition_table_present at bit 8, then unpartitioned space's two words in
+// 5.9.4.2's form.  No partitions and no table loaded is a first word of zero.
+//
+// The location word is the same one 5.4.8.16's note fixes — a base offset of 0
+// and a size of 0x2000 sectors — which Table 473 places as a first sector of 0
+// and a last sector of 8191, every bit of the thirteen that field has.  Table
+// 472's six permission bits sit above it, all set, since nothing here is
+// closed to anybody.
+//
+// The flags word carries those same six permissions and none of Table 474's
+// ACCEPTS_DEFAULT_FAMILY bits, which is where it parts company with the
+// modelled part.  Those bits say which UF2 families may be dragged onto the
+// mass storage drive the bootrom presents in BOOTSEL mode, and a device running
+// picobootx runs its own application and presents no such drive.
+// ---------------------------------------------------------------------------
+
+#define PBT_DEFAULT_PT_TABLE    0x00000000u
+#define PBT_DEFAULT_PT_LOCATION 0xFFFFE000u
+#define PBT_DEFAULT_PT_FLAGS    0xFC000000u
+
+// How many words PT_INFO contributes.  A PB_INFO_PARTITION answer carrying it
+// is the flags word and these three.
+#define PBT_DEFAULT_PT_INFO_WORDS 3u
+
+// ---------------------------------------------------------------------------
+// What the RP2350 default answers for PB_INFO_UF2_TARGET
+//
+// 5.6.4.11 gives the type three words directly, with no flags word in front:
+// "Word 0 : Target partition number", of which "-1 : if there is nowhere to
+// download the family", and words 1 and 2 the target partition's own two words
+// "if the partition number is not -1".
+//
+// picobootx.h: "Served, as nowhere.  A UF2 reaches a device by being dragged
+// onto a mass storage drive, and picobootx has none and is told of none, so it
+// has nowhere to name."  So the target is -1, and 5.6.4.11 leaves the two words
+// behind it meaningless.  They are the two PB_INFO_PARTITION gives for
+// unpartitioned space, "so the same region reads the same way whichever
+// question a host asks."
+//
+// All three go however little the last two have to say — picotool checks the
+// count is three before it reads the first word, so a transfer that cannot hold
+// three is refused rather than served short.
+// ---------------------------------------------------------------------------
+
+#define PBT_DEFAULT_UF2_TARGET       0xFFFFFFFFu
+#define PBT_DEFAULT_UF2_TARGET_WORDS 3u
 
 // The most partitions the model will hold.  5.4.8.16 numbers partitions 0-15.
 #define PBT_PARTITION_MAX 16u

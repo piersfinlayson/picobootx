@@ -8,6 +8,28 @@
 
 #include "picobootx_private.h"
 #include "picobootx_impl.h"
+#include "picobootx_vendor.h"
+
+// picoboot_default_get_info produces a system information answer whole, in one
+// call, so the room the library can offer it has to reach the longest such
+// answer.  That room is bounded by the transmit FIFO, and a FIFO too small for
+// the answer never offers enough.  The default declines every call, the
+// transfer makes no progress, and the host waits on a reply that never comes.
+//
+// Failing the build says so where an integrator sizing the FIFO down would
+// otherwise meet it on the wire.  An integrator who needs a smaller FIFO than
+// this writes get_info themselves and serves the answer in pieces — see
+// picoboot_default_get_info in picobootx_impl.h.
+_Static_assert(CFG_TUD_PICOBOOT_TX_BUFSIZE >= PICOBOOT_SYS_INFO_MAX_BYTES,
+               "CFG_TUD_PICOBOOT_TX_BUFSIZE cannot hold the longest system "
+               "information answer, which picoboot_default_get_info produces "
+               "in a single call");
+
+// The pump's own buffer caps the room too, so an answer larger than it holds
+// would never be offered enough however large the transmit FIFO is.
+_Static_assert(PB_DATA_IN_BUF_SIZE >= PICOBOOT_SYS_INFO_MAX_BYTES,
+               "the longest system information answer is larger than the room "
+               "the library ever offers a fill in one call");
 
 // Error codes returned by ROM functions
 #define BOOTROM_ERROR_TIMEOUT                   (-1)    // Unused in RP2350
@@ -84,11 +106,6 @@ typedef int (*get_sys_info_fn_t)(uint32_t *out_buffer, uint32_t out_buffer_word_
 static get_sys_info_fn_t pb_lookup_get_sys_info_fn(void) {
     get_sys_info_fn_t get_sys_info = (get_sys_info_fn_t)picoboot_lookup_boot_fn('G', 'S');
     return get_sys_info;
-}
-
-typedef int (*get_partition_table_info_fn_t)(uint32_t *out_buffer, uint32_t out_buffer_word_size, uint32_t flags_and_partition);
-static get_partition_table_info_fn_t pb_lookup_get_partition_table_info_fn(void) {
-    return (get_partition_table_info_fn_t)picoboot_lookup_boot_fn('G', 'P');
 }
 
 typedef int (*otp_access_fn_t)(uint8_t *buf, uint32_t buf_len, uint32_t row_and_flags);
@@ -449,11 +466,182 @@ pb_status_t picoboot_default_flash_erase(
 #define PB_PT_INFO_FLAG   0x0001u
 #define PB_PT_INFO_WORDS  4u
 
+// The rest of the partition table flags (RP2350 datasheet 5.4.8.16).  The first
+// four ask for a field of a partition rather than of the table.  SINGLE narrows
+// those four to the one partition named in the top byte of flags_and_partition.
+#define PB_PT_LOCATION_AND_FLAGS 0x0010u
+#define PB_PT_ID                 0x0020u
+#define PB_PT_FAMILY_IDS         0x0040u
+#define PB_PT_NAME               0x0080u
+#define PB_PT_SINGLE             0x8000u
+
+// The flags this default answers.  A flag outside the set is dropped from the
+// answer, as get_partition_table_info drops one the part cannot answer.
+//
+// SINGLE is answered like the rest.  The boot ROM echoes it whenever it is
+// asked for, including on its own with nothing to answer, and narrowing to one
+// partition is honoured by a device with none.  Masking with this also drops the
+// partition number, which the boot ROM leaves out of the answered-flags word
+// too.  Asked about partition 3 with 0x03008030 it answers 0x8030.
+#define PB_PT_ANSWERED_FLAGS                                    \
+    (PB_PT_INFO_FLAG | PB_PT_LOCATION_AND_FLAGS | PB_PT_ID |    \
+     PB_PT_FAMILY_IDS | PB_PT_NAME | PB_PT_SINGLE)
+
+// The unpartitioned space of an RP2350 with no partition table, in the two
+// words PT_INFO carries for it (RP2350 datasheet 5.9.4.2, table 473).
+//
+// The first is where it is and who may touch it — first sector 0 and last
+// sector 8191, which is every bit of the 13-bit field and the largest range it
+// can express, with all six permissions set — secure, non-secure and NS boot may
+// each read and write.  All of flash, unpartitioned, open to everyone, which is
+// what having no partition table means and is the same on every RP2350.
+//
+// The second is those same six permissions with every UF2 family bit clear.  A
+// family bit says a UF2 of that family would be accepted, and a UF2 reaches a
+// device by being dragged onto a mass storage drive.  The bootrom sets four of
+// them because BOOTSEL mode presents such a drive.  A device running picobootx
+// is running its application and presents none, so it accepts no family, and
+// the RP2040 family was never this part's.
+#define PB_UNPARTITIONED_LOCATION 0xffffe000u
+#define PB_UNPARTITIONED_FLAGS    0xfc000000u
+
 // Word 0 of a UF2 target answer, saying the family goes nowhere (RP2350
 // datasheet 5.6.4.11).
 #define PB_UF2_TARGET_NONE 0xffffffffu
 
-// Where a UF2 of some family would be downloaded to.
+// The words of an answer from at_word on, copied into the caller's buffer.
+//
+// Whole words only.  The library offers a whole number of them, so this matters
+// to a caller reaching a default directly.  A room that is not a whole number of
+// words has the remainder left alone rather than filled with part of a word.
+static void pb_copy_answer(
+    const uint32_t *answer,
+    uint32_t        filled,
+    uint32_t        at_word,
+    uint8_t        *buf,
+    uint32_t        room,
+    uint32_t       *bytes_written
+) {
+    *bytes_written = 0u;
+    if (at_word >= filled) {
+        return;
+    }
+    uint32_t left = (filled - at_word) * (uint32_t)sizeof(uint32_t);
+    *bytes_written = left < room ? left : room;
+    memcpy(buf, &answer[at_word], *bytes_written);
+}
+
+// How many words this part's system information answer will be, without
+// producing any of it.
+//
+// get_sys_info answers a single flag as the flags word followed by that flag's
+// data, so a probe of one flag returns one more word than the flag contributes,
+// and one word for a flag the part does not answer.  Summing the contributions
+// over the flags asked for gives the length of the answer to all of them, with
+// the ROM saying how long each is — so a flag a future part adds is counted
+// here with no change to this.
+//
+// tmp holds one flag's data at a time.  The widest flag the datasheet defines
+// is four words.
+static pb_status_t pb_sys_info_words(uint32_t param0, uint32_t *words) {
+    get_sys_info_fn_t get_sys_info = pb_lookup_get_sys_info_fn();
+    if (get_sys_info == NULL) {
+        ERR("Unable to find get_sys_info in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    uint32_t tmp[8];
+    uint32_t total = 1u;  // the flags word, which every answer carries
+
+    for (unsigned bit = 0u; bit < 32u; bit++) {
+        uint32_t flag = 1u << bit;
+        if ((param0 & flag) == 0u) {
+            continue;
+        }
+        int ret = get_sys_info(tmp, (uint32_t)(sizeof(tmp) / sizeof(tmp[0])),
+                               flag);
+        if (ret < 0) {
+            ERR("get_sys_info refused flag 0x%08x: %d", flag, ret);
+            return pb_status_from_bootrom(ret);
+        }
+        if (ret > 1) {
+            total += (uint32_t)ret - 1u;
+        }
+    }
+
+    *words = total;
+    return PB_STATUS_OK;
+}
+
+// The system information answer, written where the caller asked for it.
+//
+// The ROM produces the whole answer or none of it, and takes no offset, so this
+// serves it in one call from its first word and needs no buffer of its own.  buf
+// is word aligned, which is what the library promises a fill and what lets the
+// ROM write through it.
+//
+// Room too small for the whole answer is declined rather than refused.  Nothing
+// is written, and the caller offers more next time.  So the transmit FIFO has to
+// reach the size of an answer — see picoboot_default_get_info in
+// picobootx_impl.h for what a FIFO that does not means.
+static pb_status_t pb_sys_info_fill(
+    uint32_t  param0,
+    uint32_t  at_word,
+    uint8_t  *buf,
+    uint32_t  room,
+    uint32_t *bytes_written
+) {
+    *bytes_written = 0u;
+
+    // The answer goes in one call, so there is no later window to serve.
+    if (at_word != 0u) {
+        return PB_STATUS_OK;
+    }
+
+    get_sys_info_fn_t get_sys_info = pb_lookup_get_sys_info_fn();
+    if (get_sys_info == NULL) {
+        ERR("Unable to find get_sys_info in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    int ret = get_sys_info((uint32_t *)(void *)buf,
+                           room / (uint32_t)sizeof(uint32_t), param0);
+    if (ret == BOOTROM_ERROR_BUFFER_TOO_SMALL) {
+        LOG("get_sys_info declined %u bytes of room", room);
+        return PB_STATUS_OK;
+    }
+    if (ret < 0) {
+        ERR("get_sys_info refused flags 0x%08x: %d", param0, ret);
+        return pb_status_from_bootrom(ret);
+    }
+
+    *bytes_written = (uint32_t)ret * (uint32_t)sizeof(uint32_t);
+    return PB_STATUS_OK;
+}
+
+// The partition table answer, in answer, and how many words it is.
+//
+// A constant.  picobootx does not read a partition table, so this says the one
+// thing true of every RP2350 without one — no partitions, no table loaded, and
+// all of flash unpartitioned and open to everyone.  A device that does have a
+// partition table answers PB_INFO_PARTITION itself rather than taking this
+// default.
+//
+// A per-partition field — location and flags, id, family ids, name — contributes
+// no words, there being no partitions, and the flags word still names it as
+// answered.  answer holds PB_PT_INFO_WORDS words.
+static uint32_t pb_partition_answer(uint32_t param0, uint32_t *answer) {
+    answer[0] = param0 & PB_PT_ANSWERED_FLAGS;
+    if ((param0 & PB_PT_INFO_FLAG) == 0u) {
+        return 1u;
+    }
+    answer[1] = 0u;  // no partitions, and no partition table loaded
+    answer[2] = PB_UNPARTITIONED_LOCATION;
+    answer[3] = PB_UNPARTITIONED_FLAGS;
+    return PB_PT_INFO_WORDS;
+}
+
+// Where a UF2 of some family would be downloaded to, in three words.
 //
 // Nowhere.  A UF2 is dragged onto a mass storage drive, as it is onto the one
 // BOOTSEL mode presents.  picobootx presents none and is told of none, so there
@@ -461,90 +649,23 @@ pb_status_t picoboot_default_flash_erase(
 // ignores the family.  A device that does present such a drive answers this
 // itself rather than taking this default.
 //
-// The two words beside the target describe the unpartitioned space, and
-// get_partition_table_info reports them.  The datasheet marks them meaningful
-// only where the target is not -1, so an answer without them is still a whole
-// answer, and the target alone is sent where that routine did not give them.
-static pb_status_t pb_rom_uf2_target(
-    uint32_t *scratch,
-    uint32_t  scratch_words,
-    uint32_t *filled
-) {
-    get_partition_table_info_fn_t get_partition_table_info =
-        pb_lookup_get_partition_table_info_fn();
-    if (get_partition_table_info == NULL) {
-        ERR("Unable to find get_partition_table_info in ROM");
-        return PB_STATUS_NOT_FOUND;
-    }
-
-    int ret = get_partition_table_info(scratch, scratch_words, PB_PT_INFO_FLAG);
-    if (ret < 0) {
-        ERR("get_partition_table_info refused PT_INFO: %d", ret);
-        return pb_status_from_bootrom(ret);
-    }
-
-    if ((uint32_t)ret >= PB_PT_INFO_WORDS) {
-        // Drop the flags word and the partition counts, keeping the two the
-        // answer carries.
-        scratch[1] = scratch[2];
-        scratch[2] = scratch[3];
-        *filled = 3u;
-    } else {
-        *filled = 1u;
-    }
-    scratch[0] = PB_UF2_TARGET_NONE;
-    return PB_STATUS_OK;
-}
-
-// The answer to one information request, in scratch the caller owns.
+// The two words behind the target are the unpartitioned space, and they are the
+// two PB_INFO_PARTITION reports for it.  5.6.4.11 makes them the target
+// partition's own location "if the partition number is not -1", and it is -1, so
+// they describe a download that cannot happen — which leaves agreeing with what
+// this device says about that region when asked directly as the one thing they
+// can usefully do.  Reading them from the ROM instead made the same region come
+// back two ways, differing in the accept-family bits this device has no drive to
+// accept a family onto.
 //
-// Both routines this wraps have the same shape and the same contract as picoboot
-// itself (RP2350 datasheet 5.4.8.16 and 5.4.8.17): they fill a word buffer,
-// putting the subset of the flags asked for that they answered in its first
-// word, and return how many words they wrote.  So the answer is passed straight
-// through, and a flag this part cannot answer is dropped by the ROM rather than
-// by anything here.
-static pb_status_t pb_rom_info(
-    pb_info_type_t type,
-    uint32_t       param0,
-    uint32_t      *scratch,
-    uint32_t       scratch_words,
-    uint32_t      *filled
-) {
-    int ret;
-    switch (type) {
-        case PB_INFO_SYS: {
-            get_sys_info_fn_t get_sys_info = pb_lookup_get_sys_info_fn();
-            if (get_sys_info == NULL) {
-                ERR("Unable to find get_sys_info in ROM");
-                return PB_STATUS_NOT_FOUND;
-            }
-            ret = get_sys_info(scratch, scratch_words, param0);
-            break;
-        }
-        case PB_INFO_PARTITION: {
-            get_partition_table_info_fn_t get_partition_table_info =
-                pb_lookup_get_partition_table_info_fn();
-            if (get_partition_table_info == NULL) {
-                ERR("Unable to find get_partition_table_info in ROM");
-                return PB_STATUS_NOT_FOUND;
-            }
-            ret = get_partition_table_info(scratch, scratch_words, param0);
-            break;
-        }
-        case PB_INFO_UF2_TARGET:
-            return pb_rom_uf2_target(scratch, scratch_words, filled);
-        default:
-            // PB_INFO_UF2_STATUS reports a download in progress over the drive
-            // BOOTSEL mode presents, and this port has none to report on.
-            return PB_STATUS_INVALID_ARG;
-    }
-    if (ret < 0) {
-        ERR("ROM refused information type 0x%02x: %d", type, ret);
-        return pb_status_from_bootrom(ret);
-    }
-    *filled = (uint32_t)ret;
-    return PB_STATUS_OK;
+// All three go, short of anything to say with the last two — picotool checks
+// the reply is three words before it reads the first.
+#define PB_UF2_TARGET_WORDS 3u
+
+static void pb_uf2_target_answer(uint32_t *answer) {
+    answer[0] = PB_UF2_TARGET_NONE;
+    answer[1] = PB_UNPARTITIONED_LOCATION;
+    answer[2] = PB_UNPARTITIONED_FLAGS;
 }
 
 pb_status_t picoboot_default_get_info_prepare(
@@ -554,9 +675,23 @@ pb_status_t picoboot_default_get_info_prepare(
     void           *ctx
 ) {
     (void)ctx;
-    uint32_t scratch[PICOBOOT_INFO_MAX_ANSWER_WORDS];
-    return pb_rom_info(type, param0, scratch,
-                       PICOBOOT_INFO_MAX_ANSWER_WORDS, words);
+
+    switch (type) {
+        case PB_INFO_SYS:
+            return pb_sys_info_words(param0, words);
+        case PB_INFO_PARTITION: {
+            uint32_t answer[PB_PT_INFO_WORDS];
+            *words = pb_partition_answer(param0, answer);
+            return PB_STATUS_OK;
+        }
+        case PB_INFO_UF2_TARGET:
+            *words = PB_UF2_TARGET_WORDS;
+            return PB_STATUS_OK;
+        default:
+            // PB_INFO_UF2_STATUS reports a download in progress over the drive
+            // BOOTSEL mode presents, and this port has none to report on.
+            return PB_STATUS_INVALID_ARG;
+    }
 }
 
 pb_status_t picoboot_default_get_info(
@@ -570,32 +705,35 @@ pb_status_t picoboot_default_get_info(
 ) {
     (void)ctx;
 
-    // The ROM fills from the start of the answer every time and takes no
-    // offset, so the whole of it is produced again and the window copied out.
-    // That leaves this pair with no state between calls, and the ROM guards the
-    // repeat itself: get_partition_table_info hashes the partition table when it
-    // loads it and returns INVALID_STATE if it has changed since, and every
-    // system information flag reads a value fixed for the life of the boot.
-    uint32_t scratch[PICOBOOT_INFO_MAX_ANSWER_WORDS];
-    uint32_t filled = 0u;
-    pb_status_t st = pb_rom_info(type, param0, scratch,
-                                 PICOBOOT_INFO_MAX_ANSWER_WORDS, &filled);
-    if (st != PB_STATUS_OK) {
-        return st;
-    }
-
     // Whole words only.  The library offers a whole number of them, so this
-    // matters to a caller reaching the default directly.  A length that is not
-    // a whole number of words has the remainder left alone rather than filled
-    // with part of a word.
+    // matters to a caller reaching the default directly.
+    uint32_t room = max_len & ~(uint32_t)(sizeof(uint32_t) - 1u);
     *bytes_written = 0u;
-    if (at_word < filled) {
-        uint32_t left = (filled - at_word) * (uint32_t)sizeof(uint32_t);
-        uint32_t room = max_len & ~(uint32_t)(sizeof(uint32_t) - 1u);
-        *bytes_written = left < room ? left : room;
-        memcpy(buf, &scratch[at_word], *bytes_written);
+
+    // Only system information comes from the ROM, and it is not held between
+    // calls.  The routine takes no offset, so what it produces is produced
+    // again, and the ROM guards the repeat itself — every system information
+    // flag reads a value fixed for the life of the boot.  The other two types
+    // are constants, so a repeat is the same arithmetic twice.
+    switch (type) {
+        case PB_INFO_SYS:
+            return pb_sys_info_fill(param0, at_word, buf, room, bytes_written);
+        case PB_INFO_PARTITION: {
+            uint32_t answer[PB_PT_INFO_WORDS];
+            uint32_t filled = pb_partition_answer(param0, answer);
+            pb_copy_answer(answer, filled, at_word, buf, room, bytes_written);
+            return PB_STATUS_OK;
+        }
+        case PB_INFO_UF2_TARGET: {
+            uint32_t answer[PB_UF2_TARGET_WORDS];
+            pb_uf2_target_answer(answer);
+            pb_copy_answer(answer, PB_UF2_TARGET_WORDS, at_word, buf, room,
+                           bytes_written);
+            return PB_STATUS_OK;
+        }
+        default:
+            return PB_STATUS_INVALID_ARG;
     }
-    return PB_STATUS_OK;
 }
 
 pb_status_t picoboot_default_otp_read(

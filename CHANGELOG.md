@@ -12,6 +12,29 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
+## Unreleased
+
+`PB_INFO_PARTITION` and `PB_INFO_UF2_TARGET` no longer read the partition table,
+and system information is answered whole, so a device that has a partition table
+or a small transmit FIFO serves those types itself.
+
+- `picoboot_default_get_info_prepare` and `picoboot_default_get_info` use 32
+  bytes of stack at most, where they each used 252.
+- `PB_INFO_PARTITION` is answered with a constant — the flags asked for echoed
+  back, no partitions, no partition table loaded, and all of flash
+  unpartitioned and readable and writable by everyone.  A device with a real
+  partition table must serve the type itself.
+- `PB_INFO_UF2_TARGET` takes the two words behind its target from the same
+  constant `PB_INFO_PARTITION` uses, so the unpartitioned space reads the same
+  way whichever question a host asks.  It reads no partition table, and both
+  types are answered on a part that publishes no bootrom routine.
+- The buffer a data-in callback is handed is word aligned.
+- `PICOBOOT_SYS_INFO_MAX_BYTES` is the longest system information answer, which
+  `picoboot_default_get_info` produces in one call.  A
+  `CFG_TUD_PICOBOOT_TX_BUFSIZE` smaller than it fails the build.
+- `picoboot_ops_t.get_info` documents serving an answer in pieces from `ctx`,
+  which the defaults cannot do.
+
 ## 0.3.0 - 2026-08-28
 
 picobootx's `GET_INFO` answers did not match the RP2350 datasheet, so a host

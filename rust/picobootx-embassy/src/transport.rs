@@ -154,6 +154,8 @@ impl<E: EndpointControl> Xport<E> {
 }
 
 impl<E: EndpointControl> Transport for Xport<E> {
+    const TX_CAPACITY: usize = TX_LEN;
+
     fn rx_available(&self) -> u32 {
         self.rx.len() as u32
     }

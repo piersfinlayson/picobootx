@@ -142,12 +142,19 @@ fn publish_sys_info(words: usize) {
     PUBLISH_SYS_INFO.store(true, Ordering::SeqCst);
 }
 
+/// What `get_sys_info` returns for a buffer that cannot hold its answer.
+/// 5.4.8.17 takes an `out_buffer_word_size` and returns a "negative error code
+/// on error", and Table 471 words this one "The provided buffer was too small
+/// to hold the result".
+const BOOTROM_ERROR_BUFFER_TOO_SMALL: c_int = -13;
+
 extern "C" fn get_sys_info_stub(out: *mut u32, out_words: u32, _flags: u32) -> c_int {
     let words = SYS_INFO_WORDS.load(Ordering::SeqCst);
-    assert!(
-        words <= out_words as usize,
-        "the routine was offered {out_words} words and asked to write {words}"
-    );
+    if words > out_words as usize {
+        // Refused before anything is written, so a caller can tell a refusal
+        // apart from a partial answer.
+        return BOOTROM_ERROR_BUFFER_TOO_SMALL;
+    }
     for at in 0..words {
         // SAFETY: the assertion above is what says out has room for this.
         unsafe { out.add(at).write(info_word(at)) };
@@ -321,20 +328,16 @@ fn otp_is_served_whatever_is_asked_for() {
 }
 
 #[test]
-fn the_information_types_the_part_answers_reach_its_own_routines() {
+fn each_information_type_is_answered_by_the_part_and_not_the_trait() {
     let _chip = chip();
     let mut d = Rp2350;
 
-    // The stand-in bootrom publishes the reboot routine and nothing else, so a
-    // request routed to the part reports the routine it wanted as missing.  The
-    // trait's default refuses with UnknownCmd, so NotFound is the part
-    // answering rather than the default.
+    // The stand-in bootrom publishes the reboot routine and nothing else.
+    // System information is the one type that asks a routine, so it reports the
+    // one it wanted as missing.  The trait's default refuses with UnknownCmd,
+    // so NotFound is the part answering rather than the default.
     assert_eq!(
         d.get_info_prepare(Info::Sys, 0xffff_ffff),
-        Err(Status::NotFound)
-    );
-    assert_eq!(
-        d.get_info_prepare(Info::Partition, 0x0001),
         Err(Status::NotFound)
     );
     assert_eq!(
@@ -342,12 +345,30 @@ fn the_information_types_the_part_answers_reach_its_own_routines() {
         Err(Status::NotFound)
     );
 
-    // The UF2 target is answered from the partition table routine too, so it
-    // reports that routine missing rather than refusing the type.
-    assert_eq!(
-        d.get_info_prepare(Info::Uf2Target, 0x1234),
-        Err(Status::NotFound)
-    );
+    // The other two are constants and ask no routine, so on this same stand-in
+    // they answer.  The trait's default refuses every type with UnknownCmd, so
+    // an answer here is the part's rather than the default's.
+    //
+    // The partition reply is the flags word naming PT_INFO back, then its
+    // three — no partitions and no table loaded, unpartitioned space over every
+    // sector with every permission, and those permissions again with no UF2
+    // family accepted.
+    assert_eq!(d.get_info_prepare(Info::Partition, 0x0001), Ok(4));
+    let mut buf = [0xa5u8; 32];
+    assert_eq!(d.get_info(Info::Partition, 0x0001, 0, &mut buf), Ok(16));
+    assert_eq!(word(&buf, 0), 0x0001);
+    assert_eq!(word(&buf, 1), 0x0000_0000);
+    assert_eq!(word(&buf, 2), 0xffff_e000);
+    assert_eq!(word(&buf, 3), 0xfc00_0000);
+
+    // The UF2 target reply is three words — nowhere to download the family,
+    // and then the two the partition reply just gave for that same region.
+    assert_eq!(d.get_info_prepare(Info::Uf2Target, 0x1234), Ok(3));
+    let mut target = [0xa5u8; 32];
+    assert_eq!(d.get_info(Info::Uf2Target, 0x1234, 0, &mut target), Ok(12));
+    assert_eq!(word(&target, 0), 0xffff_ffff);
+    assert_eq!(word(&target, 1), word(&buf, 2));
+    assert_eq!(word(&target, 2), word(&buf, 3));
 }
 
 #[test]
@@ -370,47 +391,70 @@ fn the_uf2_download_status_is_refused_before_any_lookup() {
 }
 
 #[test]
-fn an_information_answer_that_shrinks_between_calls_is_not_read_past() {
+fn system_information_is_answered_whole_or_not_at_all() {
     let _chip = chip();
     let mut d = Rp2350;
 
-    // One request reaches the ROM routine more than once: the library asks how
-    // long the answer is, then asks for the answer itself a piece at a time.
-    // The routine fills from the start every call and reports afresh how much
-    // it wrote, and nothing holds it to the same figure twice — so a part that
-    // answers less the second time leaves the library asking for a word that is
-    // no longer there.
+    // The ROM routine fills from the start of the answer on every call and
+    // takes no offset, so the part has no piece of one to hand out and nowhere
+    // to keep the rest.  It writes the whole answer into the buffer it is
+    // handed, or it declines and reports nothing written.
 
-    // A part that answers the same both times, taken whole.
     publish_sys_info(4);
     assert_eq!(d.get_info_prepare(Info::Sys, 0x0001), Ok(4));
+
+    // Room for the whole answer, exactly.
+    let mut buf = [0xa5u8; 16];
+    assert_eq!(d.get_info(Info::Sys, 0x0001, 0, &mut buf), Ok(16));
+    assert_eq!(word(&buf, 0), info_word(0));
+    assert_eq!(word(&buf, 3), info_word(3));
+
+    // Anything short of it is declined, from nothing at all up to a byte short
+    // of the whole.
+    for room in [0usize, 3, 4, 12, 15] {
+        let mut buf = [0xa5u8; 32];
+        assert_eq!(
+            d.get_info(Info::Sys, 0x0001, 0, &mut buf[..room]),
+            Ok(0),
+            "{room} bytes of room"
+        );
+        assert!(
+            buf.iter().all(|b| *b == 0xa5),
+            "{room} bytes of room wrote into a call it declined"
+        );
+    }
+
+    // So is a window from part way in, however much room comes with it.  The
+    // last of these is past the end of the answer and the rest are inside it,
+    // and neither is a piece this part can produce.
+    for at in 1..=5u32 {
+        let mut buf = [0xa5u8; 32];
+        assert_eq!(
+            d.get_info(Info::Sys, 0x0001, at, &mut buf),
+            Ok(0),
+            "at_word {at}"
+        );
+        assert!(
+            buf.iter().all(|b| *b == 0xa5),
+            "at_word {at} wrote into a call it declined"
+        );
+    }
+
+    // The same room from the answer's start is served, so what was declined
+    // was the offset and not the call.
     let mut buf = [0xa5u8; 32];
     assert_eq!(d.get_info(Info::Sys, 0x0001, 0, &mut buf), Ok(16));
     assert_eq!(word(&buf, 0), info_word(0));
     assert_eq!(word(&buf, 3), info_word(3));
 
-    // The same part now answers two words, and the library asks for the fourth
-    // — an index the first answer covered and this one does not.
+    // A part answering a different length is taken at that length, whole, so
+    // what bounds the answer is the routine and not a figure the caller kept.
     publish_sys_info(2);
     let mut buf = [0xa5u8; 32];
-    assert_eq!(d.get_info(Info::Sys, 0x0001, 3, &mut buf), Ok(0));
-    assert!(
-        buf.iter().all(|b| *b == 0xa5),
-        "an index past the answer wrote bytes rather than reporting none"
-    );
-
-    // The index the shorter answer ends at is refused the same way, so the
-    // refusal covers the boundary and not only what lies beyond it.
-    assert_eq!(d.get_info(Info::Sys, 0x0001, 2, &mut buf), Ok(0));
-    assert!(
-        buf.iter().all(|b| *b == 0xa5),
-        "the index the answer ends at wrote bytes rather than reporting none"
-    );
-
-    // An index the shorter answer does cover is served from it, so what was
-    // refused was the index rather than the answer having changed.
-    assert_eq!(d.get_info(Info::Sys, 0x0001, 1, &mut buf), Ok(4));
-    assert_eq!(word(&buf, 0), info_word(1));
+    assert_eq!(d.get_info(Info::Sys, 0x0001, 0, &mut buf), Ok(8));
+    assert_eq!(word(&buf, 0), info_word(0));
+    assert_eq!(word(&buf, 1), info_word(1));
+    assert_eq!(word(&buf, 2), 0xa5a5_a5a5);
 }
 
 #[test]

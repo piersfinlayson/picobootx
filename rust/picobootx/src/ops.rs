@@ -86,8 +86,8 @@ impl Ecc {
 ///   flags in flag order.
 /// - [`Info::Partition`] — what `get_partition_table_info` produces, in the same
 ///   shape, from `param0` as `flags_and_partition`.
-/// - [`Info::Uf2Target`] — the words the protocol defines for it, from `param0`
-///   as a UF2 family id.  No leading flags word.
+/// - [`Info::Uf2Target`] — the three words the protocol defines for it, from
+///   `param0` as a UF2 family id.  No leading flags word.
 /// - [`Info::Uf2Status`] — the words the protocol defines for it.  No leading
 ///   flags word, and no parameter.
 ///
@@ -187,6 +187,21 @@ pub struct Reboot {
 /// `Picoboot::new` was given no page buffer, and [`Status::UnknownError`] when
 /// the transport refuses a write it accepted room for.
 pub trait Ops {
+    /// The smallest transmit FIFO this `Ops` can be served by — the most room
+    /// it needs offered in a single call.
+    ///
+    /// Zero for an `Ops` that can always serve what it is offered, in as many
+    /// calls as it takes — which is what the methods below do, `get_info`
+    /// refusing outright.  An `Ops` that produces an answer whole and declines
+    /// room too short for it says how much room that is here, and
+    /// `Picoboot::poll` fails the build against a `Transport::TX_CAPACITY`
+    /// that falls short.
+    ///
+    /// This one defaults, where `TX_CAPACITY` does not.  Zero is the true
+    /// value for the behaviour this trait already has, rather than a guess
+    /// about the implementor.
+    const MIN_TX_CAPACITY: usize = 0;
+
     /// Take or release the device.  Absent means the device simply agrees.
     fn exclusive_access(&mut self, mode: Exclusive) -> Result {
         let _ = mode;
@@ -302,10 +317,24 @@ pub trait Ops {
     /// bytes still owed.  Returning `Ok(0)` says there was not room for the next
     /// piece and asks to be called again with more.
     ///
+    /// `buf` is word aligned, so a producer that writes words can write them
+    /// straight into it rather than into a buffer of its own.  The RP2350 ROM
+    /// information routines write words, and `picobootx-rp2350` does exactly
+    /// that.
+    ///
     /// A decline has to be one a later call can satisfy.  The largest `buf`
     /// this ever hands over is 64 bytes, so declining that much is asking for
     /// room that does not exist, and the command is halted with
-    /// [`Status::BufferTooSmall`] rather than called again.
+    /// [`Status::BufferTooSmall`] rather than called again.  `buf` is also no
+    /// larger than the transmit FIFO has room for, so an implementation that can
+    /// only answer whole needs a FIFO that holds a whole answer.
+    ///
+    /// This takes `&mut self`, so an implementation that wants to produce its
+    /// answer once and hand out the window `at_word` names keeps it there — the
+    /// library keeps no cursor and no buffer on its behalf, and `&mut self` is
+    /// the whole of what an implementation needs to serve an answer in pieces.
+    /// `picobootx-rp2350`'s defaults are free functions with no state of their
+    /// own, which is why they answer system information whole.
     ///
     /// The shape of what is written belongs to the type, not to the library —
     /// see [`Info`].

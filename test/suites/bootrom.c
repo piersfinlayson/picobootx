@@ -214,118 +214,160 @@ static void scenario_get_info_without_its_bootrom_routine(void) {
     PBT_CHECK_STATUS(pbt_run_cmd(&partition), PB_STATUS_OK);
 }
 
-static void scenario_get_info_partition_without_its_bootrom_routine(void) {
-    pbt_begin();
-    pbt_bootrom_withhold('G', 'P');
-    pbt_start();
-
-    // Twenty bytes is the whole of a PT_INFO response, so the transfer has
-    // nothing to do with the refusal.
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&cmd, PB_INFO_PARTITION, PBT_PART_PT_INFO);
-
-    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_NOT_FOUND);
-    PBT_CHECK_EQ(pbt_packet_count(), 0u);
-
-    // SYS information comes from the routine that is still published, so the
-    // two types are answered by two routines and only one of them went.
-    pbt_recover();
-    picoboot_cmd_t sys = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&sys, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
-    PBT_CHECK_STATUS(pbt_run_cmd(&sys), PB_STATUS_OK);
-}
-
-// The UF2 target question is answered out of the partition table, so it depends
-// on the same routine the partition question does.  picobootx.h: the answer is
-// "a target of -1 with the unpartitioned space beside it, which
-// get_partition_table_info reports."  A part that does not publish that routine,
-// or publishes one that refuses, cannot answer either question — and says so
-// with the same reason in both cases.
-static void scenario_the_uf2_target_follows_the_partition_routine(void) {
-    pbt_begin();
-    pbt_bootrom_withhold('G', 'P');
-    pbt_start();
-
-    // Thirty-two bytes is more than the whole answer, so the transfer has
-    // nothing to do with the refusal.
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 32u);
-    pbt_args_get_info(&cmd, PB_INFO_UF2_TARGET, 0u);
-
-    // Table 471: NOT_FOUND is "Attempted to access something that doesn't
-    // exist; or a search failed", which is the lookup for a routine the part
-    // does not publish.
-    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_NOT_FOUND);
-    PBT_CHECK_EQ(pbt_packet_count(), 0u);
-
-    // SYS comes from a different routine, which is still published, so what
-    // went was that one routine and not GET_INFO.
-    pbt_recover();
-    picoboot_cmd_t sys = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&sys, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
-    PBT_CHECK_STATUS(pbt_run_cmd(&sys), PB_STATUS_OK);
-
-    // A published routine that refuses is reported as its own reason rather
-    // than as a fixed one for the type.  5.4.8.16 names both of these: the
-    // table not loaded, and the resident copy no longer matching flash.
+// picobootx_impl.h: get_sys_info is "the only ROM routine either of these two
+// reaches, and only PB_INFO_SYS reaches it.  On a part that publishes no
+// bootrom routine at all, PB_INFO_SYS is refused with PB_STATUS_NOT_FOUND and
+// the other two are answered as usual."
+//
+// The two constants are the partition question and the UF2 target question,
+// and each is checked here against a part that publishes neither of the two
+// routines 5.4.8.16 and 5.4.8.17 define.
+static void scenario_the_constant_info_types_need_no_bootrom_routine(void) {
     const struct {
-        const char *what;
-        int         rc;
-        pb_status_t expected;
-    } refusals[] = {
-        { "the table was never loaded", ROM_PRECONDITION_NOT_MET,
-          PB_STATUS_PRECONDITION_NOT_MET },
-        { "the table changed under it", ROM_INVALID_STATE,
-          PB_STATUS_INVALID_STATE },
+        const char    *what;
+        pb_info_type_t type;
+        uint32_t       param0;
+        uint32_t       transfer;
+        uint32_t       count;
+        uint32_t       words[4];   // the significant words, after the count
+    } types[] = {
+        // 5.4.8.16's PT_INFO: the flags word, then the table's own word and
+        // unpartitioned space's two.
+        { "the partition question", PB_INFO_PARTITION, PBT_PART_PT_INFO, 20u,
+          1u + PBT_DEFAULT_PT_INFO_WORDS,
+          { PBT_PART_PT_INFO, PBT_DEFAULT_PT_TABLE, PBT_DEFAULT_PT_LOCATION,
+            PBT_DEFAULT_PT_FLAGS } },
+
+        // 5.6.4.11's three, with no flags word in front of them.
+        { "the UF2 target question", PB_INFO_UF2_TARGET, 0u, 16u,
+          PBT_DEFAULT_UF2_TARGET_WORDS,
+          { PBT_DEFAULT_UF2_TARGET, PBT_DEFAULT_PT_LOCATION,
+            PBT_DEFAULT_PT_FLAGS, 0u } },
     };
 
-    for (unsigned i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++) {
+    for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
         pbt_begin();
-        pbt_partition_fail(refusals[i].rc);
+        pbt_bootrom_withhold('G', 'P');
+        pbt_bootrom_withhold('G', 'S');
         pbt_start();
 
-        picoboot_cmd_t target = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 32u);
-        pbt_args_get_info(&target, PB_INFO_UF2_TARGET, 0u);
+        picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                     types[i].transfer);
+        pbt_args_get_info(&cmd, types[i].type, types[i].param0);
 
-        pb_status_t got = pbt_run_cmd(&target);
-        if (got != refusals[i].expected) {
-            pbt_fail(__FILE__, __LINE__, "%s: expected %s, got %s",
-                     refusals[i].what,
-                     pbt_status_name((int)refusals[i].expected),
+        pb_status_t got = pbt_run_cmd(&cmd);
+        if (got != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%s: %s", types[i].what,
                      pbt_status_name((int)got));
+            continue;
         }
-        if (pbt_count("rom_get_partition_table_info") < 1) {
-            pbt_fail(__FILE__, __LINE__, "%s: the table was never consulted",
-                     refusals[i].what);
-        }
-        if (pbt_packet_count() != 0u) {
-            pbt_fail(__FILE__, __LINE__, "%s: %u packets went to the host",
-                     refusals[i].what, pbt_packet_count());
+        if (pbt_payload_len() != types[i].transfer) {
+            pbt_fail(__FILE__, __LINE__, "%s: %u bytes for a transfer of %u",
+                     types[i].what, pbt_payload_len(), types[i].transfer);
+            continue;
         }
 
-        // The partition question refuses with the same reason, which is what
-        // says the two draw on one routine.
-        pbt_begin();
-        pbt_partition_fail(refusals[i].rc);
-        pbt_start();
-        picoboot_cmd_t part = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 32u);
-        pbt_args_get_info(&part, PB_INFO_PARTITION, PBT_PART_PT_INFO);
-        pb_status_t part_got = pbt_run_cmd(&part);
-        if (part_got != refusals[i].expected) {
-            pbt_fail(__FILE__, __LINE__, "%s, asked as PARTITION: expected %s, "
-                     "got %s", refusals[i].what,
-                     pbt_status_name((int)refusals[i].expected),
-                     pbt_status_name((int)part_got));
+        // The whole answer, not one cut short to get past an absent routine.
+        uint32_t words[5];
+        memcpy(words, pbt_payload(), sizeof(words));
+        if (words[0] != types[i].count) {
+            pbt_fail(__FILE__, __LINE__, "%s: counted %u words, expected %u",
+                     types[i].what, words[0], types[i].count);
+        }
+        for (uint32_t w = 0; w < types[i].count; w++) {
+            if (words[1u + w] != types[i].words[w]) {
+                pbt_fail(__FILE__, __LINE__, "%s: word %u is 0x%08x, expected "
+                         "0x%08x", types[i].what, w, words[1u + w],
+                         types[i].words[w]);
+            }
+        }
+
+        // Neither routine was reached, as opposed to reached and found
+        // missing.
+        if (pbt_count("rom_get_partition_table_info") != 0 ||
+            pbt_count("rom_get_sys_info") != 0) {
+            pbt_fail(__FILE__, __LINE__, "%s reached the chip: "
+                     "get_partition_table_info %d, get_sys_info %d",
+                     types[i].what,
+                     pbt_count("rom_get_partition_table_info"),
+                     pbt_count("rom_get_sys_info"));
+        }
+
+        // The routines really are withheld.  System information is the type
+        // that needs one, and on this same device it cannot be served.  Table
+        // 471: NOT_FOUND is "Attempted to access something that doesn't
+        // exist; or a search failed", which is the lookup for a routine the
+        // part does not publish.
+        pbt_recover();
+        picoboot_cmd_t sys = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
+        pbt_args_get_info(&sys, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+        pb_status_t sys_got = pbt_run_cmd(&sys);
+        if (sys_got != PB_STATUS_NOT_FOUND) {
+            pbt_fail(__FILE__, __LINE__, "%s: system information answered %s "
+                     "on a part publishing nothing", types[i].what,
+                     pbt_status_name((int)sys_got));
         }
     }
 
-    // With the routine published and answering, the same request is served —
-    // so what was refused was the routine and not the question.
+    // With the routine published, system information is served — so what
+    // refused it above was its absence, and the two constants were answered
+    // through the same absence.
     pbt_begin();
     pbt_start();
-    picoboot_cmd_t good = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 32u);
-    pbt_args_get_info(&good, PB_INFO_UF2_TARGET, 0u);
-    PBT_CHECK_STATUS(pbt_run_cmd(&good), PB_STATUS_OK);
-    PBT_CHECK_EQ(pbt_payload_len(), 32u);
+    picoboot_cmd_t served = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
+    pbt_args_get_info(&served, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&served), PB_STATUS_OK);
+    PBT_CHECK(pbt_count("rom_get_sys_info") >= 1);
+}
+
+// Which routine each served type reaches.  picobootx_impl.h names get_sys_info
+// as the only one, and 5.4.8.16's get_partition_table_info is reached by
+// nothing — the partition question and the UF2 target question are both
+// constants now.
+static void scenario_only_system_information_reaches_the_bootrom(void) {
+    const struct {
+        const char    *what;
+        pb_info_type_t type;
+        uint32_t       param0;
+        int            sys_calls;
+    } types[] = {
+        // Once to learn how long the answer is, once for the answer itself.
+        { "system information", PB_INFO_SYS, PBT_SYS_CHIP_INFO, 2 },
+        { "the partition question", PB_INFO_PARTITION, PBT_PART_PT_INFO, 0 },
+        { "the UF2 target question", PB_INFO_UF2_TARGET, 0u, 0 },
+    };
+
+    for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        pbt_begin();
+        pbt_start();
+
+        picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
+        pbt_args_get_info(&cmd, types[i].type, types[i].param0);
+
+        pb_status_t got = pbt_run_cmd(&cmd);
+        if (got != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%s: %s", types[i].what,
+                     pbt_status_name((int)got));
+            continue;
+        }
+        if (pbt_count("rom_get_sys_info") != types[i].sys_calls) {
+            pbt_fail(__FILE__, __LINE__, "%s asked get_sys_info %d times, "
+                     "expected %d", types[i].what,
+                     pbt_count("rom_get_sys_info"), types[i].sys_calls);
+        }
+        if (pbt_count("rom_get_partition_table_info") != 0) {
+            pbt_fail(__FILE__, __LINE__, "%s asked get_partition_table_info %d "
+                     "times", types[i].what,
+                     pbt_count("rom_get_partition_table_info"));
+        }
+    }
+
+    // The part publishes both routines all the same, so what keeps
+    // get_partition_table_info at nothing is the library not looking it up.
+    pbt_begin();
+    pbt_start();
+    PBT_CHECK(picoboot_lookup_boot_fn('G', 'S') != NULL);
+    PBT_CHECK(picoboot_lookup_boot_fn('G', 'P') != NULL);
 }
 
 static void scenario_otp_write_without_its_bootrom_routine(void) {
@@ -517,38 +559,78 @@ static void scenario_a_sys_info_refusal_carries_the_chips_reason(void) {
     PBT_CHECK_EQ(pbt_payload_len(), 20u);
 }
 
-static void scenario_a_partition_refusal_carries_the_chips_reason(void) {
+// 5.4.8.16 names two ways get_partition_table_info refuses on a part that is
+// otherwise working — the table never loaded, and the resident copy no longer
+// matching flash.  Nothing in GET_INFO asks that routine any more, so none of
+// those refusals can reach a host — the two types 5.4.8.16 and 5.6.4.11 used
+// to draw on it for are answered from constants instead.
+static void scenario_a_partition_refusal_is_never_asked_for(void) {
+    const struct {
+        const char *what;
+        int         rc;
+    } refusals[] = {
+        // 5.4.8.16: "If the partition table hasn't been loaded (for example,
+        // from a watchdog or RAM boot), this method returns
+        // BOOTROM_ERROR_PRECONDITION_NOT_MET".
+        { "the table was never loaded", ROM_PRECONDITION_NOT_MET },
+        // 5.4.8.16: "If the hash has changed by the time this method is
+        // called, then it will return BOOTROM_ERROR_INVALID_STATE."
+        { "the table changed under it", ROM_INVALID_STATE },
+        // The resident copy no longer matching what it was built from.
+        { "the resident copy went stale", ROM_MODIFIED_DATA },
+    };
+
+    const struct {
+        const char    *what;
+        pb_info_type_t type;
+        uint32_t       param0;
+        uint32_t       transfer;
+    } types[] = {
+        { "the partition question", PB_INFO_PARTITION, PBT_PART_PT_INFO, 20u },
+        { "the UF2 target question", PB_INFO_UF2_TARGET, 0u, 16u },
+    };
+
+    for (unsigned i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++) {
+        for (unsigned t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+            pbt_begin();
+            pbt_partition_fail(refusals[i].rc);
+            pbt_start();
+
+            picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                         types[t].transfer);
+            pbt_args_get_info(&cmd, types[t].type, types[t].param0);
+
+            pb_status_t got = pbt_run_cmd(&cmd);
+            if (got != PB_STATUS_OK) {
+                pbt_fail(__FILE__, __LINE__, "%s, with %s: %s", types[t].what,
+                         refusals[i].what, pbt_status_name((int)got));
+                continue;
+            }
+            if (pbt_payload_len() != types[t].transfer) {
+                pbt_fail(__FILE__, __LINE__, "%s, with %s: %u bytes for a "
+                         "transfer of %u", types[t].what, refusals[i].what,
+                         pbt_payload_len(), types[t].transfer);
+            }
+            if (pbt_count("rom_get_partition_table_info") != 0) {
+                pbt_fail(__FILE__, __LINE__, "%s, with %s: the routine was "
+                         "asked %d times", types[t].what, refusals[i].what,
+                         pbt_count("rom_get_partition_table_info"));
+            }
+        }
+    }
+
+    // A refusal the library does still ask for reaches the host as the chip's
+    // own reason, so the answers above are the routine going unasked and not
+    // the harness failing to arm one.  5.4.8.17 has get_sys_info return a
+    // "negative error code on error", and Table 471 has a status for each.
     pbt_begin();
-    // 5.4.8.16: "If the partition table hasn't been loaded (for example, from a
-    // watchdog or RAM boot), this method returns
-    // BOOTROM_ERROR_PRECONDITION_NOT_MET".  That is a refusal a host meets on a
-    // part that is otherwise working, and Table 471 has a status for it.
-    pbt_partition_fail(ROM_PRECONDITION_NOT_MET);
+    pbt_sys_info_fail(ROM_PRECONDITION_NOT_MET);
     pbt_start();
-
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&cmd, PB_INFO_PARTITION, PBT_PART_PT_INFO);
-
-    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_PRECONDITION_NOT_MET);
-    PBT_CHECK(pbt_count("rom_get_partition_table_info") >= 1);
+    picoboot_cmd_t sys = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
+    pbt_args_get_info(&sys, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&sys), PB_STATUS_PRECONDITION_NOT_MET);
+    PBT_CHECK(pbt_count("rom_get_sys_info") >= 1);
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
-
-    // 5.4.8.16's other refusal: the resident copy no longer matches the table
-    // in flash.  A second reason, reported as itself.
-    pbt_begin();
-    pbt_partition_fail(ROM_MODIFIED_DATA);
-    pbt_start();
-    picoboot_cmd_t stale = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&stale, PB_INFO_PARTITION, PBT_PART_PT_INFO);
-    PBT_CHECK_STATUS(pbt_run_cmd(&stale), PB_STATUS_MODIFIED_DATA);
-
-    // With the table loaded the same request is served.
-    pbt_begin();
-    pbt_start();
-    picoboot_cmd_t good = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&good, PB_INFO_PARTITION, PBT_PART_PT_INFO);
-    PBT_CHECK_STATUS(pbt_run_cmd(&good), PB_STATUS_OK);
-    PBT_CHECK_EQ(pbt_payload_len(), 20u);
 }
 
 static void scenario_a_refusal_partway_through_an_answer_is_reported(void) {
@@ -558,42 +640,40 @@ static void scenario_a_refusal_partway_through_an_answer_is_reported(void) {
     // has to be told rather than handed the prefix that had already been
     // produced.
     //
-    // 5.4.8.16 describes the partition case outright — the bootrom holds a hash
-    // of the partition table as of the time it loaded it, and "If the hash has
-    // changed by the time this method is called, then it will return
-    // BOOTROM_ERROR_INVALID_STATE".  A table rewritten between the two calls is
-    // exactly that part.
+    // System information is the only type that reaches a routine at all, so it
+    // is the only one that can meet a refusal partway through — picobootx_impl.h
+    // has get_sys_info as "the only ROM routine either of these two reaches,
+    // and only PB_INFO_SYS reaches it."  5.4.8.17 has it return a "negative
+    // error code on error", and a part whose state moved between the two calls
+    // answers the first and refuses the second.
     const struct {
         const char *what;
-        bool        partition;
         int         rc;
         pb_status_t expected;
         const char *rom_event;
+        uint32_t    words;      // what preparing said the answer would be
     } cases[] = {
-        { "the partition table changed under it", true, ROM_INVALID_STATE,
-          PB_STATUS_INVALID_STATE, "rom_get_partition_table_info" },
-        { "the partition table went away", true, ROM_PRECONDITION_NOT_MET,
-          PB_STATUS_PRECONDITION_NOT_MET, "rom_get_partition_table_info" },
-        { "the chip stopped answering", false, ROM_INVALID_STATE,
-          PB_STATUS_INVALID_STATE, "rom_get_sys_info" },
-        { "the chip refused the read", false, ROM_NOT_PERMITTED,
-          PB_STATUS_NOT_PERMITTED, "rom_get_sys_info" },
+        { "the chip stopped answering", ROM_INVALID_STATE,
+          PB_STATUS_INVALID_STATE, "rom_get_sys_info", 4u },
+        { "the chip refused the read", ROM_NOT_PERMITTED,
+          PB_STATUS_NOT_PERMITTED, "rom_get_sys_info", 4u },
+        // 5.4.8.16 describes a part that answers once and then refuses.  The
+        // bootrom holds a hash of the partition table as of the time it loaded
+        // it, and "If the hash has changed by the time this method is called,
+        // then it will return BOOTROM_ERROR_INVALID_STATE".  Nothing asks that
+        // routine now, but a part in that state is one 5.4.8.17's routine can
+        // be in too, and it is reported the same way.
+        { "the resident copy went stale", ROM_MODIFIED_DATA,
+          PB_STATUS_MODIFIED_DATA, "rom_get_sys_info", 4u },
     };
 
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         pbt_begin();
-        if (cases[i].partition) {
-            pbt_partition_fail_after(1u, cases[i].rc);
-        } else {
-            pbt_sys_info_fail_after(1u, cases[i].rc);
-        }
+        pbt_sys_info_fail_after(1u, cases[i].rc);
         pbt_start();
 
         picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-        pbt_args_get_info(&cmd,
-                          cases[i].partition ? PB_INFO_PARTITION : PB_INFO_SYS,
-                          cases[i].partition ? PBT_PART_PT_INFO
-                                             : PBT_SYS_CHIP_INFO);
+        pbt_args_get_info(&cmd, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
 
         pb_status_t got = pbt_run_cmd(&cmd);
         if (got != cases[i].expected) {
@@ -617,9 +697,9 @@ static void scenario_a_refusal_partway_through_an_answer_is_reported(void) {
         if (prepare == NULL || prepare->a3 != (uint32_t)PB_STATUS_OK) {
             pbt_fail(__FILE__, __LINE__, "%s: the request never got past "
                      "preparing", cases[i].what);
-        } else if (prepare->a2 != 4u) {
-            pbt_fail(__FILE__, __LINE__, "%s: prepared %u words, expected 4",
-                     cases[i].what, prepare->a2);
+        } else if (prepare->a2 != cases[i].words) {
+            pbt_fail(__FILE__, __LINE__, "%s: prepared %u words, expected %u",
+                     cases[i].what, prepare->a2, cases[i].words);
         }
         if (pbt_count("op_get_info") != 1) {
             pbt_fail(__FILE__, __LINE__, "%s: %d calls to produce the answer, "
@@ -636,6 +716,45 @@ static void scenario_a_refusal_partway_through_an_answer_is_reported(void) {
         if (pbt_cur_state() != PB_STATE_STALLED) {
             pbt_fail(__FILE__, __LINE__, "%s: state %s", cases[i].what,
                      pbt_state_name(pbt_cur_state()));
+        }
+    }
+
+    // The two constant types cannot meet a refusal partway through, because
+    // they reach nothing that could refuse.  A part told to answer its first
+    // call and refuse the second serves both of them whole.
+    const struct {
+        const char    *what;
+        pb_info_type_t type;
+        uint32_t       param0;
+        uint32_t       transfer;
+    } constants[] = {
+        { "the partition question", PB_INFO_PARTITION, PBT_PART_PT_INFO, 20u },
+        { "the UF2 target question", PB_INFO_UF2_TARGET, 0u, 16u },
+    };
+
+    for (unsigned i = 0; i < sizeof(constants) / sizeof(constants[0]); i++) {
+        pbt_begin();
+        pbt_partition_fail_after(1u, ROM_INVALID_STATE);
+        pbt_start();
+
+        picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                     constants[i].transfer);
+        pbt_args_get_info(&cmd, constants[i].type, constants[i].param0);
+
+        pb_status_t got = pbt_run_cmd(&cmd);
+        if (got != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%s: %s", constants[i].what,
+                     pbt_status_name((int)got));
+            continue;
+        }
+        if (pbt_payload_len() != constants[i].transfer) {
+            pbt_fail(__FILE__, __LINE__, "%s: %u bytes for a transfer of %u",
+                     constants[i].what, pbt_payload_len(),
+                     constants[i].transfer);
+        }
+        if (pbt_count("op_get_info") != 1) {
+            pbt_fail(__FILE__, __LINE__, "%s: %d calls to produce the answer",
+                     constants[i].what, pbt_count("op_get_info"));
         }
     }
 
@@ -765,34 +884,69 @@ static void scenario_the_get_info_defaults_refuse_an_undefined_type(void) {
     memcpy(&first, buf, sizeof(first));
     PBT_CHECK_EQ(first, PBT_SYS_CPU_INFO);
 
-    // And the other served type, which the two go to a different routine for.
-    pbt_begin();
-    pbt_start();
-    words = 0u;
-    PBT_CHECK_STATUS(
-        picoboot_default_get_info_prepare(PB_INFO_PARTITION, PBT_PART_PT_INFO,
-                                          &words, NULL),
-        PB_STATUS_OK);
-    PBT_CHECK_EQ(words, 4u);
-    PBT_CHECK_EQ(pbt_count("rom_get_partition_table_info"), 1);
+    // And the two served types that go to no routine at all.  picobootx_impl.h:
+    // "PB_INFO_PARTITION and PB_INFO_UF2_TARGET are constants, so their lengths
+    // are arithmetic."
+    const struct {
+        const char    *what;
+        pb_info_type_t type;
+        uint32_t       param0;
+        uint32_t       words;
+    } constants[] = {
+        { "the partition question", PB_INFO_PARTITION, PBT_PART_PT_INFO,
+          1u + PBT_DEFAULT_PT_INFO_WORDS },
+        { "the UF2 target question", PB_INFO_UF2_TARGET, 0u,
+          PBT_DEFAULT_UF2_TARGET_WORDS },
+    };
+
+    for (unsigned i = 0; i < sizeof(constants) / sizeof(constants[0]); i++) {
+        pbt_begin();
+        pbt_start();
+
+        words = 0xA5A5A5A5u;
+        pb_status_t st = picoboot_default_get_info_prepare(
+            constants[i].type, constants[i].param0, &words, NULL);
+        if (st != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%s: %s", constants[i].what,
+                     pbt_status_name((int)st));
+            continue;
+        }
+        if (words != constants[i].words) {
+            pbt_fail(__FILE__, __LINE__, "%s prepared %u words, expected %u",
+                     constants[i].what, words, constants[i].words);
+        }
+        if (pbt_count("rom_get_sys_info") != 0 ||
+            pbt_count("rom_get_partition_table_info") != 0) {
+            pbt_fail(__FILE__, __LINE__, "%s reached the chip: get_sys_info "
+                     "%d, get_partition_table_info %d", constants[i].what,
+                     pbt_count("rom_get_sys_info"),
+                     pbt_count("rom_get_partition_table_info"));
+        }
+    }
 }
 
-// picobootx.h has get_info write "always a whole number of words", and the room
-// the library offers is always one, so through a command a part word never
-// arises.  These are published functions all the same, and an integrator
-// serving a type of its own calls them for the rest with whatever length it
-// has.  Both implementations have to make the same thing of that length.
+// picobootx_impl.h has picoboot_default_get_info produce its answer "from
+// at_word onwards, in whole words — a max_len that is not a whole number of them
+// has the remainder left alone."  The room the library offers is always a whole
+// number of words, so through a command a part word never arises.  These are
+// published functions all the same, and an integrator serving a type of its own
+// calls them for the rest with whatever length it has.  Both implementations
+// have to make the same thing of that length.
+//
+// PB_INFO_PARTITION is the type to ask it of.  picobootx.h has it "Served as a
+// constant", so the default holds the whole answer and can hand out any window
+// of it, which is what makes a length and an offset separable here.
 static void scenario_the_get_info_default_writes_whole_words(void) {
     pbt_begin();
     pbt_start();
 
     uint32_t words = 0u;
     PBT_CHECK_STATUS(
-        picoboot_default_get_info_prepare(PB_INFO_SYS, PBT_SYS_CHIP_INFO,
+        picoboot_default_get_info_prepare(PB_INFO_PARTITION, PBT_PART_PT_INFO,
                                           &words, NULL),
         PB_STATUS_OK);
-    // The flags word and CHIP_INFO's three.
-    PBT_REQUIRE(words == 4u);
+    // The flags word and PT_INFO's three.
+    PBT_REQUIRE(words == 1u + PBT_DEFAULT_PT_INFO_WORDS);
 
     // A length holding two whole words and part of a third.  Sentinels past
     // them, so a default that wrote into the part word is visible.
@@ -801,8 +955,8 @@ static void scenario_the_get_info_default_writes_whole_words(void) {
     memset(buf, 0xEEu, sizeof(buf));
 
     PBT_CHECK_STATUS(
-        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf, 11u,
-                                  &written, NULL),
+        picoboot_default_get_info(PB_INFO_PARTITION, PBT_PART_PT_INFO, 0u, buf,
+                                  11u, &written, NULL),
         PB_STATUS_OK);
     PBT_CHECK_EQ(written, 8u);
 
@@ -810,8 +964,8 @@ static void scenario_the_get_info_default_writes_whole_words(void) {
     uint32_t second = 0u;
     memcpy(&first, buf, sizeof(first));
     memcpy(&second, buf + 4, sizeof(second));
-    PBT_CHECK_EQ(first, PBT_SYS_CHIP_INFO);
-    PBT_CHECK_EQ(second, pbt_sys_info_word(PBT_SYS_CHIP_INFO) + 0u);
+    PBT_CHECK_EQ(first, PBT_PART_PT_INFO);
+    PBT_CHECK_EQ(second, PBT_DEFAULT_PT_TABLE);
 
     for (unsigned b = 8; b < sizeof(buf); b++) {
         if (buf[b] != 0xEEu) {
@@ -827,23 +981,183 @@ static void scenario_the_get_info_default_writes_whole_words(void) {
     written = 0u;
     memset(buf, 0xEEu, sizeof(buf));
     PBT_CHECK_STATUS(
-        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf, 8u,
-                                  &written, NULL),
+        picoboot_default_get_info(PB_INFO_PARTITION, PBT_PART_PT_INFO, 0u, buf,
+                                  8u, &written, NULL),
         PB_STATUS_OK);
     PBT_CHECK_EQ(written, 8u);
     memcpy(&second, buf + 4, sizeof(second));
-    PBT_CHECK_EQ(second, pbt_sys_info_word(PBT_SYS_CHIP_INFO) + 0u);
+    PBT_CHECK_EQ(second, PBT_DEFAULT_PT_TABLE);
 
     // And a length shorter than one word is no words at all rather than a part
     // of one.
     written = 0xA5A5A5A5u;
     memset(buf, 0xEEu, sizeof(buf));
     PBT_CHECK_STATUS(
-        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf, 3u,
-                                  &written, NULL),
+        picoboot_default_get_info(PB_INFO_PARTITION, PBT_PART_PT_INFO, 0u, buf,
+                                  3u, &written, NULL),
         PB_STATUS_OK);
     PBT_CHECK_EQ(written, 0u);
     PBT_CHECK_EQ(buf[0], 0xEEu);
+
+    // From a word in, it is the window at_word names that is produced — the two
+    // words after the two the first call above wrote, and not the answer from
+    // its start again.
+    written = 0xA5A5A5A5u;
+    memset(buf, 0xEEu, sizeof(buf));
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_PARTITION, PBT_PART_PT_INFO, 2u, buf,
+                                  sizeof(buf), &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, 8u);
+    memcpy(&first, buf, sizeof(first));
+    memcpy(&second, buf + 4, sizeof(second));
+    PBT_CHECK_EQ(first, PBT_DEFAULT_PT_LOCATION);
+    PBT_CHECK_EQ(second, PBT_DEFAULT_PT_FLAGS);
+
+    // Past the end of the answer there is nothing to give.
+    written = 0xA5A5A5A5u;
+    memset(buf, 0xEEu, sizeof(buf));
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_PARTITION, PBT_PART_PT_INFO, words,
+                                  buf, sizeof(buf), &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, 0u);
+    PBT_CHECK_EQ(buf[0], 0xEEu);
+}
+
+// picobootx_impl.h on the system information half: it "is written straight into
+// buf ... written whole, in one call.  The ROM routine produces the answer from
+// its start and takes no offset, so this default cannot hand out a piece of one
+// and has nothing to keep the rest in.  A max_len too short for the whole answer
+// is declined — nothing is written and zero reported."
+//
+// The library asks for the whole of it in one call, from its start, so neither
+// refusal arises through a command.  An integrator calling the default for a
+// type it does not serve itself can meet both.
+static void scenario_the_system_information_default_answers_whole(void) {
+    pbt_begin();
+    pbt_start();
+
+    uint32_t words = 0u;
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info_prepare(PB_INFO_SYS, PBT_SYS_CHIP_INFO,
+                                          &words, NULL),
+        PB_STATUS_OK);
+    // The flags word and CHIP_INFO's three.
+    PBT_REQUIRE(words == 4u);
+    const uint32_t whole = words * 4u;
+
+    // Anything short of the whole answer is declined, from nothing at all up to
+    // a single byte short of it.
+    const uint32_t shorts[] = { 0u, 3u, 4u, whole - 4u, whole - 1u };
+    for (unsigned i = 0; i < sizeof(shorts) / sizeof(shorts[0]); i++) {
+        uint32_t written = 0xA5A5A5A5u;
+        uint8_t  buf[32];
+        memset(buf, 0xEEu, sizeof(buf));
+
+        pb_status_t st = picoboot_default_get_info(
+            PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf, shorts[i], &written, NULL);
+        if (st != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%u bytes of room: %s", shorts[i],
+                     pbt_status_name((int)st));
+            continue;
+        }
+        if (written != 0u) {
+            pbt_fail(__FILE__, __LINE__, "%u bytes of room produced %u",
+                     shorts[i], written);
+        }
+        for (unsigned b = 0; b < sizeof(buf); b++) {
+            if (buf[b] != 0xEEu) {
+                pbt_fail(__FILE__, __LINE__, "%u bytes of room wrote 0x%02x at "
+                         "byte %u of a call it declined", shorts[i], buf[b], b);
+                break;
+            }
+        }
+    }
+
+    // Room for the whole answer exactly, and it is served — so what was
+    // declined above was the room and not the request.
+    uint32_t written = 0xA5A5A5A5u;
+    uint8_t  buf[32];
+    memset(buf, 0xEEu, sizeof(buf));
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf,
+                                  whole, &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, whole);
+
+    uint32_t first  = 0u;
+    uint32_t second = 0u;
+    memcpy(&first, buf, sizeof(first));
+    memcpy(&second, buf + 4, sizeof(second));
+    PBT_CHECK_EQ(first, PBT_SYS_CHIP_INFO);
+    PBT_CHECK_EQ(second, pbt_sys_info_word(PBT_SYS_CHIP_INFO));
+
+    // A window from part way in is declined however much room comes with it,
+    // because there is no piece of this answer to hand out.  Nothing is read
+    // on the way to saying so.
+    for (uint32_t at = 1u; at <= words + 1u; at++) {
+        pbt_begin();
+        pbt_start();
+
+        written = 0xA5A5A5A5u;
+        memset(buf, 0xEEu, sizeof(buf));
+
+        pb_status_t st = picoboot_default_get_info(
+            PB_INFO_SYS, PBT_SYS_CHIP_INFO, at, buf, sizeof(buf), &written,
+            NULL);
+        if (st != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "at_word %u: %s", at,
+                     pbt_status_name((int)st));
+            continue;
+        }
+        if (written != 0u) {
+            pbt_fail(__FILE__, __LINE__, "at_word %u produced %u bytes", at,
+                     written);
+        }
+        if (pbt_count("rom_get_sys_info") != 0) {
+            pbt_fail(__FILE__, __LINE__, "at_word %u asked the chip %d times",
+                     at, pbt_count("rom_get_sys_info"));
+        }
+        for (unsigned b = 0; b < sizeof(buf); b++) {
+            if (buf[b] != 0xEEu) {
+                pbt_fail(__FILE__, __LINE__, "at_word %u wrote 0x%02x at byte "
+                         "%u of a call it declined", at, buf[b], b);
+                break;
+            }
+        }
+    }
+
+    // A part that does not publish the routine has no answer to give, and says
+    // so with Table 471's NOT_FOUND: "Attempted to access something that
+    // doesn't exist; or a search failed".  Reached through a command, that is
+    // refused while preparing and the fill is never called, so the fill's own
+    // answer to it is an integrator's to meet.
+    pbt_begin();
+    pbt_bootrom_withhold('G', 'S');
+    pbt_start();
+    written = 0xA5A5A5A5u;
+    memset(buf, 0xEEu, sizeof(buf));
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf,
+                                  sizeof(buf), &written, NULL),
+        PB_STATUS_NOT_FOUND);
+    PBT_CHECK_EQ(buf[0], 0xEEu);
+
+    // The same room from the answer's start is served, so what was declined was
+    // the offset and not the call.
+    pbt_begin();
+    pbt_start();
+    written = 0xA5A5A5A5u;
+    memset(buf, 0xEEu, sizeof(buf));
+    PBT_CHECK_STATUS(
+        picoboot_default_get_info(PB_INFO_SYS, PBT_SYS_CHIP_INFO, 0u, buf,
+                                  sizeof(buf), &written, NULL),
+        PB_STATUS_OK);
+    PBT_CHECK_EQ(written, whole);
+    PBT_CHECK(pbt_count("rom_get_sys_info") >= 1);
+    memcpy(&first, buf, sizeof(first));
+    PBT_CHECK_EQ(first, PBT_SYS_CHIP_INFO);
 }
 
 // ---------------------------------------------------------------------------
@@ -928,10 +1242,10 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_the_serial_is_empty_when_the_chip_refuses },
     { "GET_INFO SYS without its bootrom routine is refused",
       scenario_get_info_without_its_bootrom_routine },
-    { "GET_INFO PARTITION without its bootrom routine is refused",
-      scenario_get_info_partition_without_its_bootrom_routine },
-    { "the UF2 target question follows the partition-table routine",
-      scenario_the_uf2_target_follows_the_partition_routine },
+    { "the constant GET_INFO types need no bootrom routine",
+      scenario_the_constant_info_types_need_no_bootrom_routine },
+    { "only system information reaches the bootrom",
+      scenario_only_system_information_reaches_the_bootrom },
     { "OTP_WRITE without its bootrom routine is refused",
       scenario_otp_write_without_its_bootrom_routine },
     { "a reboot the part no longer offers does not happen",
@@ -944,14 +1258,16 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_a_bootrom_routine_is_looked_up_by_its_two_characters },
     { "a get_sys_info refusal carries the chip's reason",
       scenario_a_sys_info_refusal_carries_the_chips_reason },
-    { "a get_partition_table_info refusal carries the chip's reason",
-      scenario_a_partition_refusal_carries_the_chips_reason },
+    { "a get_partition_table_info refusal is never asked for",
+      scenario_a_partition_refusal_is_never_asked_for },
     { "a refusal partway through an answer is reported",
       scenario_a_refusal_partway_through_an_answer_is_reported },
     { "the GET_INFO defaults refuse an info type outside the four defined",
       scenario_the_get_info_defaults_refuse_an_undefined_type },
     { "the GET_INFO default writes whole words whatever room it is given",
       scenario_the_get_info_default_writes_whole_words },
+    { "the system information default answers whole or not at all",
+      scenario_the_system_information_default_answers_whole },
     { "a read range that wraps the address space is refused",
       scenario_a_read_range_that_wraps_is_refused },
     { "a write range that wraps the address space is refused",

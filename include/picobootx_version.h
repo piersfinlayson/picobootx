@@ -13,10 +13,10 @@
 #define PICOBOOTX_VERSION_H
 
 #define PICOBOOTX_VERSION_MAJOR 0
-#define PICOBOOTX_VERSION_MINOR 3
+#define PICOBOOTX_VERSION_MINOR 4
 #define PICOBOOTX_VERSION_PATCH 0
 
-#define PICOBOOTX_VERSION_STRING "0.3.0"
+#define PICOBOOTX_VERSION_STRING "0.4.0"
 
 // Encodes a version as a single comparable integer, so an integrator can write
 // #if PICOBOOTX_VERSION >= PICOBOOTX_VERSION_ENCODE(0, 2, 0)

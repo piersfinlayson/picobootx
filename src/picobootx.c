@@ -930,12 +930,15 @@ static void pb_task_idle(pb_state_block_t *s) {
 // runs out of space.  Shared by built-in and custom data-in commands.
 //
 // The host is sent dTransferLength bytes and no more (RP2350 datasheet 5.6.4),
-// and that is held here rather than in each fill: the room offered is never
+// and that is held here rather than in each fill.  The room offered is never
 // more than the transfer has left, so no fill can put a further byte on the
 // pipe — an integrator's own fill included, which is the one the library cannot
 // reach into.
 static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
-    uint8_t buf[64];
+    // Word aligned, which is part of what a fill is promised.  A fill whose
+    // producer writes words — the RP2350 ROM information routines do — can then
+    // write them straight into this rather than into a buffer of its own.
+    _Alignas(uint32_t) uint8_t buf[PB_DATA_IN_BUF_SIZE];
 
     while (true) {
         uint32_t space = picoboot_vendor_write_available();

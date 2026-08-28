@@ -59,8 +59,8 @@ _Static_assert(CFG_TUD_ENDPOINT0_SIZE == 64, "The picoboot protocol requires bMa
 #define PICOBOOT_GET_INFO_MAX_LEN 256u
 
 // The most words a GET_INFO answer can be: the longest transfer, less the count
-// word the library puts in front of the answer.  Scratch this size serves every
-// request the library accepts.
+// word the library puts in front of the answer.  An answer longer than this
+// halts the command with PB_STATUS_UNKNOWN_ERROR.
 #define PICOBOOT_INFO_MAX_ANSWER_WORDS \
     ((PICOBOOT_GET_INFO_MAX_LEN / 4u) - 1u)
 
@@ -96,15 +96,20 @@ _Static_assert(CFG_TUD_ENDPOINT0_SIZE == 64, "The picoboot protocol requires bMa
 //   PB_INFO_SYS         Served.  picoboot_default_get_info passes get_sys_info
 //                       through, so the flags this part cannot answer are
 //                       dropped by the ROM and the rest are still served.
-//   PB_INFO_PARTITION   Served, the same way, through
-//                       get_partition_table_info.
+//   PB_INFO_PARTITION   Served as a constant — no partitions, no partition
+//                       table loaded, and all of flash unpartitioned and
+//                       readable and writable by everyone, which is what every
+//                       RP2350 without a partition table looks like.
+//                       picobootx does not read a partition table, and a
+//                       device that has one answers this type itself.
 //   PB_INFO_UF2_TARGET  Served, as nowhere.  A UF2 reaches a device by being
 //                       dragged onto a mass storage drive, and picobootx has
 //                       none and is told of none, so it has nowhere to name.
-//                       The answer is a target of -1 with the unpartitioned
-//                       space beside it, which get_partition_table_info
-//                       reports.  A device that does present such a drive
-//                       answers this itself.
+//                       The answer is three words — a target of -1, then the
+//                       two PB_INFO_PARTITION gives for the unpartitioned
+//                       space, so the same region reads the same way whichever
+//                       question a host asks.  A device that does present such
+//                       a drive answers this itself.
 //   PB_INFO_UF2_STATUS  Not served — refused with PB_STATUS_INVALID_ARG.  It
 //                       reports a UF2 download in progress over the USB drive
 //                       the bootrom presents in BOOTSEL mode, and picobootx has
@@ -277,10 +282,24 @@ typedef struct {
     // count that is not a whole number of words, halts the command with
     // PB_STATUS_UNKNOWN_ERROR and none of those bytes reaches the host.
     //
+    // buf is word aligned, so a producer that writes words can write them
+    // straight into it rather than into a buffer of its own.  The RP2350 ROM
+    // information routines write words, and the defaults do exactly that.
+    //
     // A decline has to be one a later call can satisfy.  The largest buffer
     // this ever hands over is 64 bytes, so a fill declining that much is asking
     // for room that does not exist, and the command is stalled with
-    // PB_STATUS_BUFFER_TOO_SMALL rather than called again.
+    // PB_STATUS_BUFFER_TOO_SMALL rather than called again.  The buffer is also
+    // no larger than the transmit FIFO has room for, so a callback that can
+    // only answer whole needs a FIFO that holds a whole answer.
+    //
+    // ctx is the pointer given to picoboot_init, handed back untouched on every
+    // call.  A callback that wants to produce its answer once and hand out the
+    // window at_word names keeps it there — the library keeps no cursor and no
+    // buffer on the callback's behalf, and this is the whole of what a callback
+    // needs to serve an answer in pieces.  The defaults in picobootx_impl.h have
+    // no context of their own, which is why they answer system information
+    // whole.
     //
     // The library halts the command on a non-PB_STATUS_OK return from either,
     // with that status, and the host reads it back with GET_COMMAND_STATUS.

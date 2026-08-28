@@ -69,6 +69,9 @@ impl Wire {
 }
 
 impl Transport for Wire {
+    // Every Wire is built at this size, so the constant and the field agree.
+    const TX_CAPACITY: usize = PUMP_BUF;
+
     fn rx_available(&self) -> u32 {
         self.rx.len() as u32
     }

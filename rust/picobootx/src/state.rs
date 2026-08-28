@@ -89,6 +89,17 @@ const CMD_READ: u8 = 0x84;
 const CMD_GET_INFO: u8 = 0x8b;
 const CMD_OTP_READ: u8 = 0x8c;
 
+// How much of a device to host answer the protocol can hold at once, and so the
+// most room it can offer a fill however large the transmit FIFO is.
+const DATA_IN_LEN: usize = 64;
+
+// The buffer a device to host fill is handed, word aligned because that is part
+// of what a fill is promised.  A fill whose producer writes words — the RP2350
+// ROM information routines do — can then write them straight into this rather
+// than into a buffer of its own.
+#[repr(align(4))]
+struct DataInBuf([u8; DATA_IN_LEN]);
+
 // How a command's declared transfer length is checked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TLen {
@@ -294,6 +305,36 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     /// Move the protocol along.  Call from the loop that also turns the USB
     /// stack.
     pub fn poll<T: Transport>(&mut self, t: &mut T) {
+        // Some answers are produced whole rather than a piece at a time.  A
+        // device that produces one has to be handed a buffer big enough for
+        // all of it, or it can never produce anything at all.
+        //
+        // Two things limit how big that buffer gets — the transmit FIFO the
+        // transport owns, and this library's own 64 bytes — so both are
+        // checked against what the device says it needs.
+        //
+        // Here, because poll is the first place a device's operations and its
+        // transport are both known, and no working device can avoid poll.
+        //
+        // Without the check such a device builds and then hangs.  It declines
+        // every call, nothing reaches the wire, and the host waits for a reply
+        // that never comes.
+        const {
+            assert!(
+                O::MIN_TX_CAPACITY <= T::TX_CAPACITY,
+                "this Transport's TX_CAPACITY is smaller than this Ops's \
+                 MIN_TX_CAPACITY, so an answer it produces whole could never \
+                 be offered enough room"
+            );
+            // The pump's own buffer caps the room too, so an Ops needing more
+            // than it holds could pass the comparison above and still never be
+            // offered enough.
+            assert!(
+                O::MIN_TX_CAPACITY <= DATA_IN_LEN,
+                "this Ops's MIN_TX_CAPACITY is larger than the 64 bytes the \
+                 protocol ever offers a fill in one call"
+            );
+        }
         match self.state {
             State::Idle => self.task_idle(t),
             State::DataIn | State::CustomIn => self.task_data_in(t),
@@ -554,12 +595,13 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     // completes or the endpoint runs out of room.
     //
     // The host is sent the length it declared and no more (RP2350 datasheet
-    // 5.6.4), and that is held here rather than in each fill: the room offered
+    // 5.6.4), and that is held here rather than in each fill.  The room offered
     // is never more than the transfer has left, so no fill can put a further
     // byte on the pipe — an integrator's own fill included, which is the one
     // the library cannot reach into.
     fn task_data_in<T: Transport>(&mut self, t: &mut T) {
-        let mut buf = [0u8; 64];
+        let mut aligned = DataInBuf([0u8; DATA_IN_LEN]);
+        let buf = &mut aligned.0;
         loop {
             let space = t.tx_available();
             if space == 0 {

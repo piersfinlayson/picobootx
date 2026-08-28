@@ -38,6 +38,12 @@ extern void picoboot_error(const char *msg, ...);
 #endif // ERR
 #endif // PICOBOOT_LOGGING
 
+// How much of a device to host answer the pump can hold at once, and so the most
+// room it can offer a fill however large the transmit FIFO is.  This is
+// internal to the library.  An integrator's fill is told the room it is given,
+// on every call.
+#define PB_DATA_IN_BUF_SIZE 64u
+
 // ---------------------------------------------------------------------------
 // Command IDs — internal to the library
 // ---------------------------------------------------------------------------

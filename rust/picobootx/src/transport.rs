@@ -20,6 +20,21 @@ pub enum Direction {
 /// is written until the endpoint has no more room, and an acknowledgement has
 /// to be queued behind whatever is already there.
 pub trait Transport {
+    /// How many bytes the transmit FIFO holds when it is empty — the most
+    /// `tx_available` can ever report.
+    ///
+    /// The protocol offers a data-in fill no more room than this, so a fill
+    /// that can only answer whole needs a transmit FIFO that holds a whole
+    /// answer.  `Picoboot::poll` compares this against `Ops::MIN_TX_CAPACITY`
+    /// and fails the build where it falls short, rather than leaving a device
+    /// to make no progress on the request.
+    ///
+    /// This has no default on purpose.  Every transport has a buffer, and a
+    /// default would be the library claiming a size it has no way of knowing —
+    /// wrongly passing the check for the implementor whose buffer is too small,
+    /// which is the one the check exists for.
+    const TX_CAPACITY: usize;
+
     /// How many bytes the receive FIFO is holding.
     fn rx_available(&self) -> u32;
 

@@ -6,7 +6,7 @@
 
 [package]
 name = "picobootx-rp2350"
-version = "0.2.0"
+version = "0.3.0"
 description = "Default RP2350 implementations of the picobootx device operations"
 keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
 categories = ["embedded", "no-std"]

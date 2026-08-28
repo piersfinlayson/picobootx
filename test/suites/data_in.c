@@ -1396,15 +1396,187 @@ static void scenario_a_get_info_callback_that_refuses_carries_its_status(void) {
 }
 
 // ---------------------------------------------------------------------------
+// An integrator serving its answer out of its own context
+//
+// picobootx.h: "ctx is the pointer given to picoboot_init, handed back
+// untouched on every call.  A callback that wants to produce its answer once
+// and hand out the window at_word names keeps it there — the library keeps no
+// cursor and no buffer on the callback's behalf, and this is the whole of what
+// a callback needs to serve an answer in pieces."
+//
+// It is also the way out for a device whose transmit queue cannot hold a whole
+// answer, since "The defaults in picobootx_impl.h have no context of their own,
+// which is why they answer system information whole."  So this is a device the
+// defaults could not be, and nothing else in either suite is one.
+// ---------------------------------------------------------------------------
+
+#define HELD_WORDS 6u
+
+typedef struct {
+    uint32_t answer[HELD_WORDS];
+    bool     produced;
+    uint32_t built;
+} held_answer_t;
+
+static held_answer_t s_held;
+
+// Calls whose ctx was not the pointer picoboot_init was given.
+static unsigned s_held_wrong_ctx;
+
+// Distinct per word, so a window handed out at the wrong offset shows up as the
+// wrong values rather than only as the wrong length.
+static uint32_t held_word(uint32_t index) { return 0x48000000u | index; }
+
+static pb_status_t op_held_prepare(pb_info_type_t type, uint32_t param0,
+                                   uint32_t *words, void *ctx) {
+    if (ctx != &s_held) {
+        s_held_wrong_ctx++;
+    }
+    *words = HELD_WORDS;
+    pbt_log("op_get_info_prepare", type, param0, *words, PB_STATUS_OK);
+    return PB_STATUS_OK;
+}
+
+static pb_status_t op_held_get_info(pb_info_type_t type, uint32_t param0,
+                                    uint32_t at_word, uint8_t *buf,
+                                    uint32_t max_len, uint32_t *bytes_written,
+                                    void *ctx) {
+    pbt_log("op_get_info", type, param0, at_word, max_len);
+
+    held_answer_t *held = (held_answer_t *)ctx;
+    if (held != &s_held) {
+        // Without the context there is nowhere to keep the answer, so there is
+        // no answer to give.
+        s_held_wrong_ctx++;
+        *bytes_written = 0u;
+        return PB_STATUS_UNKNOWN_ERROR;
+    }
+
+    if (!held->produced) {
+        for (uint32_t w = 0; w < HELD_WORDS; w++) {
+            held->answer[w] = held_word(w);
+        }
+        held->produced = true;
+        held->built++;
+    }
+
+    uint32_t left  = (at_word < HELD_WORDS) ? HELD_WORDS - at_word : 0u;
+    uint32_t words = max_len / 4u;
+    if (words > left) {
+        words = left;
+    }
+    memcpy(buf, &held->answer[at_word], words * 4u);
+    *bytes_written = words * 4u;
+    return PB_STATUS_OK;
+}
+
+// Put that device in front of the library.  The answer's storage is cleared
+// each time, so a scenario cannot be served by what a previous one built.
+static void held_device(void) {
+    memset(&s_held, 0, sizeof(s_held));
+    s_held_wrong_ctx         = 0u;
+    pbt_ctx                  = &s_held;
+    pbt_ops.get_info_prepare = op_held_prepare;
+    pbt_ops.get_info         = op_held_get_info;
+}
+
+static void scenario_get_info_served_from_the_callbacks_own_context(void) {
+    pbt_begin();
+    held_device();
+
+    // Twelve bytes of transmit queue against a twenty-eight byte reply.  The
+    // count word takes four of the first twelve, so no call can be offered the
+    // whole answer and the callback has to hand out windows.
+    pbt_wire_tx_fifo(12u);
+    pbt_start();
+
+    const uint32_t transfer = (1u + HELD_WORDS) * 4u;
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, transfer);
+    pbt_args_get_info(&cmd, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == transfer);
+
+    // The whole answer, in order.
+    PBT_CHECK_EQ(payload_word(0), HELD_WORDS);
+    for (uint32_t w = 0; w < HELD_WORDS; w++) {
+        PBT_CHECK_EQ(payload_word(1u + w), held_word(w));
+    }
+
+    // It took more than one call, and the answer was produced once — the
+    // library kept no copy of it between them, and the callback did.
+    PBT_CHECK(pbt_count("op_get_info") > 1);
+    PBT_CHECK_EQ(s_held.built, 1u);
+    PBT_CHECK_EQ(s_held_wrong_ctx, 0u);
+
+    // Every call named the same request, and at_word started at zero and
+    // advanced by exactly what the call before it wrote — picobootx.h: "type
+    // and param0 are handed back every time, so the callback needs to keep
+    // nothing between calls."
+    uint32_t expect_at = 0u;
+    for (int n = 0; n < pbt_count("op_get_info"); n++) {
+        const pbt_event_t *call = pbt_nth("op_get_info", n);
+        PBT_REQUIRE(call != NULL);
+        if (call->a0 != (uint32_t)PB_INFO_SYS ||
+            call->a1 != PBT_SYS_CHIP_INFO) {
+            pbt_fail(__FILE__, __LINE__, "call %d asked for type %u param0 "
+                     "0x%08x, expected type %u param0 0x%08x", n, call->a0,
+                     call->a1, (unsigned)PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+        }
+        if (call->a2 != expect_at) {
+            pbt_fail(__FILE__, __LINE__, "call %d was handed at_word %u, "
+                     "expected %u", n, call->a2, expect_at);
+            break;
+        }
+        uint32_t left  = HELD_WORDS - expect_at;
+        uint32_t words = call->a3 / 4u;
+        if (words > left) {
+            words = left;
+        }
+        expect_at += words;
+    }
+    PBT_CHECK_EQ(expect_at, HELD_WORDS);
+
+    // A queue with room for the whole reply takes it in one call and one
+    // packet, so the windowing above was the queue's doing and not the
+    // callback's.
+    pbt_begin();
+    held_device();
+    pbt_start();
+    picoboot_cmd_t roomy = pbt_cmd(PB_CMD_GET_INFO, 0x10u, transfer);
+    pbt_args_get_info(&roomy, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&roomy), PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_count("op_get_info"), 1);
+    PBT_CHECK_EQ(pbt_packet_count(), 1u);
+    PBT_CHECK_EQ(payload_word(HELD_WORDS), held_word(HELD_WORDS - 1u));
+
+    // The context is the library's to hand back rather than something the
+    // callback finds for itself.  Initialised with none, the same callback is
+    // given none on every call and has nowhere to keep an answer.
+    pbt_begin();
+    held_device();
+    pbt_ctx = NULL;
+    pbt_start();
+    picoboot_cmd_t adrift = pbt_cmd(PB_CMD_GET_INFO, 0x10u, transfer);
+    pbt_args_get_info(&adrift, PB_INFO_SYS, PBT_SYS_CHIP_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&adrift), PB_STATUS_UNKNOWN_ERROR);
+    PBT_CHECK_EQ(s_held_wrong_ctx, 2);
+    PBT_CHECK_EQ(s_held.built, 0u);
+    PBT_CHECK_EQ(pbt_packet_count(), 0u);
+}
+
+// ---------------------------------------------------------------------------
 // PARTITION
 // ---------------------------------------------------------------------------
 
 static void scenario_get_info_partition_sends_a_count_flags_then_the_data(void) {
-    // The words a part with no partition table answers with.  PT_INFO's first
-    // word carries the partition count in its low eight bits and whether a
-    // table is present in bit 8, so an empty table is zero, and the two words
-    // after it are unpartitioned space's, which 5.4.8.16's note fixes at a base
-    // of 0 and a size of 0x2000 sectors.
+    // The words the default answers with.  PT_INFO's first word carries the
+    // partition count in its low eight bits and whether a table is present in
+    // bit 8, and picobootx.h has this type "Served as a constant — no
+    // partitions, no partition table loaded", so that word is zero.  The two
+    // words behind it are unpartitioned space's, in the form 5.9.4.2 gives —
+    // see PBT_DEFAULT_PT_LOCATION and PBT_DEFAULT_PT_FLAGS in pbt.h for how
+    // each bit of them is arrived at.
     const struct {
         const char *what;
         uint32_t    param0;
@@ -1417,20 +1589,22 @@ static void scenario_get_info_partition_sends_a_count_flags_then_the_data(void) 
         { "PT_INFO, LOCATION_AND_FLAGS and PARTITION_ID",
           PBT_PART_PT_INFO | PBT_PART_LOC_FLAGS | PBT_PART_ID, 64u,
           4u, 0x0031u,
-          { 0u, PBT_PT_UNPARTITIONED_LOCATION, PBT_PT_UNPARTITIONED_FLAGS },
-          3u },
+          { PBT_DEFAULT_PT_TABLE, PBT_DEFAULT_PT_LOCATION,
+            PBT_DEFAULT_PT_FLAGS },
+          PBT_DEFAULT_PT_INFO_WORDS },
 
         // PT_INFO alone answers the same three words, so the two per-partition
         // flags above contributed none of them.
         { "PT_INFO alone", PBT_PART_PT_INFO, 32u,
           4u, PBT_PART_PT_INFO,
-          { 0u, PBT_PT_UNPARTITIONED_LOCATION, PBT_PT_UNPARTITIONED_FLAGS },
-          3u },
+          { PBT_DEFAULT_PT_TABLE, PBT_DEFAULT_PT_LOCATION,
+            PBT_DEFAULT_PT_FLAGS },
+          PBT_DEFAULT_PT_INFO_WORDS },
 
-        // A per-partition flag on its own against a table with no partitions.
-        // The flag is supported, so it is in the flags word, and there is no
-        // partition for it to speak about, so it brings no data — the flags
-        // word is the whole of the answer.
+        // A per-partition flag on its own, with no partitions to speak about.
+        // 5.4.8.16 has the reply name "the (sub)set of those flags that the API
+        // supports", and this is one of them, so it is named — and it brings no
+        // data, which leaves the flags word the whole of the answer.
         { "LOCATION_AND_FLAGS alone", PBT_PART_LOC_FLAGS, 32u,
           1u, PBT_PART_LOC_FLAGS, { 0u, 0u, 0u }, 0u },
 
@@ -1496,15 +1670,23 @@ static void scenario_get_info_partition_sends_a_count_flags_then_the_data(void) 
             pbt_fail(__FILE__, __LINE__, "%s: %d prepare calls", cases[i].what,
                      pbt_count("op_get_info_prepare"));
         }
+
+        // And it was answered without asking the part.  picobootx.h: "picobootx
+        // does not read a partition table".
+        if (pbt_count("rom_get_partition_table_info") != 0) {
+            pbt_fail(__FILE__, __LINE__, "%s: the part was asked %d times",
+                     cases[i].what,
+                     pbt_count("rom_get_partition_table_info"));
+        }
     }
 }
 
-static void scenario_get_info_partition_answers_each_partition_in_turn(void) {
+static void scenario_get_info_partition_ignores_the_parts_table(void) {
     // 5.4.8.16: "With the exception of PT_INFO, all the flags select 'per
     // partition' information, so each field is returned in flag order for one
-    // partition after the next."  So the partitions are the outer run and the
-    // flags the inner one, and a device that grouped by flag instead puts a
-    // different value at every position but the first.
+    // partition after the next."  The default has no partitions to run over
+    // however many the part beneath it holds — picobootx.h: it "does not read a
+    // partition table, and a device that has one answers this type itself."
     pbt_begin();
     pbt_set_partitions(3u);
     pbt_start();
@@ -1512,129 +1694,191 @@ static void scenario_get_info_partition_answers_each_partition_in_turn(void) {
     const uint32_t param0 = PBT_PART_PT_INFO | PBT_PART_LOC_FLAGS |
                             PBT_PART_ID;
 
-    // Three words for PT_INFO, then four per partition.
-    const uint32_t data_words = 3u + (3u * 4u);
-    const uint32_t transfer   = (SYS_FIRST_DATA_WORD + data_words) * 4u;
-
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, transfer);
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 32u);
     pbt_args_get_info(&cmd, PB_INFO_PARTITION, param0);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == transfer);
+    PBT_REQUIRE(pbt_payload_len() == 32u);
 
-    PBT_CHECK_EQ(payload_word(0), 1u + data_words);
+    // The flags word and PT_INFO's three.  Three partitions answering the two
+    // per-partition flags would have added twelve more.
+    PBT_CHECK_EQ(payload_word(0), 1u + PBT_DEFAULT_PT_INFO_WORDS);
     PBT_CHECK_EQ(payload_word(1), param0);
+    PBT_CHECK_EQ(payload_word(2), PBT_DEFAULT_PT_TABLE);
+    PBT_CHECK_EQ(payload_word(3), PBT_DEFAULT_PT_LOCATION);
+    PBT_CHECK_EQ(payload_word(4), PBT_DEFAULT_PT_FLAGS);
 
-    // PT_INFO now reports three partitions and a table present.
-    PBT_CHECK_EQ(payload_word(2), 3u | 0x100u);
-    PBT_CHECK_EQ(payload_word(3), PBT_PT_UNPARTITIONED_LOCATION);
-    PBT_CHECK_EQ(payload_word(4), PBT_PT_UNPARTITIONED_FLAGS);
+    // The rest is the padding rule's, and it is there rather than the transfer
+    // having stopped short.  A partition's first location word would be here.
+    for (uint32_t w = 5u; w < 8u; w++) {
+        PBT_CHECK(payload_has_word(w));
+        PBT_CHECK_EQ(payload_word(w), 0u);
+    }
 
-    uint32_t at = 5u;
-    for (unsigned p = 0; p < 3u; p++) {
-        for (uint32_t w = 0; w < 2u; w++) {
-            uint32_t expected = pbt_partition_word(p, PBT_PART_LOC_FLAGS) + w;
-            if (payload_word(at) != expected) {
-                pbt_fail(__FILE__, __LINE__, "word %u: expected partition %u "
-                         "location word %u (0x%08x), got 0x%08x", at, p, w,
-                         expected, payload_word(at));
-            }
-            at++;
+    // Nothing was asked of the part, which is what says the answer is the
+    // default's own and not a table that happened to be empty.  The routine is
+    // published and answering on this part — the library does not look it up.
+    PBT_CHECK_EQ(pbt_count("rom_get_partition_table_info"), 0);
+    PBT_CHECK(picoboot_lookup_boot_fn('G', 'P') != NULL);
+
+    // Keep those bytes, to hold other parts' answers against.
+    uint8_t  first[32];
+    uint32_t first_len = pbt_payload_len();
+    PBT_REQUIRE(first_len == sizeof(first));
+    memcpy(first, pbt_payload(), first_len);
+
+    // Parts holding a different table answer the same request identically,
+    // byte for byte.  5.4.8.16 numbers partitions 0-15, so sixteen is a full
+    // table, and a device reading one could not answer all three the same way.
+    const unsigned tables[] = { 0u, 1u, 16u };
+    for (unsigned i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
+        pbt_begin();
+        pbt_set_partitions(tables[i]);
+        pbt_start();
+
+        picoboot_cmd_t other = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 32u);
+        pbt_args_get_info(&other, PB_INFO_PARTITION, param0);
+
+        pb_status_t got = pbt_run_cmd(&other);
+        if (got != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%u partitions: %s", tables[i],
+                     pbt_status_name((int)got));
+            continue;
         }
-        for (uint32_t w = 0; w < 2u; w++) {
-            uint32_t expected = pbt_partition_word(p, PBT_PART_ID) + w;
-            if (payload_word(at) != expected) {
-                pbt_fail(__FILE__, __LINE__, "word %u: expected partition %u "
-                         "id word %u (0x%08x), got 0x%08x", at, p, w, expected,
-                         payload_word(at));
-            }
-            at++;
+        if (pbt_partition_count() != tables[i]) {
+            pbt_fail(__FILE__, __LINE__, "the part was set up with %u "
+                     "partitions and holds %u", tables[i],
+                     pbt_partition_count());
+        }
+        if (pbt_payload_len() != first_len ||
+            memcmp(first, pbt_payload(), first_len) != 0) {
+            pbt_fail(__FILE__, __LINE__, "%u partitions answered differently "
+                     "from three: count %u against %u", tables[i],
+                     payload_word(0), 1u + PBT_DEFAULT_PT_INFO_WORDS);
+        }
+        if (pbt_count("rom_get_partition_table_info") != 0) {
+            pbt_fail(__FILE__, __LINE__, "%u partitions: the part was asked %d "
+                     "times", tables[i],
+                     pbt_count("rom_get_partition_table_info"));
         }
     }
-    PBT_CHECK_EQ(at * 4u, transfer);
+
+    // The request is what moves the answer, so those identical replies are the
+    // table having no say and not the type answering one fixed thing.  Without
+    // PT_INFO the flags word is the whole of it.
+    pbt_begin();
+    pbt_set_partitions(3u);
+    pbt_start();
+    picoboot_cmd_t narrower = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 8u);
+    pbt_args_get_info(&narrower, PB_INFO_PARTITION,
+                      PBT_PART_LOC_FLAGS | PBT_PART_ID);
+    PBT_CHECK_STATUS(pbt_run_cmd(&narrower), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == 8u);
+    PBT_CHECK_EQ(payload_word(0), 1u);
+    PBT_CHECK_EQ(payload_word(1), PBT_PART_LOC_FLAGS | PBT_PART_ID);
 
     // 5.4.8.16: "The special SINGLE_PARTITION flag indicates that data for only
     // a single partition is required ... the partition number is stored in the
-    // top 8 bits of flags_and_partition."  So the same request narrowed to
-    // partition 1 answers that partition's four words and nobody else's.
+    // top 8 bits of flags_and_partition."  The flag is one the API supports, so
+    // the reply names it back.  The partition number is not a flag, and is not
+    // named back.
     pbt_begin();
     pbt_set_partitions(3u);
     pbt_start();
 
-    const uint32_t single = PBT_PART_LOC_FLAGS | PBT_PART_ID |
-                            PBT_PART_SINGLE | (1u << 24);
-    picoboot_cmd_t one = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 24u);
-    pbt_args_get_info(&one, PB_INFO_PARTITION, single);
+    const uint32_t single = PBT_PART_LOC_FLAGS | PBT_PART_ID | PBT_PART_SINGLE;
+    picoboot_cmd_t one = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 16u);
+    pbt_args_get_info(&one, PB_INFO_PARTITION, 0x03000000u | single);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&one), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == 24u);
-    PBT_CHECK_EQ(payload_word(0), 5u);
-    PBT_CHECK_EQ(payload_word(1),
-                 PBT_PART_LOC_FLAGS | PBT_PART_ID | PBT_PART_SINGLE);
-    PBT_CHECK_EQ(payload_word(2), pbt_partition_word(1u, PBT_PART_LOC_FLAGS));
-    PBT_CHECK_EQ(payload_word(3),
-                 pbt_partition_word(1u, PBT_PART_LOC_FLAGS) + 1u);
-    PBT_CHECK_EQ(payload_word(4), pbt_partition_word(1u, PBT_PART_ID));
-    PBT_CHECK_EQ(payload_word(5), pbt_partition_word(1u, PBT_PART_ID) + 1u);
+    PBT_REQUIRE(pbt_payload_len() == 16u);
+
+    // The flags word is the whole of the answer.  Partition 3 does not exist
+    // to this type, so neither per-partition flag brings a word.
+    PBT_CHECK_EQ(payload_word(0), 1u);
+    PBT_CHECK_EQ(payload_word(1), single);
+    PBT_CHECK_EQ(pbt_count("rom_get_partition_table_info"), 0);
+
+    // SINGLE_PARTITION on its own is named back too, so what puts it in the
+    // flags word is the flag itself and not a per-partition flag beside it.
+    pbt_begin();
+    pbt_start();
+    picoboot_cmd_t alone = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 8u);
+    pbt_args_get_info(&alone, PB_INFO_PARTITION, PBT_PART_SINGLE);
+    PBT_CHECK_STATUS(pbt_run_cmd(&alone), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == 8u);
+    PBT_CHECK_EQ(payload_word(0), 1u);
+    PBT_CHECK_EQ(payload_word(1), PBT_PART_SINGLE);
+    PBT_CHECK(!payload_has_word(2u));
 }
 
 static void scenario_get_info_partition_drops_a_flag_it_does_not_answer(void) {
     // The same rule as INFO_SYS's flags word, on the routine 5.4.8.16
     // describes: "the first word in the returned buffer, is the (sub)set of
     // those flags that the API supports".  0x0200 is outside the flags that
-    // section defines, so no part answers it.
+    // section defines, so nothing supports it.
+    //
+    // Eight bytes is the count and the flags word exactly, so a dropped flag's
+    // data cannot hide behind the padding rule.
     pbt_begin();
-    pbt_set_partitions(1u);
     pbt_start();
 
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&cmd, PB_INFO_PARTITION,
-                      PBT_PART_LOC_FLAGS | 0x0200u);
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 8u);
+    pbt_args_get_info(&cmd, PB_INFO_PARTITION, PBT_PART_LOC_FLAGS | 0x0200u);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == 20u);
-    PBT_CHECK_EQ(payload_word(0), 3u);
+    PBT_REQUIRE(pbt_payload_len() == 8u);
+    PBT_CHECK_EQ(payload_word(0), 1u);
     PBT_CHECK_EQ(payload_word(1), PBT_PART_LOC_FLAGS);
-    PBT_CHECK_EQ(payload_word(2), pbt_partition_word(0u, PBT_PART_LOC_FLAGS));
-    PBT_CHECK_EQ(payload_word(3),
-                 pbt_partition_word(0u, PBT_PART_LOC_FLAGS) + 1u);
-    PBT_CHECK(payload_has_word(4u));
-    PBT_CHECK_EQ(payload_word(4), 0u);
+    PBT_CHECK(!payload_has_word(2u));
 
-    // A flag the part does answer, in place of the one it does not, brings its
-    // data with it — so what kept 0x0200 out was the part not answering it.
+    // A flag 5.4.8.16 does define, in place of the one it does not, is named
+    // back — so what kept 0x0200 out was the flag being undefined and not the
+    // reply naming one flag at a time.
     pbt_begin();
-    pbt_set_partitions(1u);
     pbt_start();
-    picoboot_cmd_t both = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 28u);
-    pbt_args_get_info(&both, PB_INFO_PARTITION,
+    picoboot_cmd_t defined = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 8u);
+    pbt_args_get_info(&defined, PB_INFO_PARTITION,
                       PBT_PART_LOC_FLAGS | PBT_PART_ID);
-    PBT_CHECK_STATUS(pbt_run_cmd(&both), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == 28u);
-    PBT_CHECK_EQ(payload_word(0), 5u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&defined), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == 8u);
+    PBT_CHECK_EQ(payload_word(0), 1u);
     PBT_CHECK_EQ(payload_word(1), PBT_PART_LOC_FLAGS | PBT_PART_ID);
-    PBT_CHECK_EQ(payload_word(4), pbt_partition_word(0u, PBT_PART_ID));
 
-    // And a flag this particular part does not answer, which a part with a
-    // newer routine would.  It is the same request as the one just served, with
-    // only what the part supports changed, so PARTITION_ID's two words go and
-    // nothing else moves.
+    // Every flag 5.4.8.16 names is named back at once, PARTITION_FAMILY_IDS and
+    // PARTITION_NAME included.  Those two are per-partition fields, so with no
+    // partitions they bring no words, and PT_INFO's three are the whole of the
+    // data.
     pbt_begin();
-    pbt_set_partitions(1u);
-    pbt_set_partition_supported(PBT_PART_PT_INFO | PBT_PART_LOC_FLAGS);
     pbt_start();
-    picoboot_cmd_t withheld = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 28u);
-    pbt_args_get_info(&withheld, PB_INFO_PARTITION,
-                      PBT_PART_LOC_FLAGS | PBT_PART_ID);
-    PBT_CHECK_STATUS(pbt_run_cmd(&withheld), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == 28u);
-    PBT_CHECK_EQ(payload_word(0), 3u);
-    PBT_CHECK_EQ(payload_word(1), PBT_PART_LOC_FLAGS);
-    PBT_CHECK_EQ(payload_word(2), pbt_partition_word(0u, PBT_PART_LOC_FLAGS));
-    PBT_CHECK_EQ(payload_word(3),
-                 pbt_partition_word(0u, PBT_PART_LOC_FLAGS) + 1u);
-    PBT_CHECK(payload_has_word(4u));
-    PBT_CHECK_EQ(payload_word(4), 0u);
+    const uint32_t transfer = (2u + PBT_DEFAULT_PT_INFO_WORDS) * 4u;
+    picoboot_cmd_t all = pbt_cmd(PB_CMD_GET_INFO, 0x10u, transfer);
+    pbt_args_get_info(&all, PB_INFO_PARTITION, PBT_PART_ALL);
+    PBT_CHECK_STATUS(pbt_run_cmd(&all), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == transfer);
+    PBT_CHECK_EQ(payload_word(0), 1u + PBT_DEFAULT_PT_INFO_WORDS);
+    PBT_CHECK_EQ(payload_word(1), PBT_PART_ALL);
+    PBT_CHECK_EQ(payload_word(2), PBT_DEFAULT_PT_TABLE);
+    PBT_CHECK_EQ(payload_word(3), PBT_DEFAULT_PT_LOCATION);
+    PBT_CHECK_EQ(payload_word(4), PBT_DEFAULT_PT_FLAGS);
+
+    // And the same request with every bit 5.4.8.16 leaves undefined set beside
+    // them answers identically, byte for byte.  A reply that named one of them
+    // would differ in the flags word, and one that found data behind one would
+    // differ in the count.
+    uint8_t  named[(2u + PBT_DEFAULT_PT_INFO_WORDS) * 4u];
+    uint32_t named_len = pbt_payload_len();
+    PBT_REQUIRE(named_len == sizeof(named));
+    memcpy(named, pbt_payload(), named_len);
+
+    pbt_begin();
+    pbt_start();
+    picoboot_cmd_t undefined = pbt_cmd(PB_CMD_GET_INFO, 0x10u, transfer);
+    pbt_args_get_info(&undefined, PB_INFO_PARTITION,
+                      PBT_PART_ALL | ~PBT_PART_DEFINED_BITS);
+    PBT_CHECK_STATUS(pbt_run_cmd(&undefined), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == named_len);
+    PBT_CHECK_EQ(memcmp(named, pbt_payload(), named_len), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,14 +1886,15 @@ static void scenario_get_info_partition_drops_a_flag_it_does_not_answer(void) {
 //
 // picobootx.h: "Served, as nowhere.  A UF2 reaches a device by being dragged
 // onto a mass storage drive, and picobootx has none and is told of none, so it
-// has nowhere to name.  The answer is a target of -1 with the unpartitioned
-// space beside it, which get_partition_table_info reports."
+// has nowhere to name.  The answer is three words — a target of -1, then the
+// two PB_INFO_PARTITION gives for the unpartitioned space, so the same region
+// reads the same way whichever question a host asks."
 //
 // 5.6.4.11 gives the words: "Word 0 : Target partition number", of which "-1 :
 // if there is nowhere to download the family", and words 1 and 2 the target
 // partition's own two words "if the partition number is not -1".  So the target
-// is the whole of the answer's meaning here, and the two words behind it are
-// what the partition table reports for unpartitioned space.
+// is the whole of the answer's meaning here, and what the two words behind it
+// are for is to agree with the device's own account of that region.
 //
 // 5.5.3's rule about where an rp2350-arm-s family lands describes the bootrom's
 // drive.  The default names no drive at all, so no family id can change the
@@ -1669,10 +1914,10 @@ static void scenario_get_info_uf2_target_has_nowhere_to_put_a_family(void) {
 
     // Three significant words behind the count, and no flags word: 5.6.4.11
     // defines these words directly, so the first of them is payload word 1.
-    PBT_CHECK_EQ(payload_word(0), 3u);
-    PBT_CHECK_EQ(payload_word(1), 0xFFFFFFFFu);
-    PBT_CHECK_EQ(payload_word(2), PBT_PT_UNPARTITIONED_LOCATION);
-    PBT_CHECK_EQ(payload_word(3), PBT_PT_UNPARTITIONED_FLAGS);
+    PBT_CHECK_EQ(payload_word(0), PBT_DEFAULT_UF2_TARGET_WORDS);
+    PBT_CHECK_EQ(payload_word(1), PBT_DEFAULT_UF2_TARGET);
+    PBT_CHECK_EQ(payload_word(2), PBT_DEFAULT_PT_LOCATION);
+    PBT_CHECK_EQ(payload_word(3), PBT_DEFAULT_PT_FLAGS);
 
     // Then the padding rule, and it is there rather than the transfer having
     // stopped short.
@@ -1683,12 +1928,14 @@ static void scenario_get_info_uf2_target_has_nowhere_to_put_a_family(void) {
 
     PBT_CHECK_EQ(pbt_count("op_get_info_prepare"), 1);
     PBT_REQUIRE(pbt_nth("op_get_info_prepare", 0) != NULL);
-    PBT_CHECK_EQ(pbt_nth("op_get_info_prepare", 0)->a2, 3u);
+    PBT_CHECK_EQ(pbt_nth("op_get_info_prepare", 0)->a2,
+                 PBT_DEFAULT_UF2_TARGET_WORDS);
     PBT_CHECK_EQ(pbt_nth("op_get_info_prepare", 0)->a0, PB_INFO_UF2_TARGET);
 
-    // The answer came from the partition table, which is where picobootx.h says
-    // the two words beside the target come from.
-    PBT_CHECK(pbt_count("rom_get_partition_table_info") >= 1);
+    // No routine was asked anything.  picobootx_impl.h: get_sys_info is "the
+    // only ROM routine either of these two reaches, and only PB_INFO_SYS
+    // reaches it."
+    PBT_CHECK_EQ(pbt_count("rom_get_partition_table_info"), 0);
     PBT_CHECK_EQ(pbt_count("rom_get_sys_info"), 0);
 
     // Keep those bytes, to hold the other families' answers against.
@@ -1749,18 +1996,6 @@ static void scenario_get_info_uf2_target_has_nowhere_to_put_a_family(void) {
         }
     }
 
-    // The two words behind the target are the ones the partition-table question
-    // reports for unpartitioned space, so they are that table's answer rather
-    // than a pair of constants written out twice.
-    pbt_begin();
-    pbt_start();
-    picoboot_cmd_t table = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
-    pbt_args_get_info(&table, PB_INFO_PARTITION, PBT_PART_PT_INFO);
-    PBT_CHECK_STATUS(pbt_run_cmd(&table), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == 20u);
-    PBT_CHECK_EQ(payload_word(3), PBT_PT_UNPARTITIONED_LOCATION);
-    PBT_CHECK_EQ(payload_word(4), PBT_PT_UNPARTITIONED_FLAGS);
-
     // Sixteen bytes is that answer exactly and twelve is a word short of it, so
     // the transfer is judged against the three words the device said it would
     // give.
@@ -1770,7 +2005,7 @@ static void scenario_get_info_uf2_target_has_nowhere_to_put_a_family(void) {
     pbt_args_get_info(&exact, PB_INFO_UF2_TARGET, 0u);
     PBT_CHECK_STATUS(pbt_run_cmd(&exact), PB_STATUS_OK);
     PBT_CHECK_EQ(pbt_payload_len(), 16u);
-    PBT_CHECK_EQ(payload_word(3), PBT_PT_UNPARTITIONED_FLAGS);
+    PBT_CHECK_EQ(payload_word(3), PBT_DEFAULT_PT_FLAGS);
 
     pbt_begin();
     pbt_start();
@@ -1780,77 +2015,226 @@ static void scenario_get_info_uf2_target_has_nowhere_to_put_a_family(void) {
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
 }
 
-static void scenario_get_info_uf2_target_alone_when_the_table_says_less(void) {
-    // Where the partition table reports fewer than the four words the target
-    // question draws its second and third words from, the target goes out on
-    // its own.  That is still a whole answer: 5.6.4.11 makes words 1 and 2
-    // meaningful only "if the partition number is not -1", and it is -1.
-    //
-    // A part answers short when it does not serve PT_INFO, which is the flag
-    // carrying unpartitioned space's two words.  5.4.8.16 has the routine reply
-    // with "the (sub)set of those flags that the API supports", so a part that
-    // does not support it answers the flags word and nothing else.
-    pbt_begin();
-    pbt_set_partition_supported(PBT_PART_LOC_FLAGS | PBT_PART_ID);
-    pbt_start();
+// The two words behind the target and the two the partition question gives for
+// unpartitioned space describe one region, and a host may ask for it either
+// way.  picobootx.h: the target's are "the two PB_INFO_PARTITION gives for the
+// unpartitioned space, so the same region reads the same way whichever question
+// a host asks."
+//
+// A device that answered one question from a constant and the other from a
+// partition table it read described that region two ways at once, and this is
+// what says it does not.  The comparison is between the bytes of two replies,
+// not between two constants written out twice.
+static void scenario_the_two_questions_describe_one_region(void) {
+    // Parts a device could differ over: a table with partitions in it, a
+    // routine that will not answer, a routine that reports fewer flags than it
+    // was asked for, and one the part does not publish at all.  Whichever of
+    // them is in front of it, the two replies have to agree.
+    const struct {
+        const char *what;
+        unsigned    partitions;
+        int         refuse;
+        uint32_t    supported;
+        bool        withhold;
+    } parts[] = {
+        { "a part with no partition table", 0u, 0, PBT_PART_SERVED, false },
+        { "a part with three partitions", 3u, 0, PBT_PART_SERVED, false },
+        { "a part whose table was never loaded", 0u, -14, PBT_PART_SERVED,
+          false },
+        { "a part answering fewer flags", 0u, 0,
+          PBT_PART_LOC_FLAGS | PBT_PART_ID, false },
+        { "a part publishing no partition routine", 0u, 0, PBT_PART_SERVED,
+          true },
+    };
 
-    // Eight bytes is the count and one word, so nothing here is padding and a
-    // word that did not arrive cannot hide behind the padding rule.
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 8u);
-    pbt_args_get_info(&cmd, PB_INFO_UF2_TARGET, 0u);
+    for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        // The target question first, and its two words kept.
+        pbt_begin();
+        pbt_set_partitions(parts[i].partitions);
+        pbt_set_partition_supported(parts[i].supported);
+        if (parts[i].refuse != 0) {
+            pbt_partition_fail(parts[i].refuse);
+        }
+        if (parts[i].withhold) {
+            pbt_bootrom_withhold('G', 'P');
+        }
+        pbt_start();
 
-    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == 8u);
-    PBT_CHECK_EQ(payload_word(0), 1u);
-    PBT_CHECK_EQ(payload_word(1), 0xFFFFFFFFu);
+        picoboot_cmd_t target = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 16u);
+        pbt_args_get_info(&target, PB_INFO_UF2_TARGET, 0u);
+        pb_status_t target_got = pbt_run_cmd(&target);
+        if (target_got != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%s: the target question answered %s",
+                     parts[i].what, pbt_status_name((int)target_got));
+            continue;
+        }
+        if (pbt_payload_len() != 16u) {
+            pbt_fail(__FILE__, __LINE__, "%s: the target question sent %u "
+                     "bytes", parts[i].what, pbt_payload_len());
+            continue;
+        }
+        const uint32_t target_location = payload_word(2);
+        const uint32_t target_flags    = payload_word(3);
 
-    // One word, and the reply stops there.
-    PBT_CHECK(!payload_has_word(2u));
-    PBT_CHECK_EQ((1u + payload_word(0)) * 4u, pbt_payload_len());
+        // Then the partition question, on a part set up the same way.
+        pbt_begin();
+        pbt_set_partitions(parts[i].partitions);
+        pbt_set_partition_supported(parts[i].supported);
+        if (parts[i].refuse != 0) {
+            pbt_partition_fail(parts[i].refuse);
+        }
+        if (parts[i].withhold) {
+            pbt_bootrom_withhold('G', 'P');
+        }
+        pbt_start();
 
-    // The device said one word before any of it went, which is what the host
-    // was sent as the count.
-    PBT_REQUIRE(pbt_nth("op_get_info_prepare", 0) != NULL);
-    PBT_CHECK_EQ(pbt_nth("op_get_info_prepare", 0)->a2, 1u);
+        picoboot_cmd_t table = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 20u);
+        pbt_args_get_info(&table, PB_INFO_PARTITION, PBT_PART_PT_INFO);
+        pb_status_t table_got = pbt_run_cmd(&table);
+        if (table_got != PB_STATUS_OK) {
+            pbt_fail(__FILE__, __LINE__, "%s: the partition question answered "
+                     "%s", parts[i].what, pbt_status_name((int)table_got));
+            continue;
+        }
+        if (pbt_payload_len() != 20u) {
+            pbt_fail(__FILE__, __LINE__, "%s: the partition question sent %u "
+                     "bytes", parts[i].what, pbt_payload_len());
+            continue;
+        }
 
-    // Sixteen bytes of transfer pads the rest rather than finding two more
-    // words to send.
-    pbt_begin();
-    pbt_set_partition_supported(PBT_PART_LOC_FLAGS | PBT_PART_ID);
-    pbt_start();
-    picoboot_cmd_t roomy = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 16u);
-    pbt_args_get_info(&roomy, PB_INFO_UF2_TARGET, 0u);
-    PBT_CHECK_STATUS(pbt_run_cmd(&roomy), PB_STATUS_OK);
-    PBT_REQUIRE(pbt_payload_len() == 16u);
-    PBT_CHECK_EQ(payload_word(0), 1u);
-    PBT_CHECK_EQ(payload_word(1), 0xFFFFFFFFu);
-    for (uint32_t i = 2u; i < 4u; i++) {
-        PBT_CHECK(payload_has_word(i));
-        PBT_CHECK_EQ(payload_word(i), 0u);
+        // 5.4.8.16 puts unpartitioned space's two words after PT_INFO's first,
+        // which the count and the flags word put at payload words 3 and 4.
+        if (target_location != payload_word(3) ||
+            target_flags != payload_word(4)) {
+            pbt_fail(__FILE__, __LINE__, "%s: the target carries "
+                     "[0x%08x 0x%08x] where the partition question gave "
+                     "[0x%08x 0x%08x]", parts[i].what, target_location,
+                     target_flags, payload_word(3), payload_word(4));
+        }
     }
 
-    // With PT_INFO supported again the same request answers three words, so
-    // what shortened the answer was the table and not the request.  One
-    // condition changed, and the two words come back.
+    // Both are the words 5.9.4.2 describes for that region rather than a pair
+    // the two happen to share — every permission set over every sector from
+    // the first, and those permissions with no UF2 family accepted.
     pbt_begin();
     pbt_start();
-    picoboot_cmd_t full = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 16u);
-    pbt_args_get_info(&full, PB_INFO_UF2_TARGET, 0u);
-    PBT_CHECK_STATUS(pbt_run_cmd(&full), PB_STATUS_OK);
-    PBT_CHECK_EQ(payload_word(0), 3u);
-    PBT_CHECK_EQ(payload_word(1), 0xFFFFFFFFu);
-    PBT_CHECK_EQ(payload_word(2), PBT_PT_UNPARTITIONED_LOCATION);
-    PBT_CHECK_EQ(payload_word(3), PBT_PT_UNPARTITIONED_FLAGS);
+    picoboot_cmd_t region = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 16u);
+    pbt_args_get_info(&region, PB_INFO_UF2_TARGET, 0u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&region), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == 16u);
+    PBT_CHECK_EQ(payload_word(2), PBT_DEFAULT_PT_LOCATION);
+    PBT_CHECK_EQ(payload_word(3), PBT_DEFAULT_PT_FLAGS);
 
-    // Eight bytes does not hold that three-word answer, so the short transfer
-    // above was accepted because the answer was short and not because eight is
-    // a length UF2_TARGET always takes.
+    // And they are not the words the modelled part reports, so a device that
+    // answered either question out of a partition table would have failed the
+    // comparison above rather than passed it for want of a difference.
+    if (PBT_DEFAULT_PT_FLAGS == PBT_PT_UNPARTITIONED_FLAGS) {
+        pbt_fail(__FILE__, __LINE__, "the default's flags word and the part's "
+                 "are both 0x%08x, so agreeing says nothing",
+                 PBT_DEFAULT_PT_FLAGS);
+    }
+}
+
+// The reply is three words, and it is three words whatever is underneath.
+// picobootx_impl.h: "All three go however little the last two have to say,
+// since picotool checks the reply is three words before it reads the first."
+// 5.6.4.11 makes words 1 and 2 meaningful only "if the partition number is not
+// -1", and it never is, so there is nothing in the device that could shorten
+// them and a transfer that cannot hold all three is refused rather than served
+// short.
+static void scenario_get_info_uf2_target_is_always_three_words(void) {
+    // Transfers around the three words, from one too small to hold the count
+    // alone up to the longest 5.6.4.11 allows.  Sixteen bytes is the answer
+    // exactly, and everything below it is a word or more short.
+    const struct {
+        uint32_t    transfer;
+        pb_status_t expected;
+    } sizes[] = {
+        {   4u, PB_STATUS_BUFFER_TOO_SMALL },
+        {   8u, PB_STATUS_BUFFER_TOO_SMALL },
+        {  12u, PB_STATUS_BUFFER_TOO_SMALL },
+        {  16u, PB_STATUS_OK },
+        {  20u, PB_STATUS_OK },
+        { PICOBOOT_GET_INFO_MAX_LEN, PB_STATUS_OK },
+    };
+
+    for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        pbt_begin();
+        pbt_start();
+
+        picoboot_cmd_t cmd = pbt_cmd(PB_CMD_GET_INFO, 0x10u,
+                                     sizes[i].transfer);
+        pbt_args_get_info(&cmd, PB_INFO_UF2_TARGET, 0u);
+
+        pb_status_t got = pbt_run_cmd(&cmd);
+        if (got != sizes[i].expected) {
+            pbt_fail(__FILE__, __LINE__, "a %u-byte transfer: expected %s, got "
+                     "%s", sizes[i].transfer,
+                     pbt_status_name((int)sizes[i].expected),
+                     pbt_status_name((int)got));
+            continue;
+        }
+
+        // Whichever way it went, the device said three words before any of it
+        // could go, so the transfer was judged against three.
+        const pbt_event_t *prepare = pbt_nth("op_get_info_prepare", 0);
+        if (prepare == NULL ||
+            prepare->a2 != PBT_DEFAULT_UF2_TARGET_WORDS) {
+            pbt_fail(__FILE__, __LINE__, "a %u-byte transfer prepared %u "
+                     "words, expected %u", sizes[i].transfer,
+                     prepare == NULL ? 0u : prepare->a2,
+                     PBT_DEFAULT_UF2_TARGET_WORDS);
+        }
+
+        if (got != PB_STATUS_OK) {
+            // Nothing went, so a host cannot mistake a refusal for a short
+            // answer.
+            if (pbt_packet_count() != 0u) {
+                pbt_fail(__FILE__, __LINE__, "a %u-byte transfer sent %u "
+                         "packets after refusing", sizes[i].transfer,
+                         pbt_packet_count());
+            }
+            continue;
+        }
+
+        if (pbt_payload_len() != sizes[i].transfer) {
+            pbt_fail(__FILE__, __LINE__, "a %u-byte transfer sent %u bytes",
+                     sizes[i].transfer, pbt_payload_len());
+            continue;
+        }
+        if (payload_word(0) != PBT_DEFAULT_UF2_TARGET_WORDS) {
+            pbt_fail(__FILE__, __LINE__, "a %u-byte transfer counted %u words",
+                     sizes[i].transfer, payload_word(0));
+        }
+        if (payload_word(1) != PBT_DEFAULT_UF2_TARGET ||
+            payload_word(2) != PBT_DEFAULT_PT_LOCATION ||
+            payload_word(3) != PBT_DEFAULT_PT_FLAGS) {
+            pbt_fail(__FILE__, __LINE__, "a %u-byte transfer answered "
+                     "[0x%08x 0x%08x 0x%08x]", sizes[i].transfer,
+                     payload_word(1), payload_word(2), payload_word(3));
+        }
+    }
+
+    // Both refused lengths are ones this device serves for a shorter answer.
+    // Twelve bytes carry the count and two words, which is what the system
+    // information question answers for a single flag, and eight carry the count
+    // and one, which is what it answers for none.  So what was refused above
+    // was three words not fitting, and not a length GET_INFO turns away.
     pbt_begin();
     pbt_start();
-    picoboot_cmd_t narrow = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 8u);
-    pbt_args_get_info(&narrow, PB_INFO_UF2_TARGET, 0u);
-    PBT_CHECK_STATUS(pbt_run_cmd(&narrow), PB_STATUS_BUFFER_TOO_SMALL);
-    PBT_CHECK_EQ(pbt_packet_count(), 0u);
+    picoboot_cmd_t two = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 12u);
+    pbt_args_get_info(&two, PB_INFO_SYS, PBT_SYS_CPU_INFO);
+    PBT_CHECK_STATUS(pbt_run_cmd(&two), PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_payload_len(), 12u);
+    PBT_CHECK_EQ(payload_word(0), 2u);
+
+    pbt_begin();
+    pbt_start();
+    picoboot_cmd_t one = pbt_cmd(PB_CMD_GET_INFO, 0x10u, 8u);
+    pbt_args_get_info(&one, PB_INFO_SYS, 0u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&one), PB_STATUS_OK);
+    PBT_CHECK_EQ(pbt_payload_len(), 8u);
+    PBT_CHECK_EQ(payload_word(0), 1u);
 }
 
 // ---------------------------------------------------------------------------
@@ -2309,16 +2693,20 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_a_get_info_that_declines_its_room_is_refused },
     { "a GET_INFO callback that refuses carries its status",
       scenario_a_get_info_callback_that_refuses_carries_its_status },
+    { "GET_INFO is served from the callback's own context, a window at a time",
+      scenario_get_info_served_from_the_callbacks_own_context },
     { "GET_INFO PARTITION sends a word count, the flags word, then the data",
       scenario_get_info_partition_sends_a_count_flags_then_the_data },
-    { "GET_INFO PARTITION answers each partition in turn",
-      scenario_get_info_partition_answers_each_partition_in_turn },
+    { "GET_INFO PARTITION answers as no partitions whatever the part holds",
+      scenario_get_info_partition_ignores_the_parts_table },
     { "GET_INFO PARTITION drops a flag it does not answer",
       scenario_get_info_partition_drops_a_flag_it_does_not_answer },
     { "GET_INFO UF2_TARGET has nowhere to put a family",
       scenario_get_info_uf2_target_has_nowhere_to_put_a_family },
-    { "GET_INFO UF2_TARGET answers alone when the table says less",
-      scenario_get_info_uf2_target_alone_when_the_table_says_less },
+    { "GET_INFO UF2_TARGET is three words whatever the part holds",
+      scenario_get_info_uf2_target_is_always_three_words },
+    { "the UF2 target and the partition question describe one region",
+      scenario_the_two_questions_describe_one_region },
     { "GET_INFO refuses an info type outside the four defined",
       scenario_get_info_refuses_a_type_outside_the_four },
     { "GET_INFO refuses an info type the device does not serve",

@@ -66,6 +66,7 @@ void pbt_begin(void) {
 
     pbt_use_custom    = false;
     pbt_use_flash_buf = true;
+    pbt_ctx           = NULL;
 }
 
 void pbt_start(void) {
@@ -77,7 +78,7 @@ void pbt_start(void) {
         PBT_RHPORT,
         PBT_EP_OUT,
         PBT_EP_IN,
-        NULL
+        pbt_ctx
     );
 }
 

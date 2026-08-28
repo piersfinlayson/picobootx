@@ -74,11 +74,11 @@ Locally, the same one command:
 ci/local-checks.sh
 ```
 
-It is every gate CI applies that this machine can apply too, the coverage gate
-among them - which is what catches a source nothing reaches, a floor with no
-file behind it, and a file renamed out from under the lists in `ci/`.  The two
-it leaves are the picotool and picoboot-rs bridges, which need Linux, vhci-hcd
-and root.
+It is every gate CI applies, the coverage gate among them - which is what
+catches a source nothing reaches, a floor with no file behind it, and a file
+renamed out from under the lists in `ci/`.  The picotool and picoboot-rs
+bridges are included, through `ci/bridges-docker.sh`, which needs docker
+running.
 
 Then publish.  One command takes all three, packages and verify-builds each,
 and uploads them in dependency order:

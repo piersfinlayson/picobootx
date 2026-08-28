@@ -16,7 +16,7 @@ that do not unify.  A `picobootx` release therefore moves both of them too.
 
 ## picobootx
 
-### Unreleased
+### 0.3.0 - 2026-08-28
 
 `Transport` gains a required associated const, so every implementor has to
 declare its transmit buffer's size.  That is not backwards compatible.
@@ -64,7 +64,7 @@ stack or an executor.
 
 ## picobootx-rp2350
 
-### Unreleased
+### 0.3.0 - 2026-08-28
 
 `Info::Partition` and `Info::Uf2Target` no longer read the partition table, and
 system information is answered whole, so a device that has a partition table or
@@ -99,7 +99,7 @@ a small transmit FIFO serves those types itself.
 
 ## picobootx-embassy
 
-### Unreleased
+### 0.3.0 - 2026-08-28
 
 - `Xport` declares `Transport::TX_CAPACITY`, which its transmit queue's 64
   bytes answer.

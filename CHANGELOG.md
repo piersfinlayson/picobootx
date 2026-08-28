@@ -12,7 +12,7 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
-## Unreleased
+## 0.4.0 - 2026-08-28
 
 `PB_INFO_PARTITION` and `PB_INFO_UF2_TARGET` no longer read the partition table,
 and system information is answered whole, so a device that has a partition table

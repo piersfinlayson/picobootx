@@ -1,6 +1,12 @@
 examples/tinyusb/build
 examples/tinyusb/tinyusb-repo
+examples/tinyusb/tinyusb-repo.pin
 examples/tinyusb/pico-sdkless-repo
 examples/tinyusb/tools
 test/build
 test/tinyusb
+test/tinyusb.pin
+test/hw/device-tinyusb/build
+test/hw/device-tinyusb/tinyusb-repo
+test/hw/device-tinyusb/tinyusb-repo.pin
+test/hw/device-tinyusb/pico-sdkless-repo

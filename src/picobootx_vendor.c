@@ -126,6 +126,18 @@ uint32_t picoboot_vendor_write_flush(void) {
 
 bool picoboot_vendor_write_clear(void) {
   tu_edpt_stream_clear(&p_itf.tx_stream);
+
+  // Clearing the FIFO leaves a packet the controller has already armed, and
+  // that one is served to the next command.  The abort takes it back and puts
+  // the data toggle back with it, since arming moved it.  A halted endpoint
+  // needs none of this - the stall discarded what it was carrying.
+  uint8_t ep_addr = p_itf.tx_stream.ep_addr;
+  if (usbd_edpt_busy(p_itf.rhport, ep_addr) &&
+      !usbd_edpt_stalled(p_itf.rhport, ep_addr)) {
+    DEBUG("Retracting the armed reply on endpoint %02X", ep_addr);
+    usbd_edpt_abort_xfer(p_itf.rhport, ep_addr);
+  }
+
   return true;
 }
 
@@ -161,22 +173,15 @@ void picoboot_vendor_unstall_endpoint(uint8_t ep_addr) {
         usbd_edpt_clear_stall_soft(p_itf.rhport, ep_addr);
     }
     if (tu_edpt_dir(ep_addr) == TUSB_DIR_OUT) {
+        // A stall killed the armed read transfer, so it has to be started
+        // again.  Without one it is still armed, and only the bytes it
+        // buffered are stale.
         if (was_stalled) {
             DEBUG("Re-arm OUT endpoint");
             picoboot_vendor_read_clear();
         } else {
-            // LCOV_UNREACHABLE_START
-            // Unreachable.  INTERFACE RESET is this function's only caller, and
-            // reaching here means the OUT endpoint is not halted while its FIFO
-            // still holds something.  pb_task_idle clears and re-arms any
-            // partial packet of two bytes or more, and picoboot_rx_cb consumes
-            // a single stray byte, both of which run between the packet
-            // arriving and any later control transfer.  Verified on hardware:
-            // a short bulk write followed immediately by INTERFACE RESET leaves
-            // a One ROM answering normally, however often it is repeated.
             DEBUG("Endpoint %02X was not stalled, just clearing", ep_addr);
             tu_edpt_stream_clear(&p_itf.rx_stream);
-            // LCOV_UNREACHABLE_STOP
         }
     } else {
         DEBUG("Re-arm IN endpoint");

@@ -38,8 +38,9 @@ jobs:
       - name: Build embassy example
         run: make example-embassy
 
-      # The hardware test's two halves.  Built, not run - they want a board.
-      # Building them is what stops them rotting against picobootx-embassy.
+      # The hardware test's two firmwares and its host.  Built, not run - they
+      # want a board.  Building them is what stops them rotting against the
+      # library either side.
       - name: Build the hardware test
         run: make hw-device hw-host
 
@@ -50,13 +51,18 @@ jobs:
       - name: Check where the Rust RAM function landed
         run: |
           ci/check-ramfunc.sh
-          ci/check-ramfunc.sh test/hw/device picobootx-hw-device
+          ci/check-ramfunc.sh test/hw/device-embassy picobootx-hw-device-embassy
 
-      # The C's counterpart, over the tinyusb example, which is the only C link
-      # this repository makes.  The two scripts ask the same question of
-      # different copies - see ci/check-ramfunc-c.sh.
+      # The C's counterpart, over both C links this repository makes: the
+      # tinyusb example and the tinyusb half of the hardware test.  The two
+      # scripts ask the same question of different copies - see
+      # ci/check-ramfunc-c.sh.
       - name: Check where the C RAM functions landed
-        run: ci/check-ramfunc-c.sh
+        run: |
+          ci/check-ramfunc-c.sh
+          ci/check-ramfunc-c.sh \
+              test/hw/device-tinyusb/build/picobootx-hw-device-tinyusb.elf \
+              test/hw/device-tinyusb/pico-sdkless-repo/examples/common/common.ld
 
   # The conformance suite needs a C compiler and make, and nothing else — no
   # USB, no kernel modules, no privileges — so it runs on hosted runners.  Both
@@ -154,15 +160,15 @@ jobs:
 
       # Six workspaces, and --all reaches only the members of the one it is
       # asked in.  rust/interop, examples/embassy, ci/ramfunc-probe and the two
-      # halves of test/hw are each their own, so each is named here or nothing
-      # checks it.
+      # cargo halves of test/hw are each their own, so each is named here or
+      # nothing checks it.  test/hw/device-tinyusb is C and is not among them.
       - name: Check formatting
         run: |
           (cd rust && cargo fmt --all -- --check)
           (cd rust/interop && cargo fmt -- --check)
           (cd examples/embassy && cargo fmt -- --check)
           (cd ci/ramfunc-probe && cargo fmt -- --check)
-          (cd test/hw/device && cargo fmt -- --check)
+          (cd test/hw/device-embassy && cargo fmt -- --check)
           (cd test/hw/host && cargo fmt -- --check)
 
       # The crates' own tests, of the API surface the conformance suite reaches
@@ -179,9 +185,9 @@ jobs:
       - name: Run the interop driver's tests
         run: cd rust/interop && cargo test
 
-      # The same six.  examples/embassy, ci/ramfunc-probe and test/hw/device
-      # build for the part rather than for this machine, from the target in each
-      # one's .cargo/config.toml.  Each declares `test = false` and `bench =
+      # The same six.  examples/embassy, ci/ramfunc-probe and
+      # test/hw/device-embassy build for the part rather than for this machine,
+      # from the target in each one's .cargo/config.toml.  Each declares `test = false` and `bench =
       # false` on its binary, since a bare-metal target has no test harness to
       # build, and that is what lets --all-targets be asked of them too.
       - name: Lint
@@ -190,7 +196,7 @@ jobs:
           (cd rust/interop && cargo clippy --all-targets --release -- -D warnings)
           (cd examples/embassy && cargo clippy --all-targets --release -- -D warnings)
           (cd ci/ramfunc-probe && cargo clippy --all-targets --release -- -D warnings)
-          (cd test/hw/device && cargo clippy --all-targets --release -- -D warnings)
+          (cd test/hw/device-embassy && cargo clippy --all-targets --release -- -D warnings)
           (cd test/hw/host && cargo clippy --all-targets --release -- -D warnings)
 
       # Whether the documents build and their links still resolve.  missing_docs

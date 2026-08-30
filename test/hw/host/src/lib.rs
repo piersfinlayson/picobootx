@@ -32,14 +32,104 @@ use picobootx::wire::{CMD_LEN, MAGIC};
 
 /// What the device declares itself as.  The ids are the ones a real part in
 /// BOOTSEL carries, because picoboot hosts look for those, so the product
-/// string is the only thing separating this instrument from any other RP2350
-/// somebody has in the bootloader.
+/// string is the only thing separating these instruments from any other RP2350
+/// somebody has in the bootloader, and from each other.
 ///
-/// Matching on it is what stops this tool touching a board that is not the one
-/// under test.  A stock part in BOOTSEL, or a One ROM, does not answer to it.
+/// Matching on one is what stops this tool touching a board that is not the one
+/// under test.  A stock part in BOOTSEL, or a One ROM, answers to neither.
 pub const VID: u16 = 0x2e8a;
 pub const PID: u16 = 0x000f;
-pub const PRODUCT: &str = "RP2350 picobootx hwtest";
+
+/// Which of the two test firmwares is on the board.
+///
+/// The same checks are asked of both, and one board carries them one at a time.
+/// The product string is how a run says which it is talking to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Firmware {
+    /// [test/hw/device-embassy](../../device-embassy), the Rust picobootx on
+    /// embassy-usb.
+    Embassy,
+    /// [test/hw/device-tinyusb](../../device-tinyusb), the C picobootx on
+    /// tinyusb.
+    Tinyusb,
+}
+
+impl Firmware {
+    /// Both, in the order a listing names them.
+    pub const ALL: [Firmware; 2] = [Firmware::Embassy, Firmware::Tinyusb];
+
+    /// The product string the firmware enumerates with.
+    pub const fn product(self) -> &'static str {
+        match self {
+            Firmware::Embassy => "RP2350 picobootx hwtest embassy",
+            Firmware::Tinyusb => "RP2350 picobootx hwtest tinyusb",
+        }
+    }
+
+    /// What it is called on the command line and in a report.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Firmware::Embassy => "embassy",
+            Firmware::Tinyusb => "tinyusb",
+        }
+    }
+
+    /// The firmware that name belongs to.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Firmware::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// Whether it answers [`REQUEST_DIAG`].
+    ///
+    /// `picobootx-embassy` publishes its own state and queue lengths, so the
+    /// embassy device reports them.  The C library publishes nothing of the
+    /// sort, so a run against tinyusb settles for what the wire says.
+    pub const fn serves_diagnostics(self) -> bool {
+        matches!(self, Firmware::Embassy)
+    }
+}
+
+impl fmt::Display for Firmware {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Take `--device <name>` off a command line, and hand back the rest.
+///
+/// All three binaries accept it and nothing else varies between the firmwares,
+/// so the parsing is here rather than three times.  `--device=name` too, since
+/// that is how the flag gets typed half the time.
+pub fn take_device_arg(
+    args: impl IntoIterator<Item = String>,
+) -> Result<(Option<Firmware>, Vec<String>), String> {
+    let names = || Firmware::ALL.map(Firmware::name).join(" or ");
+
+    let mut want = None;
+    let mut rest = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let name = if arg == "--device" {
+            Some(
+                args.next()
+                    .ok_or_else(|| format!("--device wants a name after it: {}", names()))?,
+            )
+        } else {
+            arg.strip_prefix("--device=").map(str::to_owned)
+        };
+
+        match name {
+            Some(name) => {
+                want =
+                    Some(Firmware::from_name(&name).ok_or_else(|| {
+                        format!("there is no {name:?} firmware, only {}", names())
+                    })?);
+            }
+            None => rest.push(arg),
+        }
+    }
+    Ok((want, rest))
+}
 
 /// The interface picoboot is served on, and the endpoints the device declares.
 pub const INTERFACE: u8 = 0;
@@ -222,6 +312,9 @@ impl fmt::Display for Diagnostics {
 pub struct Board {
     pub device: Device,
     pub interface: Interface,
+    /// Which of the two test firmwares answered, which is what decides
+    /// anything the host has to do differently.
+    pub firmware: Firmware,
     /// What the device enumerated with, which on this part is its chip
     /// identifier.  `None` where it declares no serial number.
     pub serial: Option<String>,
@@ -232,25 +325,24 @@ pub struct Board {
 impl Board {
     /// Open the one hardware test device on the bus.
     ///
-    /// Refuses where there is not exactly one, rather than picking. Two boards
-    /// answering the same description is a question for whoever plugged them
-    /// in, not something to resolve by taking the first.
-    pub async fn open() -> Result<Self, String> {
+    /// `want` names a firmware, and `None` takes whichever is there.  Refuses
+    /// where there is not exactly one, rather than picking: two boards
+    /// answering the description is a question for whoever plugged them in,
+    /// not something to resolve by taking the first.
+    pub async fn open(want: Option<Firmware>) -> Result<Self, String> {
         let mut found: Vec<_> = nusb::list_devices()
             .wait()
             .map_err(|e| format!("cannot list the bus: {e}"))?
-            .filter(|d| {
-                d.vendor_id() == VID && d.product_id() == PID && d.product_string() == Some(PRODUCT)
-            })
+            .filter_map(|d| identify(&d, want).map(|f| (d, f)))
             .collect();
 
-        let info = match found.len() {
+        let (info, firmware) = match found.len() {
             1 => found.remove(0),
-            0 => {
+            0 => return Err(missing(want)),
+            n if found.iter().any(|(_, f)| *f != found[0].1) => {
                 return Err(format!(
-                    "no device calling itself {PRODUCT:?} ({VID:04x}:{PID:04x}).  Flash \
-                     test/hw/device onto the board, or put it back with picobootx-hw-bootsel \
-                     if it is already running the test firmware"
+                    "{n} boards are plugged in and not all the same firmware, so say \
+                     --device embassy or --device tinyusb"
                 ));
             }
             n => return Err(format!("{n} of them are plugged in, so which is not clear")),
@@ -280,6 +372,7 @@ impl Board {
         Ok(Self {
             device,
             interface,
+            firmware,
             serial,
             ep_out,
             ep_in,
@@ -461,6 +554,12 @@ impl Board {
         self.drain();
         self.interface_reset().await?;
 
+        // The tinyusb device reports nothing, so a run against it has the
+        // clearing and the reset and not the confirmation that they worked.
+        if !self.firmware.serves_diagnostics() {
+            return Ok(());
+        }
+
         let d = self.diagnostics().await?;
         if d.is_quiet() {
             Ok(())
@@ -509,7 +608,18 @@ impl Board {
     }
 
     /// What the device says its protocol and queues are doing.
+    ///
+    /// Only the embassy firmware has anything to say - see
+    /// [`Firmware::serves_diagnostics`].
     pub async fn diagnostics(&self) -> Result<Diagnostics, String> {
+        if !self.firmware.serves_diagnostics() {
+            return Err(format!(
+                "the {} firmware serves no diagnostics, since the C picobootx \
+                 publishes no state to report",
+                self.firmware
+            ));
+        }
+
         let d = self
             .device
             .control_in(
@@ -757,23 +867,55 @@ impl Board {
     }
 }
 
-/// Whether the board is on the bus at all.
-pub fn present() -> bool {
+/// Which test firmware this device is, where it is one and one the caller
+/// asked for.
+fn identify(d: &nusb::DeviceInfo, want: Option<Firmware>) -> Option<Firmware> {
+    if d.vendor_id() != VID || d.product_id() != PID {
+        return None;
+    }
+    let product = d.product_string()?;
+    Firmware::ALL
+        .into_iter()
+        .find(|f| f.product() == product)
+        .filter(|f| want.is_none_or(|w| w == *f))
+}
+
+/// What to say when nothing answered.
+fn missing(want: Option<Firmware>) -> String {
+    let (which, flash) = match want {
+        Some(f) => (format!("the {f} firmware"), format!("test/hw/device-{f}")),
+        None => (
+            String::from("either test firmware"),
+            String::from("one of test/hw/device-embassy and test/hw/device-tinyusb"),
+        ),
+    };
+    format!(
+        "no device running {which} ({VID:04x}:{PID:04x}).  Flash {flash} onto the board, or \
+         put it back with picobootx-hw-bootsel if it is already running a test firmware"
+    )
+}
+
+/// Whether that firmware is on the bus at all.
+pub fn present(want: Firmware) -> bool {
     nusb::list_devices()
         .wait()
-        .map(|mut d| {
-            d.any(|d| {
-                d.vendor_id() == VID && d.product_id() == PID && d.product_string() == Some(PRODUCT)
-            })
-        })
+        .map(|mut d| d.any(|d| identify(&d, Some(want)).is_some()))
         .unwrap_or(false)
 }
 
 /// Wait for the board to leave the bus, which is how a reboot is seen from
-/// here.
-pub async fn wait_gone(within: Duration) -> Result<(), String> {
-    if wait_until(within, || !present()).await {
-        Ok(())
+/// here.  Returns how long it took to see it go.
+///
+/// How long a device is away is a property of how fast its firmware gets back
+/// on the bus, not of the reboot: measured on one board, the embassy firmware
+/// is absent for a fifth of a second and the tinyusb one for seven
+/// milliseconds.  So this polls every millisecond rather than on the fifty the
+/// other waits settle for, which would see the first and miss the second and
+/// call a device that rebooted correctly a device that never rebooted.
+pub async fn wait_gone(want: Firmware, within: Duration) -> Result<Duration, String> {
+    let start = std::time::Instant::now();
+    if wait_every(POLL, within, || !present(want)).await {
+        Ok(start.elapsed())
     } else {
         Err(format!("it was still on the bus after {within:?}"))
     }
@@ -782,14 +924,16 @@ pub async fn wait_gone(within: Duration) -> Result<(), String> {
 /// Wait for the board to come back, and open it.
 ///
 /// Enumerating and being ready to answer are not the same moment, so the open
-/// is retried rather than made once the moment it appears.
-pub async fn wait_back(within: Duration) -> Result<Board, String> {
-    if !wait_until(within, present).await {
+/// is retried rather than made once the moment it appears.  It has to come
+/// back as what it was: a reboot that brought up the other firmware would be a
+/// different board answering the rest of the run.
+pub async fn wait_back(want: Firmware, within: Duration) -> Result<Board, String> {
+    if !wait_until(within, || present(want)).await {
         return Err(format!("it did not come back within {within:?}"));
     }
     let mut last = String::new();
     for _ in 0..40 {
-        match Board::open().await {
+        match Board::open(Some(want)).await {
             Ok(b) => return Ok(b),
             Err(e) => last = e,
         }
@@ -798,7 +942,17 @@ pub async fn wait_back(within: Duration) -> Result<Board, String> {
     Err(format!("it came back but would not open: {last}"))
 }
 
-async fn wait_until(within: Duration, mut done: impl FnMut() -> bool) -> bool {
+/// How often a wait that is only watching for the board to come back looks.
+const SETTLE: Duration = Duration::from_millis(50);
+
+/// How often a wait that has to catch a short outage looks.
+const POLL: Duration = Duration::from_millis(1);
+
+async fn wait_until(within: Duration, done: impl FnMut() -> bool) -> bool {
+    wait_every(SETTLE, within, done).await
+}
+
+async fn wait_every(interval: Duration, within: Duration, mut done: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + within;
     loop {
         if done() {
@@ -807,7 +961,7 @@ async fn wait_until(within: Duration, mut done: impl FnMut() -> bool) -> bool {
         if std::time::Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(interval).await;
     }
 }
 

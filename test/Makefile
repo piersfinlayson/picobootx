@@ -177,18 +177,15 @@ endif
 # ---------------------------------------------------------------------------
 # tinyusb, for the usb suite
 #
-# Pinned to a commit rather than a tag, because the fork carries none.  A commit
-# cannot be reached by clone --branch, so the repository is created empty and
-# the one commit fetched into it — which also brings nothing else.
-#
-# Remove the tinyusb/ directory after changing this, so it is re-fetched.  The
-# example clones the same fork at whatever HEAD is, deliberately: this pin is so
-# a suite that gates CI cannot go red because the fork moved.
+# The commit and how to fetch it come from ../tinyusb.mk, which every build in
+# this tree that compiles tinyusb shares, so the suite and the two device builds
+# cannot drift onto different forks of it.  Pinned to a commit rather than a
+# tag, because the fork carries none.
 # ---------------------------------------------------------------------------
 
+include $(ROOT)/tinyusb.mk
+
 TINYUSB_DIR    := tinyusb
-TINYUSB_COMMIT := 8e4f5c1d269976d6c56660782a441a1d780845f0
-TINYUSB_URL    := https://github.com/piersfinlayson/tinyusb.git
 
 ifneq ($(filter usb usbip,$(SUITE)),)
 # Fetched here, while the makefile is being read, rather than as a target.  The
@@ -197,11 +194,7 @@ ifneq ($(filter usb usbip,$(SUITE)),)
 # them would therefore be too late on a fresh checkout, where make stops with
 # "no rule to make target" instead.  Only this suite needs tinyusb, so the core
 # suite still builds with nothing but a compiler and make.
-$(shell [ -d $(TINYUSB_DIR) ] || ( \
-	git init -q $(TINYUSB_DIR) && \
-	git -C $(TINYUSB_DIR) remote add origin $(TINYUSB_URL) && \
-	git -C $(TINYUSB_DIR) fetch -q --depth 1 origin $(TINYUSB_COMMIT) && \
-	git -C $(TINYUSB_DIR) checkout -q FETCH_HEAD ))
+$(shell $(call tinyusb-fetch,$(TINYUSB_DIR)))
 
 INCLUDES := -Iusb -I$(TINYUSB_DIR)/src -I$(TINYUSB_DIR)/src/common \
             -I$(TINYUSB_DIR)/src/device -I$(ROOT)/include -Isrc
@@ -265,6 +258,9 @@ LIB_SRC := \
 	$(if $(filter c,$(LIB)),$(ROOT)/src/picobootx.c $(ROOT)/src/picobootx_impl.c) \
 	$(ROOT)/src/picobootx_vendor.c
 
+# Not the list in ../tinyusb.mk: that one is what a device build compiles, and
+# this build supplies its own controller in usb/usbt_dcd.c rather than
+# compiling a port.
 TINYUSB_SRC := \
 	$(TINYUSB_DIR)/src/tusb.c \
 	$(TINYUSB_DIR)/src/common/tusb_fifo.c \

@@ -57,8 +57,9 @@ shipped hardware.
   exact command and message.
 - **No `Co-Authored-By` trailer**, and no other AI attribution, anywhere in the
   history.
-- Commit bodies are bullets, one line each, three or fewer, often none.
-- Only commit when asked, only push when asked.
+- Commit bodies are normally a single short sentence. Anything else needs explicit
+  approval.
+- Only commit if asked, only push if asked.
 
 ## Layout
 
@@ -82,14 +83,21 @@ shipped hardware.
   link flags `picobootx-rp2350` asks a consumer for.  `make example-embassy`
   builds it.
 - `test/` — the two conformance suites, `test/usbip/`, the bridge that puts the
-  device on a real USB bus for a host tool, and `test/hw/`, the firmware and the
-  host driver that put `picobootx-embassy` on a board.  `test/tinyusb` is cloned
-  at a pinned commit, not committed.
-- `test/hw/` — a device crate and a host crate.  CI builds both and runs
-  neither, since running them needs a board.  The device carries a vendor request that reboots it into
-  BOOTSEL, so it is jumpered once and reflashed over USB from then on.  It is an
-  instrument rather than an example, which is why it is here and not in
-  `examples/`.
+  device on a real USB bus for a host tool, and `test/hw/`, the firmwares and
+  the host driver that put picobootx on a board.  `test/tinyusb` is cloned
+  at the pinned commit, not committed.
+- `test/hw/` — two firmwares and one host.  `device-embassy` is the Rust
+  picobootx on embassy-usb, `device-tinyusb` the C one on tinyusb, and `host` a
+  crate of three binaries that drives either — `--device embassy` or
+  `--device tinyusb` picks, and the product string is what a run recognises.  CI
+  builds all three and runs none, since running them needs a board.  Each
+  firmware carries a vendor request that reboots it into BOOTSEL, so the board is
+  jumpered once and reflashed over USB from then on, including to swap one
+  firmware for the other.  They are instruments rather than examples, which is
+  why they are here and not in `examples/`.  Rough parity, not identical: the C
+  serves no diagnostics request, since the C library publishes no state to
+  report, and it keeps itself out of the flash window with a check on the linked
+  image rather than by holding flash back from the linker.
 - `rust/` — the Rust picobootx.  `picobootx` is the library, `picobootx-rp2350`
   the default RP2350 implementations — the port of `src/picobootx_impl.c`, with
   its own copy of the host-test seam — and `picobootx-ffi` the C ABI
@@ -115,6 +123,12 @@ shipped hardware.
   docker daemon already has.
 - `picobootx.mk` — the source list and include path an integrator consumes.  A
   new source file or include directory belongs here too.
+- `tinyusb.mk` — the fork of tinyusb every build here compiles, as one commit
+  and one way of fetching it.  The usb suite, the tinyusb example and
+  `test/hw/device-tinyusb` all include it, so a finding on a board and a
+  scenario in the suite are about the same library.  Moving the commit is enough
+  on its own, since the fetch replaces a directory holding anything else.  The
+  source list is the one a device build wants, and the suite keeps its own.
 - `CHANGELOG.md` is the C's and `rust/CHANGELOG.md` the Rust crates'.
   `INTEGRATION.md` is the C's integration guide, `TESTING.md` what the suites
   cover and how to run them, and `RELEASE.md` the release process for both.

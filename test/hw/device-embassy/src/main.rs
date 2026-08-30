@@ -176,16 +176,20 @@ async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     // The same ids a real part in BOOTSEL carries, so picotool and picoboot-rs
-    // drive it with no arguments.  The product string is this device's own, so
-    // a host can tell the instrument from the example.
+    // drive it with no arguments.  The product string names this firmware and
+    // the USB stack under it, so a host can tell the instrument from the
+    // example and from the tinyusb half of the same test.
     let mut config = Config::new(0x2e8a, 0x000f);
     config.manufacturer = Some("Raspberry Pi");
-    config.product = Some("RP2350 picobootx hwtest");
+    config.product = Some("RP2350 picobootx hwtest embassy");
     config.max_power = 100;
 
     let mut config_descriptor = [0u8; 64];
     let mut bos_descriptor = [0u8; 16];
-    let mut control_buf = [0u8; 64];
+    // embassy-usb builds a string descriptor in this buffer and needs two
+    // bytes spare past the last character, so 64 is short by two for the
+    // product string above and the device panics as it is enumerated.
+    let mut control_buf = [0u8; 128];
 
     // picobootx requires a buffer for flash writes.
     let mut flash_page = [0u8; FLASH_PAGE_SIZE];

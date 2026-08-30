@@ -1,38 +1,74 @@
 # The hardware test
 
-`picobootx-embassy` serving picoboot on a real RP2350, driven by a real host.
+picobootx serving picoboot on a real RP2350, driven by a real host.  Both of
+them: the Rust picobootx on embassy-usb, and the C picobootx on tinyusb.
 
 The conformance suites answer what the protocol does.  They cannot answer what
 a USB controller does — data toggles, halts, a host that waits for what it is
 owed before it sends again.  This is for that, and it found a deadlock the
 suites and a hundred per cent of line coverage did not.
 
-It is an instrument, not an example.  [examples/embassy](../../examples/embassy)
-is the thing to copy when building a device.
+They are instruments, not examples.
+[examples/embassy](../../examples/embassy) and
+[examples/tinyusb](../../examples/tinyusb) are the things to copy when building
+a device.
 
-## The two halves
+## The three parts
 
-- **`device/`** — the firmware.  picobootx-embassy over `Rp2350` and no custom
-  commands, plus two vendor control requests of its own.  It presents as
-  `2e8a:000f`, product string `RP2350 picobootx hwtest`.
-- **`host/`** — three binaries.  `picobootx-hw-test` runs the checks,
-  `picobootx-hw-bootsel` puts the board back in BOOTSEL, and
+- **`device-embassy/`** — the Rust firmware.  picobootx-embassy over `Rp2350`
+  and no custom commands, plus three vendor control requests of its own.  It
+  presents as `2e8a:000f`, product string `RP2350 picobootx hwtest embassy`.
+- **`device-tinyusb/`** — the C firmware.  `src/picobootx.c` and the RP2350
+  defaults over tinyusb, the same arrangement as
+  [examples/tinyusb](../../examples/tinyusb), plus two of the same vendor
+  requests.  Product string `RP2350 picobootx hwtest tinyusb`.
+- **`host/`** — three binaries, driving either firmware.  `picobootx-hw-test`
+  runs the checks, `picobootx-hw-bootsel` puts the board back in BOOTSEL, and
   `picobootx-hw-diag` prints what the protocol and its queues are doing.
 
-Each refuses any device that does not answer to that product string, so none of
-them can touch a stock RP2350 in the bootloader, or anything else on the bus.
+Each refuses any device that does not answer to one of those product strings, so
+none of them can touch a stock RP2350 in the bootloader, or anything else on the
+bus.
+
+One board serves both firmwares, one at a time.  `--device embassy` or
+`--device tinyusb` says which is wanted, and is needed only where both are
+somehow on the bus at once.
+
+### What the two firmwares do not share
+
+Rough parity, not identical devices.  Two differences, and the checks are
+otherwise the same on both:
+
+- **Diagnostics.** `picobootx-embassy` publishes its own state, queue lengths
+  and halts, so the embassy device reports them over the control endpoint.  The
+  C library publishes nothing of the sort, so the tinyusb device does not serve
+  that request and `picobootx-hw-diag` refuses it.  A run against it loses the
+  confirmation, after every quiesce, that the device settled — the clearing and
+  the `INTERFACE RESET` still happen, and the rest is judged over the wire.
+- **Keeping the firmware out of the flash window.**  The embassy device's
+  [memory.x](device-embassy/memory.x) offers the linker only the half of flash
+  the window is not in, so a firmware that grew into it fails to link.  The C
+  device links against pico-sdkless's script, which offers the whole part, so
+  its [Makefile](device-tinyusb/Makefile) measures the image afterwards and
+  fails the build if it reaches the window.
 
 ## Running it
 
-Build both halves:
+Build the firmwares and the host:
 
     make hw-device hw-host
 
+`make hw-device-embassy` and `make hw-device-tinyusb` build one each.  The C
+half needs an arm-none-eabi toolchain and clones tinyusb and pico-sdkless beside
+itself, the way the example does.
+
 The board is jumpered into BOOTSEL **once**, by hand, for the first flash:
 
-    picotool load -x test/hw/device/target/thumbv8m.main-none-eabi/release/picobootx-hw-device -t elf
+    picotool load -x test/hw/device-embassy/target/thumbv8m.main-none-eabi/release/picobootx-hw-device-embassy -t elf
+    picotool load -x test/hw/device-tinyusb/build/picobootx-hw-device-tinyusb.elf -t elf
 
-After that it puts itself back, over USB, and the jumper is never needed again:
+After that it puts itself back, over USB, and the jumper is never needed again —
+including to swap one firmware for the other:
 
     test/hw/host/target/release/picobootx-hw-bootsel
 
@@ -182,10 +218,8 @@ as the 0xFF an erase leaves, and the page after it is untouched.  Then a whole
 64K block, which is the bulk path and the longest the part is away from the bus
 in one go, and four refusals.
 
-The window comes from the device, and
-[memory.x](../device/memory.x) keeps the firmware out of it by offering the
-linker only the half of flash the window is not in, so nothing here can erase
-what it is running.
+The window comes from the device, and each firmware keeps itself out of it — see
+what the two do not share, above — so nothing here can erase what it is running.
 
 ## How it talks to the board
 
@@ -210,4 +244,4 @@ nobody has.
 
 ## CI
 
-CI builds both halves and runs neither.  Running them needs a board.
+CI builds all three and runs none of them.  Running them needs a board.

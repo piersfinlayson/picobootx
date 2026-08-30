@@ -55,6 +55,14 @@ void usbt_settle(void) {
     }
 }
 
+// What number the host expects next on each bulk endpoint.
+//
+// Either end spots a repeat by the number, so a device that loses track sends a
+// packet the host drops and the command it answered times out.  Without this
+// the host takes anything and that defect is invisible.
+static uint8_t s_in_pid;
+static uint8_t s_out_pid;
+
 void usbt_begin(void) {
     // Every scenario gets a device that has just been plugged in.  tinyusb
     // holds its state in file statics, so without tearing the stack down first
@@ -70,6 +78,8 @@ void usbt_begin(void) {
     usbt_dcd_reset();
     s_last_in_was_zlp = false;
     s_millis          = 0;
+    s_in_pid          = 0;
+    s_out_pid         = 0;
 
     tusb_rhport_init_t init = {
         .role  = TUSB_ROLE_DEVICE,
@@ -80,6 +90,9 @@ void usbt_begin(void) {
 }
 
 void usbt_bus_reset(void) {
+    // A reset re-enumerates, so both ends start numbering again.
+    s_in_pid  = 0;
+    s_out_pid = 0;
     usbt_dcd_bus_reset();
     usbt_settle();
 }
@@ -315,12 +328,32 @@ uint32_t usbt_bulk_in(uint8_t *buf, uint32_t len) {
             room = sizeof(packet);
         }
 
+        // The number the device put on this packet, read before it is taken,
+        // because taking it moves the endpoint on to the next.
+        const uint8_t pid = usbt_dcd_in_pid(USBT_EP_IN);
+
         uint32_t took = usbt_dcd_take_in(USBT_EP_IN, packet, room);
-        if (took > 0) {
-            memcpy(buf + got, packet, took);
-            got += took;
+
+        // A repeat is dropped and still acknowledged, so the device counts it
+        // sent.  Leaving the transfer waiting instead would hand the device a
+        // retry no bus offers, and forgive the defect this exists to catch.
+        const bool repeat = pid != s_in_pid;
+        if (!repeat) {
+            s_in_pid ^= 1u;
+            if (took > 0) {
+                memcpy(buf + got, packet, took);
+                got += took;
+            }
         }
         usbt_settle();
+        if (repeat) {
+            // Nothing arrived, so only the device having more to offer bounds
+            // this.
+            if (!usbt_dcd_ep_pending(USBT_EP_IN)) {
+                break;
+            }
+            continue;
+        }
 
         // A packet shorter than the maximum ends the transfer, and a zero
         // length one is the shortest of those.  The protocol gives it meaning,
@@ -354,6 +387,15 @@ bool usbt_clear_halt(uint8_t ep_addr) {
         usbt_control(TUSB_REQ_RCPT_ENDPOINT | (TUSB_REQ_TYPE_STANDARD << 5),
                      TUSB_REQ_CLEAR_FEATURE, TUSB_REQ_FEATURE_EDPT_HALT,
                      ep_addr, NULL, 0, 0);
+    if (r.ok) {
+        // USB 2.0 9.4.5.  The device does the same to its own, and a host that
+        // skipped this would lose the first packet after every recovery.
+        if (ep_addr & 0x80u) {
+            s_in_pid = 0;
+        } else {
+            s_out_pid = 0;
+        }
+    }
     return r.ok;
 }
 

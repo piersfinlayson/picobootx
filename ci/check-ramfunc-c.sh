@@ -84,14 +84,15 @@ fi
 [ -f "$ELF" ] || { echo "$ELF does not exist" >&2; exit 1; }
 [ -f "$LD" ] || { echo "$LD does not exist" >&2; exit 1; }
 
-# ORIGIN and LENGTH of one region, as two decimal numbers.  The shell reads 0x
-# for itself, so only the K and M suffixes a linker script may write need
-# handling here.
+# ORIGIN and LENGTH of one region, as two decimal numbers, or nothing where the
+# script declares no such region.  The shell reads 0x for itself, so only the K
+# and M suffixes a linker script may write need handling here.
 region() {
     local line origin len mult=1
     line="$(grep -E "^[[:space:]]*$1[[:space:]]*\(" "$LD")"
     origin="$(echo "$line" | sed -n 's/.*ORIGIN[[:space:]]*=[[:space:]]*\([^,[:space:]]*\).*/\1/p')"
     len="$(echo "$line" | sed -n 's/.*LENGTH[[:space:]]*=[[:space:]]*\([^,[:space:]]*\).*/\1/p')"
+    [ -n "$origin" ] && [ -n "$len" ] || return 0
     case "$len" in
         *[kK]) mult=1024;    len="${len%?}" ;;
         *[mM]) mult=1048576; len="${len%?}" ;;
@@ -105,10 +106,13 @@ EOF
 read -r RAM_ORIGIN RAM_LEN <<EOF
 $(region RAM)
 EOF
-[ -n "$FLASH_LEN" ] && [ -n "$RAM_LEN" ] || {
-    echo "could not read FLASH and RAM out of $LD" >&2
-    exit 1
-}
+# A linker script need not use a MEMORY block at all - it may set the addresses
+# as plain symbols, as One ROM's plugin script does - and picobootx asks nobody
+# to write theirs a particular way.  Where the regions are not there, the two
+# checks that need them are not made and say so.  Saying FAIL instead would send
+# an integrator hunting a fault in a link that is correct.
+RANGES=1
+[ -n "$FLASH_LEN" ] && [ -n "$RAM_LEN" ] || RANGES=0
 
 # Idx Name  Size  VMA  LMA  File-off  Algn
 SECTION="$("$OBJDUMP" -h "$ELF" | awk '$2 == ".ramfunc" { print $3, $4, $5; exit }')"
@@ -167,21 +171,27 @@ printf '__ramfunc_start 0x%08x\n' "$start"
 printf '__ramfunc_end   0x%08x\n' "$end"
 printf '__ramfunc_load  0x%08x\n' "$load"
 printf 'pb_ramfunc_mark 0x%08x\n' "$mark"
-printf 'RAM             0x%08x + 0x%x\n' "$RAM_ORIGIN" "$RAM_LEN"
-printf 'FLASH           0x%08x + 0x%x\n' "$FLASH_ORIGIN" "$FLASH_LEN"
+if [ "$RANGES" -eq 1 ]; then
+    printf 'RAM             0x%08x + 0x%x\n' "$RAM_ORIGIN" "$RAM_LEN"
+    printf 'FLASH           0x%08x + 0x%x\n' "$FLASH_ORIGIN" "$FLASH_LEN"
+else
+    echo "RAM and FLASH   no MEMORY block in $LD, so their bounds are unknown"
+fi
 
 bad=0
 [ "$size" -gt 0 ] || { echo "FAIL: .ramfunc is empty" >&2; bad=1; }
 
-if [ "$vma" -lt "$RAM_ORIGIN" ] || [ $((vma + size)) -gt $((RAM_ORIGIN + RAM_LEN)) ]; then
-    echo "FAIL: .ramfunc runs from outside RAM, so an erase or a program would" >&2
-    echo "      fetch it from a flash that has stopped answering" >&2
-    bad=1
-fi
+if [ "$RANGES" -eq 1 ]; then
+    if [ "$vma" -lt "$RAM_ORIGIN" ] || [ $((vma + size)) -gt $((RAM_ORIGIN + RAM_LEN)) ]; then
+        echo "FAIL: .ramfunc runs from outside RAM, so an erase or a program would" >&2
+        echo "      fetch it from a flash that has stopped answering" >&2
+        bad=1
+    fi
 
-if [ "$lma" -lt "$FLASH_ORIGIN" ] || [ $((lma + size)) -gt $((FLASH_ORIGIN + FLASH_LEN)) ]; then
-    echo "FAIL: .ramfunc is not loaded from flash, so nothing carries it into RAM" >&2
-    bad=1
+    if [ "$lma" -lt "$FLASH_ORIGIN" ] || [ $((lma + size)) -gt $((FLASH_ORIGIN + FLASH_LEN)) ]; then
+        echo "FAIL: .ramfunc is not loaded from flash, so nothing carries it into RAM" >&2
+        bad=1
+    fi
 fi
 
 if [ "$start" -ne "$vma" ] || [ "$end" -ne $((vma + size)) ]; then
@@ -210,4 +220,9 @@ if [ "$load" -ne "$lma" ]; then
 fi
 
 [ "$bad" -eq 0 ] || exit 1
-echo "PASS: $NAME's .ramfunc runs from RAM, is loaded from flash, and the startup copy covers it"
+if [ "$RANGES" -eq 1 ]; then
+    echo "PASS: $NAME's .ramfunc runs from RAM, is loaded from flash, and the startup copy covers it"
+else
+    echo "PASS: $NAME's .ramfunc is bracketed by the three symbols the startup copy reads, and carries the marker"
+    echo "      Not checked: that its addresses are in RAM and flash, which wanted the regions"
+fi

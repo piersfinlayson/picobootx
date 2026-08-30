@@ -948,7 +948,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "picobootx-hw-device"
+name = "picobootx-hw-device-embassy"
 version = "0.0.0"
 dependencies = [
  "cortex-m-rt",

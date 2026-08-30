@@ -36,6 +36,11 @@ uint32_t usbt_dcd_give_out(uint8_t ep_addr, const uint8_t *in, uint32_t len);
 bool     usbt_dcd_ep_open(uint8_t ep_addr);
 bool     usbt_dcd_ep_stalled(uint8_t ep_addr);
 bool     usbt_dcd_ep_pending(uint8_t ep_addr);
+
+// The data toggle the next packet off this endpoint will carry.  A host reads
+// it to decide whether that packet is the one it is waiting for or a repeat of
+// one it has had.
+uint8_t  usbt_dcd_in_pid(uint8_t ep_addr);
 uint8_t  usbt_dcd_address(void);
 bool     usbt_dcd_connected(void);
 

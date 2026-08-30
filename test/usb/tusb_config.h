@@ -34,6 +34,12 @@
 // this is off.
 #define CFG_TUD_EDPT_DEDICATED_HWFIFO 1
 
+// The controller this build supplies takes back a transfer the host has not
+// collected, which picobootx needs to answer INTERFACE RESET.  tusb_mcu.h says
+// so for each port that offers it and OPT_MCU_NONE is not among them, so it is
+// said here, before tusb_mcu.h is read.
+#define TUP_DCD_EDPT_ABORT_API
+
 #define CFG_TUD_ENABLED           1
 #define CFG_TUD_MAX_SPEED         OPT_MODE_FULL_SPEED
 #define CFG_TUD_ENDPOINT0_SIZE    64

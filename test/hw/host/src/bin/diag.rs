@@ -11,11 +11,14 @@
 //! It speaks the protocol properly, acknowledgement included, so what it shows
 //! is what an ordinary session looks like rather than what one missing half of
 //! every exchange looks like.
+//!
+//! Only the embassy firmware answers.  The C picobootx publishes no state, so
+//! the tinyusb device has nothing to report and this refuses it by name.
 
 use std::process::ExitCode;
 
 use picobootx::wire::DIR_IN;
-use picobootx_hw_host::{Board, EP_IN, EP_OUT};
+use picobootx_hw_host::{Board, EP_IN, EP_OUT, Firmware, take_device_arg};
 
 const CMD_READ: u8 = 0x04 | DIR_IN;
 const ROM_MAGIC_ADDR: u32 = 0x0000_0010;
@@ -30,7 +33,20 @@ async fn show(board: &Board, when: &str) {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let mut board = match Board::open().await {
+    let want = match take_device_arg(std::env::args().skip(1)) {
+        Ok((want, _)) => want.unwrap_or(Firmware::Embassy),
+        Err(e) => {
+            eprintln!("picobootx-hw-diag: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !want.serves_diagnostics() {
+        eprintln!("picobootx-hw-diag: the {want} firmware publishes no state to watch");
+        return ExitCode::FAILURE;
+    }
+
+    let mut board = match Board::open(Some(want)).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{e}");

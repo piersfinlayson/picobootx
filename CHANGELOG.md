@@ -12,6 +12,18 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
+## 0.5.1 - 2026-08-30
+
+`INTERFACE_RESET` left a reply the host had not collected armed on the endpoint,
+so the next command was answered with the previous one's reply and every answer
+after it belonged to the question before it.  Found on a real board, which is
+the only place a packet the protocol has already let go of can be seen.
+
+- `picoboot_vendor_write_clear` takes back a packet already armed for the host,
+  and puts the data toggle back with it, since arming moved it.
+- Needs a tinyusb carrying `usbd_edpt_abort_xfer`.  The commit is in
+  [tinyusb.mk](tinyusb.mk).
+
 ## 0.5.0 - 2026-08-30
 
 A flash page program left execute-in-place up, so on a real part it wrote

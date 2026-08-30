@@ -39,18 +39,24 @@ static bool send_cmd(const picoboot_cmd_t *cmd) {
     return usbt_bulk_out((const uint8_t *)cmd, sizeof(*cmd));
 }
 
-// Ask the device to read len bytes of its own SRAM and leave the answer on the
-// IN endpoint.  The caller decides whether to take it off the wire, which is
-// how a scenario arms a busy IN endpoint or a full transmit FIFO.
-static bool start_read(uint32_t len) {
+// Ask the device to read len bytes of its own SRAM from addr and leave the
+// answer on the IN endpoint.  The caller decides whether to take it off the
+// wire, which is how a scenario arms a busy IN endpoint or a full transmit
+// FIFO.
+static bool start_read_at(uint32_t addr, uint32_t len) {
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_READ | PICOBOOT_DIR_IN,
                                  sizeof(pb_addr_size_args_t), len);
-    pbt_args_addr_size(&cmd, RP2350_SRAM_BASE, len);
+    pbt_args_addr_size(&cmd, addr, len);
     if (!send_cmd(&cmd)) {
         return false;
     }
     usbt_settle();
     return true;
+}
+
+// The same, from the bottom of SRAM.
+static bool start_read(uint32_t len) {
+    return start_read_at(RP2350_SRAM_BASE, len);
 }
 
 // Take everything the device has queued on the IN endpoint, until nothing is
@@ -302,17 +308,17 @@ static void scenario_acknowledgement_waits_for_a_busy_endpoint(void) {
     PBT_REQUIRE(ready());
 
     // Half a packet of payload, left on the wire.  The endpoint is carrying a
-    // transfer, and the FIFO still has room.
+    // transfer, and the FIFO is empty because arming took its bytes.
     PBT_REQUIRE(start_read(32u));
     PBT_REQUIRE(usbt_dcd_ep_pending(USBT_EP_IN));
-    PBT_REQUIRE(picoboot_vendor_write_available() == 32u);
+    PBT_REQUIRE(picoboot_vendor_write_available() == 64u);
 
     PBT_CHECK(!picoboot_vendor_send_zlp());
 
     // One byte less room than before, so the write was taken and it was the
-    // flush that refused.  That is what tells this refusal from the one a full
-    // FIFO produces.
-    PBT_CHECK_EQ(picoboot_vendor_write_available(), 31u);
+    // flush that refused.  A busy endpoint is what refuses it, not a want of
+    // room.
+    PBT_CHECK_EQ(picoboot_vendor_write_available(), 63u);
 
     // Once the host has taken the answer the same call is accepted, and a
     // transfer is queued for the host to read.
@@ -322,32 +328,63 @@ static void scenario_acknowledgement_waits_for_a_busy_endpoint(void) {
     PBT_CHECK(usbt_dcd_ep_pending(USBT_EP_IN));
 }
 
-// The other way the acknowledgement is refused: the transmit FIFO has no room
-// for even one byte, so the write fails before any flush is attempted.
+// The acknowledgement refused because the transmit FIFO has no room at all, so
+// the write fails before any flush is attempted.
+//
+// Filling it takes a busy endpoint.  A write of a whole packet asks the stream
+// layer to flush, the flush is refused because the endpoint is still carrying
+// the last one, and the bytes stay where they are - which is the only way the
+// FIFO reaches its depth, since arming a transfer empties it.
 static void scenario_acknowledgement_needs_room_in_the_fifo(void) {
     PBT_REQUIRE(ready());
 
-    // A whole packet of payload, left on the wire.  The FIFO holds it until the
-    // host reads it, so there is no room at all.
-    PBT_REQUIRE(start_read(64u));
+    // Something on the wire, so the endpoint is busy and the flush below has
+    // nowhere to go.
+    PBT_REQUIRE(start_read(4u));
     PBT_REQUIRE(usbt_dcd_ep_pending(USBT_EP_IN));
+    PBT_REQUIRE(picoboot_vendor_write_available() == 64u);
+
+    uint8_t filler[64];
+    memset(filler, 0xA5, sizeof(filler));
+    PBT_REQUIRE(picoboot_vendor_write(filler, sizeof(filler)) == sizeof(filler));
     PBT_REQUIRE(picoboot_vendor_write_available() == 0);
 
     PBT_CHECK(!picoboot_vendor_send_zlp());
 
-    // Still no room, so nothing was buffered: this refusal is the write's, not
-    // the flush's.
+    // Still no room, so nothing was buffered - this refusal is the write's and
+    // not the flush's, which is what tells it from the other one.
     PBT_CHECK_EQ(picoboot_vendor_write_available(), 0);
+}
 
-    drain_in();
-    PBT_REQUIRE(picoboot_vendor_write_available() == 64u);
-    PBT_CHECK(picoboot_vendor_send_zlp());
+// A reply the host never took, and what INTERFACE RESET does with it.
+//
+// Left armed, the controller hands it to whoever reads next, and every answer
+// after that belongs to the question before it.  RP2350 datasheet 5.6.5.1 has
+// INTERFACE RESET abort any in-process transfer, and this is one.  The core
+// suite cannot ask it: a byte queue has no armed packet in it.
+static void scenario_interface_reset_takes_back_an_uncollected_reply(void) {
+    PBT_REQUIRE(ready());
 
-    // What reaches the host is the single zero byte the protocol reads as the
-    // acknowledgement.
-    uint8_t buf[USBT_PACKET_MAX];
-    PBT_CHECK_EQ(usbt_bulk_in(buf, sizeof(buf)), 1);
-    PBT_CHECK_EQ(buf[0], 0);
+    // The model fills SRAM with a repeating ramp, so two addresses four bytes
+    // apart answer differently.
+    PBT_REQUIRE(start_read_at(RP2350_SRAM_BASE, 4u));
+    PBT_REQUIRE(usbt_dcd_ep_pending(USBT_EP_IN));
+
+    // The host that walked away, replaced by one asking for a clean start.
+    usbt_ctrl_result_t r =
+        usbt_control(VENDOR_OUT, REQ_INTERFACE_RESET, 0, 0, NULL, 0, 0);
+    PBT_REQUIRE(r.ok);
+    usbt_settle();
+
+    PBT_CHECK(!usbt_dcd_ep_pending(USBT_EP_IN));
+
+    // The next question has to get its own answer.  A kept packet shows up as
+    // the first answer's bytes, and a toggle not put back with it as no answer
+    // at all - the endpoint latched the packet and its number together.
+    PBT_REQUIRE(start_read_at(RP2350_SRAM_BASE + 4u, 4u));
+    uint8_t buf[USBT_XFER_MAX];
+    PBT_CHECK_EQ(usbt_bulk_in(buf, 4u), 4u);
+    PBT_CHECK(memcmp(buf, pbt_sram() + 4u, 4u) == 0);
 }
 
 static const pbt_scenario_t k_scenarios[] = {
@@ -369,6 +406,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_acknowledgement_waits_for_a_busy_endpoint },
     { "the acknowledgement needs room in the transmit FIFO",
       scenario_acknowledgement_needs_room_in_the_fifo },
+    { "INTERFACE RESET takes back a reply the host never collected",
+      scenario_interface_reset_takes_back_an_uncollected_reply },
 };
 
 PBT_SUITE(usbt_suite_vendor, "vendor", k_scenarios);

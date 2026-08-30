@@ -2,11 +2,12 @@
 #
 # MIT License
 
-# Makefile for building the picobootx tinyusb example
+# The C half of picobootx's hardware test.
 #
-# Uses tinyusb as the USB stack and pico-sdkless as the RP2350 support library
-#
-# Automaticaly clones tinyusb and pico-sdkless
+# The same arrangement as examples/tinyusb - tinyusb as the USB stack,
+# pico-sdkless as the RP2350 support library, both cloned beside this Makefile.
+# What it builds is an instrument rather than an example, so it stops at an ELF:
+# the board is flashed with picotool, and nothing here needs a UF2.
 #
 # Usage:
 #   make all
@@ -20,11 +21,11 @@ CC      := $(if $(TOOLCHAIN),$(TOOLCHAIN)/arm-none-eabi-gcc,arm-none-eabi-gcc)
 OBJCOPY := $(if $(TOOLCHAIN),$(TOOLCHAIN)/arm-none-eabi-objcopy,arm-none-eabi-objcopy)
 OBJDUMP := $(if $(TOOLCHAIN),$(TOOLCHAIN)/arm-none-eabi-objdump,arm-none-eabi-objdump)
 
-# Bring in tinyusb, at the commit ../../tinyusb.mk names.  Every build in this
-# tree that compiles tinyusb takes it from there, so none of them can drift onto
-# a different one.
+# Bring in tinyusb, at the commit ../../../tinyusb.mk names.  The usb
+# conformance suite compiles the same commit, which is what lets a finding on a
+# board and a scenario in the suite be about the same library.
 TINYUSB_DIR   := tinyusb-repo
-include ../../tinyusb.mk
+include ../../../tinyusb.mk
 $(shell $(call tinyusb-fetch,$(TINYUSB_DIR)))
 TINYUSB_SRC_C := $(patsubst %,$(TINYUSB_DIR)/%,$(TINYUSB_SRC_C))
 TINYUSB_INCLUDE_DIRS := $(patsubst %,$(TINYUSB_DIR)/%,$(TINYUSB_INCLUDE_DIRS))
@@ -38,58 +39,48 @@ PICO_SDKLESS_COMMON_SRC := $(patsubst %,$(PICO_SDKLESS_COMMON_DIR)/%,$(COMMON_SR
 PICO_SDKLESS_COMMON_LD := $(patsubst %,$(PICO_SDKLESS_COMMON_DIR)/%,$(COMMON_LD))
 
 # Bring in picobootx
-include ../../picobootx.mk
-PICOBOOTX_SRC_C := $(patsubst %,../../%,$(PICOBOOTX_SRC_C))
-PICOBOOTX_INCLUDE_DIRS := $(patsubst %,../../%,$(PICOBOOTX_INCLUDE_DIRS))
+include ../../../picobootx.mk
+PICOBOOTX_SRC_C := $(patsubst %,../../../%,$(PICOBOOTX_SRC_C))
+PICOBOOTX_INCLUDE_DIRS := $(patsubst %,../../../%,$(PICOBOOTX_INCLUDE_DIRS))
 
-# RP2350 ARM (non-secure) family ID
-RP2350_FAMILY_ID := 0xe48bff59
-FLASH_BASE       := 0x10000000
+FLASH_BASE := 0x10000000
+
+# Where the host is told it may erase and program, and how much of it there is.
+# It has to be flash this firmware is not made of, and pico-sdkless's linker
+# script offers the linker all 2048K of the part - so unlike the embassy half,
+# which hands its linker only the flash below the window, this is enforced after
+# the link by checking the image never reaches the window.  See check-window.
+FLASH_WINDOW := 0x10100000
 
 BUILD_DIR := build
-BIN_PREFIX := picobootx
+BIN_PREFIX := picobootx-hw-device-tinyusb
 ELF := $(BUILD_DIR)/$(BIN_PREFIX).elf
 BIN := $(BUILD_DIR)/$(BIN_PREFIX).bin
 
-TOOLSDIR := tools
-UF2CONV := $(TOOLSDIR)/uf2conv.py
-UF2     := $(BUILD_DIR)/$(BIN_PREFIX).uf2
-
-EXAMPLE_SRC := src/main.c src/usb_descriptors.c
+DEVICE_SRC := src/main.c src/usb_descriptors.c
 
 CFLAGS := -mcpu=cortex-m33 -mthumb -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
           -O2 -Wall -Wextra -Werror \
           -ffunction-sections -fdata-sections \
-          -MMD -MP -Iinclude -I../../include -I$(PICO_SDKLESS_DIR)/include \
+          -MMD -MP -Iinclude -I../../../include -I$(PICO_SDKLESS_DIR)/include \
           -fno-builtin -nostdlib \
           $(addprefix -I,$(TINYUSB_INCLUDE_DIRS))
 
 LDFLAGS := -nostdlib \
            -T $(PICO_SDKLESS_COMMON_LD) \
            -Wl,--fatal-warnings \
-		   -Wl,--no-warn-rwx-segments \
+           -Wl,--no-warn-rwx-segments \
            -Wl,-Map=$(BUILD_DIR)/$(BIN_PREFIX).map
 
-EXAMPLE_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(EXAMPLE_SRC))
+DEVICE_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(DEVICE_SRC))
 PICO_SDKLESS_COMMON_OBJ := $(patsubst $(PICO_SDKLESS_COMMON_DIR)/%.c,$(BUILD_DIR)/common/%.o,$(PICO_SDKLESS_COMMON_SRC))
 TINYUSB_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(TINYUSB_SRC_C))
-PICOBOOTX_OBJ := $(patsubst ../../%.c,$(BUILD_DIR)/picobootx/%.o,$(PICOBOOTX_SRC_C))
-ALL_OBJ     := $(EXAMPLE_OBJ) $(PICO_SDKLESS_COMMON_OBJ) $(TINYUSB_OBJ) $(PICOBOOTX_OBJ)
+PICOBOOTX_OBJ := $(patsubst ../../../%.c,$(BUILD_DIR)/picobootx/%.o,$(PICOBOOTX_SRC_C))
+ALL_OBJ     := $(DEVICE_OBJ) $(PICO_SDKLESS_COMMON_OBJ) $(TINYUSB_OBJ) $(PICOBOOTX_OBJ)
 
-.PHONY: all clean distclean
+.PHONY: all check-window clean distclean
 
-all: $(UF2)
-
-$(UF2CONV):
-	@mkdir -p $(TOOLSDIR)
-	@echo "Downloading uf2conv.py..."
-	@curl -sL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py -o $@
-	@curl -sL https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json -o tools/uf2families.json
-	@chmod +x $@
-
-$(UF2): $(BIN) $(UF2CONV)
-	@echo "Converting binary to UF2..."
-	@python3 $(UF2CONV) --base $(FLASH_BASE) --family $(RP2350_FAMILY_ID) --output $@ $<
+all: check-window
 
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
@@ -101,7 +92,7 @@ $(BUILD_DIR)/common/%.o: $(PICO_SDKLESS_COMMON_DIR)/%.c | $(BUILD_DIR)
 	@echo "Compiling $<..."
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/picobootx/%.o: ../../%.c | $(BUILD_DIR)
+$(BUILD_DIR)/picobootx/%.o: ../../../%.c | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	@echo "Compiling $<..."
 	@$(CC) $(CFLAGS) -c $< -o $@
@@ -117,6 +108,20 @@ $(BIN): $(ELF)
 	@$(OBJDUMP) -s -j .boot_block $(ELF) >> $(BUILD_DIR)/$(BIN_PREFIX).dis
 	@$(OBJDUMP) -d -S $(ELF) >> $(BUILD_DIR)/$(BIN_PREFIX).dis
 
+# The flash the host erases has to be flash this firmware is not made of, and
+# the linker was given the whole part.  The binary is the image as it is loaded,
+# from FLASH_BASE up with the gaps padded, so its size is where the firmware
+# ends - and a firmware that reached the window would be erasing itself.
+check-window: $(BIN)
+	@size=$$(wc -c < $(BIN) | tr -d ' '); \
+	limit=$$(($(FLASH_WINDOW) - $(FLASH_BASE))); \
+	if [ $$size -gt $$limit ]; then \
+	    echo "$(BIN) is $$size bytes, which reaches the flash window at $(FLASH_WINDOW)" >&2; \
+	    echo "The host erases that window, so the firmware must end below it." >&2; \
+	    exit 1; \
+	fi; \
+	echo "Image is $$size bytes, below the flash window at $(FLASH_WINDOW)"
+
 $(BUILD_DIR):
 	@mkdir -p $@
 
@@ -124,12 +129,8 @@ clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(BUILD_DIR)
 
-toolsclean:
-	@echo "Cleaning downloaded tools..."
-	@rm -rf $(TOOLSDIR)
-
 distclean: clean
 	@echo "Removing cloned repositories..."
-	@rm -rf $(TINYUSB_DIR)
+	@rm -rf $(TINYUSB_DIR) $(PICO_SDKLESS_DIR)
 
 -include $(ALL_OBJ:.o=.d)

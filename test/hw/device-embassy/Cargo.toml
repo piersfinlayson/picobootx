@@ -10,7 +10,7 @@
 # suite builds rust/ and has no business fetching embassy.
 
 [package]
-name = "picobootx-hw-device"
+name = "picobootx-hw-device-embassy"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -20,7 +20,7 @@ publish = false
 # No test harness exists for a bare-metal target, so nothing here is a test or
 # a benchmark.  Saying so is what lets --all-targets be asked for.
 [[bin]]
-name = "picobootx-hw-device"
+name = "picobootx-hw-device-embassy"
 test = false
 bench = false
 

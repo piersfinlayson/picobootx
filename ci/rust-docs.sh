@@ -33,7 +33,7 @@ echo "Documenting the interop driver"
 (cd rust/interop && cargo doc --no-deps)
 
 echo "Documenting the hardware test"
-(cd test/hw/device && cargo doc --no-deps)
+(cd test/hw/device-embassy && cargo doc --no-deps)
 (cd test/hw/host && cargo doc --no-deps)
 
 echo "Documenting the examples and the probe"

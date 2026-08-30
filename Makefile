@@ -20,7 +20,8 @@ INTEROP_DIR         := $(RUST_DIR)/interop
 PROBE_DIR           := ci/ramfunc-probe
 EXAMPLE_DIR         := examples/tinyusb
 EXAMPLE_EMBASSY_DIR := examples/embassy
-HW_DEVICE_DIR       := test/hw/device
+HW_EMBASSY_DIR      := test/hw/device-embassy
+HW_TINYUSB_DIR      := test/hw/device-tinyusb
 HW_HOST_DIR         := test/hw/host
 
 # Where the sub-make writes its tracefiles, and what ci/coverage-report.sh
@@ -34,7 +35,7 @@ EXAMPLE_TINYUSB_DIR := tinyusb-repo
 .PHONY: all test test-core test-usb test-usbip test-rust test-unit build cov \
         cov-html cov-raise cov-uncovered clean clean-test clean-example \
         clean-example-embassy clean-rust example example-embassy \
-        hw-device hw-host clean-hw
+        hw-device hw-device-embassy hw-device-tinyusb hw-host clean-hw
 
 all: build
 
@@ -176,12 +177,21 @@ example-embassy:
 	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
 	cd $(EXAMPLE_EMBASSY_DIR) && cargo build --release
 
-# The hardware test's two halves.  Built here and by CI, run by neither: both
-# want a board on the end of a USB cable.  See test/hw/README.md.
-hw-device:
+# The hardware test.  Built here and by CI, run by neither: it wants a board on
+# the end of a USB cable.  There are two firmwares and one host, since the same
+# checks are asked of picobootx on embassy and of picobootx on tinyusb.  See
+# test/hw/README.md.
+hw-device: hw-device-embassy hw-device-tinyusb
+
+hw-device-embassy:
 	@command -v cargo >/dev/null || \
 	    (echo "cargo is not on PATH, and this target needs it" && exit 1)
-	cd $(HW_DEVICE_DIR) && cargo build --release
+	cd $(HW_EMBASSY_DIR) && cargo build --release
+
+# The C firmware, which clones tinyusb and pico-sdkless beside itself the way
+# examples/tinyusb does.  Needs an arm-none-eabi toolchain rather than cargo.
+hw-device-tinyusb:
+	@$(MAKE) -C $(HW_TINYUSB_DIR)
 
 hw-host:
 	@command -v cargo >/dev/null || \
@@ -189,5 +199,13 @@ hw-host:
 	cd $(HW_HOST_DIR) && cargo build --release
 
 clean-hw:
-	@$(call cargo-clean,$(HW_DEVICE_DIR))
+	@$(call cargo-clean,$(HW_EMBASSY_DIR))
 	@$(call cargo-clean,$(HW_HOST_DIR))
+	@# The C firmware's Makefile includes what its clones bring with them, so
+	@# it cannot be reached before they are there - the same reason
+	@# clean-example checks first.
+	@if [ -d $(HW_TINYUSB_DIR)/$(EXAMPLE_TINYUSB_DIR) ]; then \
+	    $(MAKE) -C $(HW_TINYUSB_DIR) clean; \
+	else \
+	    echo "$(HW_TINYUSB_DIR) has not been built, nothing to clean"; \
+	fi

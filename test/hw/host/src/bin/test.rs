@@ -29,7 +29,7 @@ use picobootx_hw_host::{
     CMD_REBOOT_OLD, CMD_REBOOT2, CMD_VECTORIZE_FLASH, CMD_WRITE, EP_IN, EP_OUT, FLASH_BLOCK,
     FLASH_PAGE, FLASH_SECTOR, INFO_ARGS_LEN, INFO_COUNT_LEN, INFO_HEADER_LEN, INFO_SYS,
     INFO_UF2_STATUS, INFO_UF2_TARGET, INFO_UNNAMED, MAX_PACKET, REBOOT_ARGS_LEN, REBOOT_NORMAL,
-    wait_back, wait_gone,
+    take_device_arg, wait_back, wait_gone,
 };
 
 // PICOBOOT's read, and an address the RP2350 defaults refuse.  The refusal is
@@ -107,6 +107,11 @@ const UF2_FAMILIES: [u32; 3] = [0xe48b_ff59, 0xe48b_ff5a, 0x0000_0000];
 /// race, short enough not to stretch the run.
 const REBOOT_DELAY_MS: u32 = 100;
 
+/// Left in the device's RAM window before a reboot, and gone after one: the
+/// startup zeroes what it lands in.  Four bytes no read of that window would
+/// give by accident.
+const REBOOT_MARK: [u8; 4] = [0xa5, 0x5a, 0xc3, 0x3c];
+
 /// Prints as it goes and counts what it saw.
 ///
 /// A group is a heading and a set of checks under it.  [`Runner::group`] says
@@ -141,6 +146,13 @@ impl Runner {
             self.skipped += 1;
         }
         wanted
+    }
+
+    /// A measurement worth printing beside the check it came from.  Not a
+    /// check: nothing about it can fail, and counting it would put a number in
+    /// the total that nothing judged.
+    fn note(&self, what: &str) {
+        println!("        {what}");
     }
 
     fn check(&mut self, what: &str, outcome: Result<(), String>) {
@@ -228,12 +240,22 @@ fn read_word(board: &mut Board, addr: u32) -> Read {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let filter = std::env::args().nth(1);
+    // --device names which firmware to drive, and the rest is the group filter.
+    let (want, rest) = match take_device_arg(std::env::args().skip(1)) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            println!("  FAIL  read the command line: {e}");
+            println!();
+            println!("1 checks, 1 failed");
+            return ExitCode::FAILURE;
+        }
+    };
+    let filter = rest.into_iter().next();
 
     println!("picobootx on real hardware");
     println!();
 
-    let mut board = match Board::open().await {
+    let mut board = match Board::open(want).await {
         Ok(b) => b,
         Err(e) => {
             println!("  FAIL  find the board: {e}");
@@ -242,6 +264,8 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    println!("  the {} firmware", board.firmware);
+    println!();
     let mut run = Runner::new(filter);
 
     if run.group("start") {
@@ -1485,6 +1509,32 @@ async fn reboot(run: &mut Runner, mut board: Board) -> Option<Board> {
     // the same one answering the same way.
     let before = board.read_mem(ROM_BASE, 4).ok();
 
+    // A mark in the device's RAM window, which the startup zeroes.  Finding it
+    // gone afterwards is what says the part restarted, and it says so whatever
+    // the bus did - a device back on the bus in single-digit milliseconds has
+    // rebooted just as much as one away for a fifth of a second.
+    let mark = match board.scratch().await {
+        Ok(s) => {
+            let written = board
+                .write_mem(s.ram, &REBOOT_MARK)
+                .and_then(|()| board.read_mem(s.ram, REBOOT_MARK.len() as u32))
+                .and_then(|back| {
+                    if back == REBOOT_MARK {
+                        Ok(())
+                    } else {
+                        Err(format!("it reads {back:02x?}"))
+                    }
+                });
+            let ok = written.is_ok();
+            run.check("a mark can be left in RAM before the reboot", written);
+            ok.then_some(s.ram)
+        }
+        Err(e) => {
+            run.check("a mark can be left in RAM before the reboot", Err(e));
+            None
+        }
+    };
+
     // The reboot itself.  A delay, so the acknowledgement has somewhere to be
     // collected before the part goes - which is the ordering under test.
     let acknowledged = board
@@ -1497,14 +1547,21 @@ async fn reboot(run: &mut Runner, mut board: Board) -> Option<Board> {
 
     // Let go before the part does, so the bus is not being held by a handle to
     // something that has stopped answering.
+    let firmware = board.firmware;
     drop(board);
 
-    run.check(
-        "the board leaves the bus",
-        wait_gone(Duration::from_secs(5)).await,
-    );
+    match wait_gone(firmware, Duration::from_secs(5)).await {
+        Ok(seen) => {
+            run.check("the board leaves the bus", Ok(()));
+            run.note(&format!(
+                "gone within {}ms of the acknowledgement",
+                seen.as_millis()
+            ));
+        }
+        Err(e) => run.check("the board leaves the bus", Err(e)),
+    }
 
-    let board = match wait_back(Duration::from_secs(15)).await {
+    let board = match wait_back(firmware, Duration::from_secs(15)).await {
         Ok(b) => b,
         Err(e) => {
             run.check("the board comes back", Err(e));
@@ -1514,6 +1571,19 @@ async fn reboot(run: &mut Runner, mut board: Board) -> Option<Board> {
     run.check("the board comes back", Ok(()));
 
     let mut board = board;
+    if let Some(addr) = mark {
+        run.check(
+            "the mark left in RAM is gone, so the startup ran",
+            match board.read_mem(addr, REBOOT_MARK.len() as u32) {
+                Err(e) => Err(e),
+                Ok(now) if now.iter().all(|b| *b == 0) => Ok(()),
+                Ok(now) if now == REBOOT_MARK => {
+                    Err("it is still there, so the part never restarted".into())
+                }
+                Ok(now) => Err(format!("it reads {now:02x?}, which is neither")),
+            },
+        );
+    }
     run.check(
         "the board that came back is the same one, answering the same way",
         match (board.read_mem(ROM_BASE, 4), before) {
@@ -1550,12 +1620,13 @@ async fn bus_reset(run: &mut Runner, mut board: Board) -> Option<Board> {
     // Everything below the device is given up first: a port reset is refused
     // while an interface is claimed, and a reset that was refused would leave
     // the checks below passing for the wrong reason.
+    let firmware = board.firmware;
     let device = board.into_device();
     let reset = device.reset().await.map_err(|e| format!("{e}"));
     drop(device);
     run.check("the device accepts a bus reset", reset);
 
-    let mut board = match wait_back(Duration::from_secs(15)).await {
+    let mut board = match wait_back(firmware, Duration::from_secs(15)).await {
         Ok(b) => b,
         Err(e) => {
             run.check("the board comes back from a bus reset", Err(e));

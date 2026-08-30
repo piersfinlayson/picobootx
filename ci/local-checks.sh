@@ -35,9 +35,20 @@ make example
 step "The embassy example, for the part"
 make example-embassy
 
+step "The hardware test, for the part"
+make hw-device hw-host
+
+# Four links, and each is asked the question its own toolchain answers.  The
+# bare calls are the probe and the tinyusb example, and the two with arguments
+# are the hardware test's firmwares - a consumer's link either side, which is a
+# different question from the crate's own.
 step "Where .ramfunc landed"
 ci/check-ramfunc.sh
+ci/check-ramfunc.sh test/hw/device-embassy picobootx-hw-device-embassy
 ci/check-ramfunc-c.sh
+ci/check-ramfunc-c.sh \
+    test/hw/device-tinyusb/build/picobootx-hw-device-tinyusb.elf \
+    test/hw/device-tinyusb/pico-sdkless-repo/examples/common/common.ld
 
 # --- test -------------------------------------------------------------------
 # Both suites, under both implementations, and under the two build flags that
@@ -65,7 +76,7 @@ step "Formatting"
 (cd rust/interop && cargo fmt -- --check)
 (cd examples/embassy && cargo fmt -- --check)
 (cd ci/ramfunc-probe && cargo fmt -- --check)
-(cd test/hw/device && cargo fmt -- --check)
+(cd test/hw/device-embassy && cargo fmt -- --check)
 (cd test/hw/host && cargo fmt -- --check)
 
 step "The crates' own tests"
@@ -79,7 +90,7 @@ step "Lints"
 (cd rust/interop && cargo clippy --all-targets --release -- -D warnings)
 (cd examples/embassy && cargo clippy --all-targets --release -- -D warnings)
 (cd ci/ramfunc-probe && cargo clippy --all-targets --release -- -D warnings)
-(cd test/hw/device && cargo clippy --all-targets --release -- -D warnings)
+(cd test/hw/device-embassy && cargo clippy --all-targets --release -- -D warnings)
 (cd test/hw/host && cargo clippy --all-targets --release -- -D warnings)
 
 step "Lints for the part"

@@ -84,7 +84,9 @@ uint32_t picoboot_vendor_write_available(void);
 // Force sending buffered data, return number of bytes sent
 uint32_t picoboot_vendor_write_flush(void);
 
-// Clear the transmit FIFO
+// Clear the transmit FIFO, and discard any packet already armed for the host.
+// A packet left armed is served to the next command, which then answers the
+// question before it.
 bool picoboot_vendor_write_clear(void);
 
 // Write a null-terminated string to TX FIFO

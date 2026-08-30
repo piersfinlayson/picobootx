@@ -214,28 +214,20 @@ pub unsafe fn write(addr: u32, buf: &[u8]) -> Result {
 /// program issued without that bracket writes nothing and reports success,
 /// which a host reads as an image successfully written onto blank flash.
 ///
-/// `page` is read while flash is unreadable, so a page that is not in RAM is
-/// refused rather than programmed from bytes that cannot be fetched.
+/// `page` is read by the boot ROM while flash is unreadable, so it has to be
+/// somewhere that still answers then.  That is the caller's to arrange and is
+/// not checked here — which memory a device has, and which of it is free, is
+/// the caller's business rather than this crate's.
 ///
 /// # Errors
 ///
 /// [`Status::NotFound`] when the part publishes none of the five bootrom
 /// routines the sequence needs.  On a build for the part,
 /// [`Status::PreconditionNotMet`] when the routine that runs while flash is
-/// unreadable is not resident in RAM, or when `page` is not in RAM either.
+/// unreadable is not resident in RAM.
 pub fn flash_page_write(addr: u32, page: &[u8; FLASH_PAGE_SIZE]) -> Result {
     #[cfg(target_os = "none")]
     if !ramfunc_resident(program_critical as *const ()) {
-        return Err(Status::PreconditionNotMet);
-    }
-
-    #[cfg(target_os = "none")]
-    if !within(
-        page.as_ptr() as u32,
-        FLASH_PAGE_SIZE as u32,
-        SRAM_BASE,
-        SRAM_SIZE,
-    ) {
         return Err(Status::PreconditionNotMet);
     }
 

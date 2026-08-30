@@ -343,6 +343,60 @@ static void scenario_write_to_flash_programs_whole_pages(void) {
     }
 }
 
+static void scenario_flash_program_sequence(void) {
+    pbt_begin();
+    // A divisor that could not arise by accident, so carrying it through is
+    // demonstrable rather than assumed.
+    pbt_set_xip_clkdiv(0x2Au);
+    pbt_start();
+
+    uint8_t data[FLASH_PAGE_SIZE];
+    fill_pattern(data, sizeof(data), 0x3Cu);
+
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_WRITE, 0x08u, sizeof(data));
+    pbt_args_addr_size(&cmd, RP2350_FLASH_BASE, sizeof(data));
+    pbt_host_send_cmd(&cmd);
+    pbt_pump();
+    send_data(data, sizeof(data));
+
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
+
+    // The order the chip has to be driven in, which is the erase's order.
+    // Flash cannot be programmed while it is answering execute-in-place reads,
+    // and the interrupt handlers that would run during the program are
+    // themselves fetched from flash, so both have to be down for the program
+    // and back up afterwards.
+    PBT_CHECK(pbt_before("rom_connect_internal_flash", "xip_clkdiv_read"));
+    PBT_CHECK(pbt_before("xip_clkdiv_read", "irq_disable"));
+    PBT_CHECK(pbt_before("irq_disable", "rom_flash_exit_xip"));
+    PBT_CHECK(pbt_before("rom_flash_exit_xip", "rom_flash_range_program"));
+    PBT_CHECK(pbt_before("rom_flash_range_program",
+                         "rom_flash_select_xip_read_mode"));
+    PBT_CHECK(pbt_before("rom_flash_select_xip_read_mode",
+                         "rom_flash_flush_cache"));
+    PBT_CHECK(pbt_before("rom_flash_flush_cache", "irq_enable"));
+
+    // The divisor is read before execute-in-place is taken down, which is the
+    // reason it is read separately at all, and handed back to the call that
+    // restores it.
+    PBT_REQUIRE(pbt_nth("xip_clkdiv_read", 0) != NULL);
+    PBT_CHECK_EQ(pbt_nth("xip_clkdiv_read", 0)->a0, 0x2Au);
+    PBT_REQUIRE(pbt_nth("rom_flash_select_xip_read_mode", 0) != NULL);
+    PBT_CHECK_EQ(pbt_nth("rom_flash_select_xip_read_mode", 0)->a0, 3u);
+    PBT_CHECK_EQ(pbt_nth("rom_flash_select_xip_read_mode", 0)->a1, 0x2Au);
+
+    // The program was not attempted with execute-in-place still up, which on a
+    // real part writes nothing and reports success.
+    PBT_CHECK_EQ(pbt_count("rom_flash_program_while_xip"), 0);
+
+    // The chip is left the way it was found.
+    PBT_CHECK(!pbt_irq_disabled());
+    PBT_CHECK(pbt_xip_active());
+
+    // And the page really is programmed.
+    PBT_CHECK_EQ(memcmp(pbt_flash(), data, sizeof(data)), 0);
+}
+
 static void scenario_a_skipped_erase_is_visible(void) {
     pbt_begin();
     // A page that has been written before and not erased since.
@@ -448,26 +502,58 @@ static void scenario_unaligned_flash_write_is_refused(void) {
     PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_DATA_OUT);
 }
 
-static void scenario_flash_write_without_a_bootrom_routine_is_refused(void) {
-    pbt_begin();
-    pbt_bootrom_withhold('R', 'P');
-    pbt_start();
+static void scenario_flash_write_needs_every_bootrom_routine(void) {
+    // Each of the five routines the page program uses.  Any one missing
+    // refuses the command, and refuses it before the chip is touched — a
+    // sequence that got halfway would leave flash out of execute-in-place with
+    // nothing to put it back.
+    const struct {
+        char a;
+        char b;
+    } codes[] = {
+        { 'I', 'F' }, { 'E', 'X' }, { 'R', 'P' }, { 'F', 'C' }, { 'X', 'M' },
+    };
 
-    uint8_t data[FLASH_PAGE_SIZE];
-    fill_pattern(data, sizeof(data), 0x77u);
+    for (unsigned i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
+        pbt_begin();
+        pbt_bootrom_withhold(codes[i].a, codes[i].b);
+        pbt_start();
 
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_WRITE, 0x08u, sizeof(data));
-    pbt_args_addr_size(&cmd, RP2350_FLASH_BASE, sizeof(data));
-    pbt_host_send_cmd(&cmd);
-    pbt_pump();
-    send_data(data, sizeof(data));
+        uint8_t data[FLASH_PAGE_SIZE];
+        fill_pattern(data, sizeof(data), 0x77u);
 
-    picoboot_status_t status;
-    PBT_REQUIRE(pbt_ctrl_get_status(&status));
-    PBT_CHECK_STATUS(status.status_code, PB_STATUS_NOT_FOUND);
+        picoboot_cmd_t cmd = pbt_cmd(PB_CMD_WRITE, 0x08u, sizeof(data));
+        pbt_args_addr_size(&cmd, RP2350_FLASH_BASE, sizeof(data));
+        pbt_host_send_cmd(&cmd);
+        pbt_pump();
+        send_data(data, sizeof(data));
 
-    // And nothing reached the chip.
-    PBT_CHECK_EQ(pbt_count("rom_flash_range_program"), 0);
+        picoboot_status_t status;
+        PBT_REQUIRE(pbt_ctrl_get_status(&status));
+        if (status.status_code != PB_STATUS_NOT_FOUND) {
+            pbt_fail(__FILE__, __LINE__, "without %c%c: expected NOT_FOUND, "
+                     "got %s", codes[i].a, codes[i].b,
+                     pbt_status_name((int)status.status_code));
+        }
+        if (pbt_count("rom_connect_internal_flash") != 0) {
+            pbt_fail(__FILE__, __LINE__,
+                     "without %c%c: the chip was touched before the routine "
+                     "was found to be missing", codes[i].a, codes[i].b);
+        }
+        if (pbt_count("rom_flash_range_program") != 0) {
+            pbt_fail(__FILE__, __LINE__, "without %c%c: the page was "
+                     "programmed anyway", codes[i].a, codes[i].b);
+        }
+        if (pbt_flash()[0] != 0xFFu) {
+            pbt_fail(__FILE__, __LINE__, "without %c%c: flash changed",
+                     codes[i].a, codes[i].b);
+        }
+        if (pbt_irq_disabled() || !pbt_xip_active()) {
+            pbt_fail(__FILE__, __LINE__,
+                     "without %c%c: the chip was left with interrupts or "
+                     "execute-in-place down", codes[i].a, codes[i].b);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +772,68 @@ static void scenario_otp_write_sets_rows(void) {
     PBT_CHECK_EQ(pbt_otp()[10], 0u);
 }
 
+static void scenario_otp_write_range_refused_before_any_row_is_blown(void) {
+    pbt_begin();
+    pbt_ops.otp_write_prepare = pbt_guarded_otp_write_prepare;
+    pbt_start();
+
+    // A run starting below the device's own rows and ending inside them.  The
+    // rows in front of the boundary are the ones at stake: a refusal that
+    // waited for otp_write would blow them first, and a blown fuse does not
+    // come back.
+    const uint16_t first = PBT_OTP_GUARD_FIRST - 2u;
+    const uint32_t rows[4] = { 0x0000FF01u, 0x0000FF02u, 0x0000FF03u,
+                               0x0000FF04u };
+
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_OTP_WRITE, 0x05u, sizeof(rows));
+    pbt_args_otp(&cmd, first, 4u, 0u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_NOT_PERMITTED);
+
+    // Refused before the data phase, so no row was written and the device
+    // never reached its own write callback.
+    PBT_CHECK_EQ(pbt_count("op_otp_write"), 0);
+    for (unsigned i = 0; i < 4u; i++) {
+        PBT_CHECK_EQ(pbt_otp()[first + i], 0u);
+    }
+
+    // The same command wholly below the boundary is served, so what was
+    // refused was the range and not the command.
+    pbt_recover();
+    picoboot_cmd_t below = pbt_cmd(PB_CMD_OTP_WRITE, 0x05u, sizeof(rows));
+    pbt_args_otp(&below, 4u, 4u, 0u);
+    pbt_host_send_cmd(&below);
+    pbt_pump();
+    send_data((const uint8_t *)rows, sizeof(rows));
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
+    for (unsigned i = 0; i < 4u; i++) {
+        PBT_CHECK_EQ(pbt_otp()[4u + i], rows[i]);
+    }
+}
+
+static void scenario_otp_write_without_a_prepare_is_unrestricted(void) {
+    pbt_begin();
+    pbt_start();
+
+    // No otp_write_prepare in the table, which is every device written before
+    // the callback existed.  The same run the guarding device refuses is
+    // served.
+    const uint16_t first = PBT_OTP_GUARD_FIRST - 2u;
+    const uint32_t rows[4] = { 0x0000FF01u, 0x0000FF02u, 0x0000FF03u,
+                               0x0000FF04u };
+
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_OTP_WRITE, 0x05u, sizeof(rows));
+    pbt_args_otp(&cmd, first, 4u, 0u);
+    pbt_host_send_cmd(&cmd);
+    pbt_pump();
+    send_data((const uint8_t *)rows, sizeof(rows));
+
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
+    PBT_CHECK_EQ(pbt_count("op_otp_write_prepare"), 0);
+    for (unsigned i = 0; i < 4u; i++) {
+        PBT_CHECK_EQ(pbt_otp()[first + i], rows[i]);
+    }
+}
+
 static void scenario_otp_write_only_ever_sets_bits(void) {
     pbt_begin();
     pbt_start();
@@ -867,6 +1015,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_a_lone_byte_during_a_data_phase_is_data },
     { "WRITE to flash programs whole, padded pages",
       scenario_write_to_flash_programs_whole_pages },
+    { "a flash page program drives the chip in the required order",
+      scenario_flash_program_sequence },
     { "a write over unerased flash does not put the data there",
       scenario_a_skipped_erase_is_visible },
     { "erasing first puts the data there",
@@ -877,8 +1027,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_flash_write_refused_without_a_page_callback },
     { "an unaligned flash write is refused",
       scenario_unaligned_flash_write_is_refused },
-    { "WRITE to flash without a bootrom routine is refused",
-      scenario_flash_write_without_a_bootrom_routine_is_refused },
+    { "WRITE to flash needs every bootrom routine before it starts",
+      scenario_flash_write_needs_every_bootrom_routine },
     { "FLASH_ERASE drives the chip in the required order",
       scenario_flash_erase_sequence },
     { "FLASH_ERASE leaves neighbouring sectors alone",
@@ -891,6 +1041,10 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_flash_erase_without_its_callbacks_is_refused },
     { "OTP_WRITE sets the rows it was asked for",
       scenario_otp_write_sets_rows },
+    { "OTP_WRITE refuses a protected range before any row is blown",
+      scenario_otp_write_range_refused_before_any_row_is_blown },
+    { "OTP_WRITE without a prepare callback restricts nothing",
+      scenario_otp_write_without_a_prepare_is_unrestricted },
     { "OTP_WRITE only ever sets bits",
       scenario_otp_write_only_ever_sets_bits },
     { "OTP_WRITE through the ECC view",

@@ -37,6 +37,7 @@ make example-embassy
 
 step "Where .ramfunc landed"
 ci/check-ramfunc.sh
+ci/check-ramfunc-c.sh
 
 # --- test -------------------------------------------------------------------
 # Both suites, under both implementations, and under the two build flags that

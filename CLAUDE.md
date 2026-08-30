@@ -107,7 +107,8 @@ shipped hardware.
   below, and `coverage-unmeasured.txt` names the sources that carry no
   executable line, each with the reason.  `check-ramfunc.sh` and
   `ramfunc-probe/` link `picobootx-rp2350` into a bare-metal binary and check
-  where `.ramfunc` landed.  `local-checks.sh` runs every gate CI applies, and
+  where `.ramfunc` landed.  `check-ramfunc-c.sh` asks the same of the C, over
+  the tinyusb example's link.  `local-checks.sh` runs every gate CI applies, and
   `rust-docs.sh` builds the crates' documents with warnings as errors.
   `bridges-docker.sh`, `bridges-run.sh` and `bridges.dockerfile` run the two
   bridges on a machine that is not Linux, by handing them the Linux kernel the

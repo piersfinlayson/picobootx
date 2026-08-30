@@ -164,11 +164,18 @@ impl Ops for OpsTable {
         status(unsafe { f(&args, self.ctx) })
     }
 
-    fn otp_read_prepare(&mut self, _row: u16, _count: u16, _ecc: Ecc) -> Result {
-        if self.t().and_then(|t| t.otp_read).is_none() {
+    fn otp_read_prepare(&mut self, row: u16, count: u16, ecc: Ecc) -> Result {
+        let t = self.t().ok_or(Status::UnknownCmd)?;
+        if t.otp_read.is_none() {
             return Err(Status::UnknownCmd);
         }
-        Ok(())
+        // A null prepare in the C table means the device serves OTP and does
+        // not restrict ranges, so there is nothing to ask and nothing to
+        // refuse.
+        match t.otp_read_prepare {
+            None => Ok(()),
+            Some(f) => status(unsafe { f(row, count, ecc as u8, self.ctx) }),
+        }
     }
 
     fn otp_read(&mut self, row: u16, ecc: Ecc, buf: &mut [u8]) -> Result {
@@ -179,11 +186,16 @@ impl Ops for OpsTable {
         status(unsafe { f(row, ecc as u8, buf.as_mut_ptr(), buf.len() as u32, self.ctx) })
     }
 
-    fn otp_write_prepare(&mut self, _row: u16, _count: u16, _ecc: Ecc) -> Result {
-        if self.t().and_then(|t| t.otp_write).is_none() {
+    fn otp_write_prepare(&mut self, row: u16, count: u16, ecc: Ecc) -> Result {
+        let t = self.t().ok_or(Status::UnknownCmd)?;
+        if t.otp_write.is_none() {
             return Err(Status::UnknownCmd);
         }
-        Ok(())
+        // As otp_read_prepare.
+        match t.otp_write_prepare {
+            None => Ok(()),
+            Some(f) => status(unsafe { f(row, count, ecc as u8, self.ctx) }),
+        }
     }
 
     fn otp_write(&mut self, row: u16, ecc: Ecc, buf: &[u8]) -> Result {

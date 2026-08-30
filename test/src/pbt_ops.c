@@ -128,6 +128,34 @@ static pb_status_t op_otp_write(uint16_t row, uint8_t ecc, const uint8_t *buf,
     return picoboot_default_otp_write(row, ecc, buf, len, ctx);
 }
 
+// An integrator that keeps a host out of its own OTP rows.  See pbt.h.
+//
+// Refusing here rather than from otp_read or otp_write is the whole point: the
+// request is judged before any row is touched, so a write reaching a protected
+// row blows none of the rows in front of it either.
+static pb_status_t pbt_guard(const char *name, uint16_t row,
+                             uint16_t row_count) {
+    pbt_log(name, row, row_count, 0, 0);
+    if ((uint32_t)row + (uint32_t)row_count > PBT_OTP_GUARD_FIRST) {
+        return PB_STATUS_NOT_PERMITTED;
+    }
+    return PB_STATUS_OK;
+}
+
+pb_status_t pbt_guarded_otp_read_prepare(uint16_t row, uint16_t row_count,
+                                         uint8_t ecc, void *ctx) {
+    (void)ecc;
+    (void)ctx;
+    return pbt_guard("op_otp_read_prepare", row, row_count);
+}
+
+pb_status_t pbt_guarded_otp_write_prepare(uint16_t row, uint16_t row_count,
+                                          uint8_t ecc, void *ctx) {
+    (void)ecc;
+    (void)ctx;
+    return pbt_guard("op_otp_write_prepare", row, row_count);
+}
+
 void pbt_ops_reset(void) {
     pbt_ops = (picoboot_ops_t){
         .exclusive_access    = op_exclusive_access,

@@ -177,7 +177,7 @@ typedef enum {
     PB_CAT_ACTION_ASYNC,    // async: call op to initiate, completion signalled
                             // via callback (flash_erase)
     PB_CAT_ACTION_DEFERRED, // send ack first, execute after ack clears
-                            // (reboot2, reboot)
+                            // (reboot2)
     PB_CAT_DATA_IN,         // device->host data transfer
                             // (read, get_info, otp_read)
     PB_CAT_DATA_OUT,        // host->device data transfer
@@ -327,6 +327,21 @@ typedef struct {
         uint32_t len,
         void *ctx
     );
+    // otp_read_prepare is offered the whole request — the first row, how many
+    // rows, and which view they are addressed through — before any of it is
+    // read, so a device that keeps a host out of a range refuses the range
+    // rather than the packets that reach it.  NULL means the device serves
+    // OTP_READ and does not restrict ranges, which is what every device
+    // written before this callback existed does.
+    //
+    // otp_read is what OTP_READ needs, and the command returns
+    // PB_STATUS_UNKNOWN_CMD without it whatever otp_read_prepare says.
+    pb_status_t (*otp_read_prepare)(
+        uint16_t row,
+        uint16_t row_count,
+        uint8_t ecc,
+        void *ctx
+    );
     pb_status_t (*otp_read)(
         uint16_t row,
         uint8_t ecc,
@@ -364,6 +379,15 @@ typedef struct {
         uint32_t addr, 
         const uint8_t *buf, 
         uint32_t len, 
+        void *ctx
+    );
+    // otp_write_prepare is otp_read_prepare's counterpart, and matters more:
+    // without it a device refusing a range only refuses the packet that
+    // reaches it, and the rows before that one have already been blown.
+    pb_status_t (*otp_write_prepare)(
+        uint16_t row,
+        uint16_t row_count,
+        uint8_t ecc,
         void *ctx
     );
     pb_status_t (*otp_write)(
@@ -477,6 +501,13 @@ typedef struct pb_state_block pb_state_block_t;
 //                     returns PB_STATUS_NOT_PERMITTED once write_prepare has
 //                     reported the destination is flash.  WRITE to memory and
 //                     OTP_WRITE do not use it and are unaffected.
+//
+//                     It is read by the boot ROM after flash has been taken
+//                     out of execute-in-place, so it must be somewhere that
+//                     still answers then.  Anywhere but flash itself, and any
+//                     PSRAM, which answer through the same interface.  Which
+//                     of a device's memory that leaves is yours, and picobootx
+//                     does not check it.
 //   rhport          : TinyUSB root hub port (0 on RP2350)
 //   ep_out          : BULK OUT endpoint address
 //   ep_in           : BULK IN endpoint address

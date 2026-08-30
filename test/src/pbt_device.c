@@ -585,6 +585,14 @@ static void pbt_rom_flash_range_program(uint32_t offs, const uint8_t *data,
                                         size_t count) {
     pbt_log("rom_flash_range_program", offs, (uint32_t)count, 0, 0);
 
+    // Flash cannot be programmed while it is answering execute-in-place reads,
+    // for the same reason it cannot be erased.  A program issued with XIP still
+    // up is recorded and does nothing, so the scenario sees flash that did not
+    // change rather than a silently successful write.
+    if (s_xip_active) {
+        pbt_log("rom_flash_program_while_xip", offs, (uint32_t)count, 0, 0);
+        return;
+    }
     if (offs + count > PBT_FLASH_MODELLED) {
         pbt_log("rom_flash_program_out_of_model", offs, (uint32_t)count, 0, 0);
         return;

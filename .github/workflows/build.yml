@@ -52,6 +52,12 @@ jobs:
           ci/check-ramfunc.sh
           ci/check-ramfunc.sh test/hw/device picobootx-hw-device
 
+      # The C's counterpart, over the tinyusb example, which is the only C link
+      # this repository makes.  The two scripts ask the same question of
+      # different copies - see ci/check-ramfunc-c.sh.
+      - name: Check where the C RAM functions landed
+        run: ci/check-ramfunc-c.sh
+
   # The conformance suite needs a C compiler and make, and nothing else — no
   # USB, no kernel modules, no privileges — so it runs on hosted runners.  Both
   # operating systems are here because picobootx's value is portability, and

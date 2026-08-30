@@ -649,6 +649,27 @@ pb_status_t pbt_uf2_get_info(pb_info_type_t type, uint32_t param0,
 #define PBT_UF2_STATUS_WORDS 4u
 
 // ---------------------------------------------------------------------------
+// An integrator that keeps a host out of part of OTP
+//
+// picoboot_ops_t's two OTP prepares are offered the whole request before any
+// row is touched, which is the only place a range can be refused as a range —
+// by the time otp_write runs, the rows ahead of the refusal have been blown.
+// A device with rows of its own is what those callbacks are for, and this is
+// that device.  A scenario puts the pair into pbt_ops before pbt_start.
+//
+// Rows from PBT_OTP_GUARD_FIRST up are the device's own and are refused with
+// PB_STATUS_NOT_PERMITTED.  A request that reaches one is refused whole, even
+// where it starts below the boundary.
+// ---------------------------------------------------------------------------
+
+#define PBT_OTP_GUARD_FIRST 0x40u
+
+pb_status_t pbt_guarded_otp_read_prepare(uint16_t row, uint16_t row_count,
+                                         uint8_t ecc, void *ctx);
+pb_status_t pbt_guarded_otp_write_prepare(uint16_t row, uint16_t row_count,
+                                          uint8_t ecc, void *ctx);
+
+// ---------------------------------------------------------------------------
 // The sample custom command implementation
 // ---------------------------------------------------------------------------
 

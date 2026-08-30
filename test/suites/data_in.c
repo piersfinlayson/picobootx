@@ -2540,6 +2540,37 @@ static void scenario_otp_read_raw_and_ecc(void) {
     }
 }
 
+static void scenario_otp_read_range_refused_before_any_row_is_read(void) {
+    pbt_begin();
+    for (unsigned i = 0; i < PBT_OTP_GUARD_FIRST + 4u; i++) {
+        pbt_otp()[i] = 0xC0DE0000u | i;
+    }
+    pbt_ops.otp_read_prepare = pbt_guarded_otp_read_prepare;
+    pbt_start();
+
+    // A run that starts below the device's own rows and ends inside them.
+    const uint16_t first = PBT_OTP_GUARD_FIRST - 2u;
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_OTP_READ, 0x05u, 16u);
+    pbt_args_otp(&cmd, first, 4u, 0u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_NOT_PERMITTED);
+
+    // Refused before the data phase, so nothing was read and nothing went to
+    // the host.
+    PBT_CHECK_EQ(pbt_count("op_otp_read"), 0);
+    PBT_CHECK_EQ(pbt_payload_len(), 0u);
+
+    // The same command wholly below the boundary is served, so what was
+    // refused was the range and not the command.
+    pbt_recover();
+    picoboot_cmd_t below = pbt_cmd(PB_CMD_OTP_READ, 0x05u, 16u);
+    pbt_args_otp(&below, 4u, 4u, 0u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&below), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_payload_len() == 16u);
+    for (uint32_t i = 0; i < 4u; i++) {
+        PBT_CHECK_EQ(payload_word(i), pbt_otp()[4u + i]);
+    }
+}
+
 static void scenario_otp_read_starts_at_the_requested_row(void) {
     pbt_begin();
     for (unsigned i = 0; i < 64u; i++) {
@@ -2717,6 +2748,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_get_info_without_its_callbacks_is_refused },
     { "OTP_READ returns raw and ECC views of the same rows",
       scenario_otp_read_raw_and_ecc },
+    { "OTP_READ refuses a protected range before any row is read",
+      scenario_otp_read_range_refused_before_any_row_is_read },
     { "OTP_READ starts at the row it was asked for",
       scenario_otp_read_starts_at_the_requested_row },
     { "OTP_READ carries its row cursor across packets",

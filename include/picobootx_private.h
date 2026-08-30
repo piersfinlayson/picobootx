@@ -162,7 +162,6 @@ typedef struct {
     uint16_t current_row;        // next row to access
     uint16_t rows_remaining;     // rows not yet transferred
     uint8_t  ecc;                // 0=raw (4 bytes/row), 1=ECC (2 bytes/row)
-    uint32_t transfer_remaining; // bytes still owed to/from host
 } pb_otp_access_t;
 
 typedef struct {
@@ -211,7 +210,7 @@ struct pb_state_block {
     union {
         pb_in_read_t      read;         //  8 bytes
         pb_in_get_info_t  get_info;     // 12 bytes
-        pb_otp_access_t   otp;          // 12 bytes
+        pb_otp_access_t   otp;          //  8 bytes
         pb_out_write_t    write;        // 16 bytes
         pb_reboot2_args_t reboot2_args; // 16 bytes; persisted for post-ZLP action
         picoboot_cmd_t    custom_cmd;   // 32 bytes (largest); the command being

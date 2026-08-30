@@ -83,6 +83,15 @@ void picobootx_host_test_irq_enable(void);
 
 // Host-test seam.  See PICOBOOTX_DEV_PTR.
 void *picobootx_host_test_dev_ptr(uint32_t addr, uint32_t len);
+
+#endif
+
+#if !defined(PICOBOOTX_HOST_TEST)
+// Device implementation of PICOBOOTX_RAMFUNC_IN_RAM.  A function in
+// picobootx_impl.c rather than a macro body, because the marker word it reads
+// has to be placed in .ramfunc beside the routines it answers for.
+bool picobootx_ramfunc_in_ram_impl(const void *routine);
+
 #endif
 
 // Look a bootrom function up by its two-character code.
@@ -138,6 +147,43 @@ void *picobootx_host_test_dev_ptr(uint32_t addr, uint32_t len);
 #define PICOBOOTX_RAMFUNC __attribute__((section(".ramfunc"), noinline))
 #endif
 
+// Refuse the command unless a routine placed in .ramfunc can be run while
+// flash is unreadable.
+//
+// It has to be in SRAM and it has to hold what was linked, and neither follows
+// from the section name alone — that names a section, and the integrator's
+// linker script and startup are what decide where the section goes and whether
+// its bytes are carried there.  A project that has not done both links clean,
+// and what an erase or a program then jumps into is either flash that has
+// stopped answering or RAM nothing filled.  So it is checked while flash still
+// answers rather than discovered by a fetch that never completes.
+//
+// The whole statement, so that a host build carries none of it.  Where a
+// routine landed is a property of a link, and a host build's link is not a
+// device's — there is nothing here for a harness to stand in for, and
+// ci/check-ramfunc-c.sh is what asks the question of a device link.  The Rust
+// swallows its own statement the same way, with a cfg.
+#if defined(PICOBOOTX_HOST_TEST)
+#define PICOBOOTX_REQUIRE_RAMFUNC(routine) ((void)0)
+#else
+#define PICOBOOTX_REQUIRE_RAMFUNC(routine)                                    \
+    do {                                                                      \
+        if (!picobootx_ramfunc_in_ram_impl((const void *)(routine))) {        \
+            ERR("%s is not in RAM", #routine);                                \
+            return PB_STATUS_PRECONDITION_NOT_MET;                            \
+        }                                                                     \
+    } while (0)
+#endif
+
+// Place data in RAM, beside the functions PICOBOOTX_RAMFUNC places there.
+//
+// The same section, so one linker script entry and one startup copy carry both.
+#if defined(PICOBOOTX_HOST_TEST)
+#define PICOBOOTX_RAMFUNC_DATA
+#else
+#define PICOBOOTX_RAMFUNC_DATA __attribute__((section(".ramfunc.mark")))
+#endif
+
 // Obtain a dereferenceable pointer for a device address.
 //
 // READ and WRITE name addresses in the device's own address space, and on a
@@ -176,7 +222,10 @@ pb_status_t picoboot_default_exit_xip(void *ctx);
 // Returns PB_STATUS_OK.
 pb_status_t picoboot_default_enter_xip(void *ctx);
 
-// Returns PB_STATUS_OK.  Does not check arguments or reboot.
+// Whether this part can reboot as asked.  The arguments are the bootrom's to
+// judge, so all this establishes is that there is a routine to hand them to —
+// PB_STATUS_NOT_FOUND when the part publishes none, and PB_STATUS_OK otherwise.
+// It does not reboot.
 pb_status_t picoboot_default_reboot2_prepare(
     const pb_reboot2_args_t *args, 
     void *ctx
@@ -219,8 +268,26 @@ pb_status_t picoboot_default_write(
     void *ctx
 );
 
-// Writes a 256-byte page to flash at the specified address.
-// Does not perform any validation.
+// Writes a 256-byte page to flash at the specified address.  Does not perform
+// any validation — the address is one picoboot_default_write_prepare reported
+// as flash.
+//
+// The bootrom's programming routine talks to flash over its serial interface,
+// which means execute-in-place has to be left first and put back afterwards.
+// That is the same bracket picoboot_default_flash_erase needs, for the same
+// reason, and the part of it that runs while flash cannot be read is placed in
+// RAM with interrupts off.  A program issued without that bracket writes
+// nothing and reports success, which a host reads as an image successfully
+// written onto blank flash.
+//
+// buf is read by the boot ROM while flash is unreadable, so it has to be
+// somewhere that still answers then — which is the caller's to arrange and is
+// not checked here.  Where a device's memory is, and which of it is free, is
+// the caller's business rather than this library's.
+//
+// Every one of the five bootrom routines the sequence needs is looked up before
+// any of them runs, and a part publishing none of them is refused with
+// PB_STATUS_NOT_FOUND rather than left part way through the sequence.
 pb_status_t picoboot_default_flash_page_write(
     uint32_t addr,
     const uint8_t *buf,

@@ -74,7 +74,7 @@ In main, or elsewhere, but before picobootx is used, call `picoboot_init`, passi
 - your operations struct
 - the pointer to picobootx's state block
 - optional pointer to custom protocol support (NULL if not used) - see [Custom Commands](#4a-custom-commands-optional)
-- optional pointer to 256 byte buffer for flash/OTP write support (NULL if those operations are not supported)
+- optional pointer to 256 byte buffer for flash/OTP write support (NULL if those operations are not supported).  The boot ROM reads it with flash out of execute-in-place, so it must not be in flash or in PSRAM, which answers through the same interface.  Where else it goes is yours, and picobootx does not check it.
 - the USB port number that picobootx should use, from tusb_configh.h (for RP2350 this is always 0)
 - the endpoint number to use for the picoboot OUT endpoint (must be a valid EP OUT endpoint that is not used for other purposes in your application)
 - the endpoint number to use for the picoboot IN endpoint (must be a valid EP IN endpoint that is not used for other purposes in your application)
@@ -183,7 +183,9 @@ The Makefile fragment [picobootx.mk](picobootx.mk) contains definitions of the s
 
 ## 8. Place `.ramfunc` in RAM
 
-An erase takes flash out of execute-in-place, so the part of the sequence that runs while flash is unreadable is placed in the `.ramfunc` section.  A section name places nothing on its own — your linker script decides where `.ramfunc` lands, and your startup decides whether its bytes are carried there.  A build missing either links without a warning, and what the erase jumps into is a flash that has stopped answering or a RAM nothing filled.
+An erase and a flash page program both take flash out of execute-in-place, so the parts of those sequences that run while flash is unreadable are placed in the `.ramfunc` section.  A section name places nothing on its own — your linker script decides where `.ramfunc` lands, and your startup decides whether its bytes are carried there.  A build missing either links without a warning, and what the erase or the program jumps into is a flash that has stopped answering or a RAM nothing filled.
+
+[ci/check-ramfunc-c.sh](ci/check-ramfunc-c.sh) reads an ELF and says whether the link did both.  Point it at yours.
 
 Your linker script needs an output section for it, in RAM and loaded from flash.  This is [the example's](examples/tinyusb/pico-sdkless-repo/examples/common/common.ld):
 
@@ -197,7 +199,9 @@ Your linker script needs an output section for it, in RAM and loaded from flash.
 __ramfunc_load = LOADADDR(.ramfunc);
 ```
 
-and your reset handler needs to copy it, before anything erases flash:
+The star in `*(.ramfunc*)` matters.  picobootx reads a marker word in `.ramfunc.mark` to tell whether your startup copy ran, and a script matching `.ramfunc` exactly leaves it behind, which refuses an erase on a device that would have worked.
+
+and your reset handler needs to copy it, before anything erases or programs flash:
 
 ```c
 extern uint32_t __ramfunc_start;  // Start of .ramfunc in RAM

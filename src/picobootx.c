@@ -212,15 +212,20 @@ static pb_status_t pb_otp_read_prepare(
     const picoboot_cmd_t *cmd,
     void *ctx
 ) {
-    (void)ctx;
     if (!s->ops->otp_read) {
         return PB_STATUS_UNKNOWN_CMD;
     }
     const pb_otp_args_t *args = (const pb_otp_args_t *)cmd->args;
-    s->xfer.otp.current_row        = args->row;
-    s->xfer.otp.rows_remaining     = args->row_count;
-    s->xfer.otp.ecc                = args->ecc;
-    s->xfer.otp.transfer_remaining = cmd->transfer_len;
+    if (s->ops->otp_read_prepare) {
+        pb_status_t st = s->ops->otp_read_prepare(args->row, args->row_count,
+                                                  args->ecc, ctx);
+        if (st != PB_STATUS_OK) {
+            return st;
+        }
+    }
+    s->xfer.otp.current_row    = args->row;
+    s->xfer.otp.rows_remaining = args->row_count;
+    s->xfer.otp.ecc            = args->ecc;
     return PB_STATUS_OK;
 }
 
@@ -390,15 +395,20 @@ static pb_status_t pb_otp_write_prepare(
     const picoboot_cmd_t *cmd,
     void *ctx
 ) {
-    (void)ctx;
     if (!s->ops->otp_write) {
         return PB_STATUS_UNKNOWN_CMD;
     }
     const pb_otp_args_t *args = (const pb_otp_args_t *)cmd->args;
-    s->xfer.otp.current_row        = args->row;
-    s->xfer.otp.rows_remaining     = args->row_count;
-    s->xfer.otp.ecc                = args->ecc;
-    s->xfer.otp.transfer_remaining = cmd->transfer_len;
+    if (s->ops->otp_write_prepare) {
+        pb_status_t st = s->ops->otp_write_prepare(args->row, args->row_count,
+                                                   args->ecc, ctx);
+        if (st != PB_STATUS_OK) {
+            return st;
+        }
+    }
+    s->xfer.otp.current_row    = args->row;
+    s->xfer.otp.rows_remaining = args->row_count;
+    s->xfer.otp.ecc            = args->ecc;
     return PB_STATUS_OK;
 }
 
@@ -425,11 +435,8 @@ static pb_status_t pb_otp_write_consume(
         return st;
     }
 
-    otp->current_row       += (uint16_t)rows;
-    otp->rows_remaining    -= (uint16_t)rows;
-    otp->transfer_remaining = (otp->transfer_remaining > len)
-                              ? otp->transfer_remaining - len
-                              : 0u;
+    otp->current_row    += (uint16_t)rows;
+    otp->rows_remaining -= (uint16_t)rows;
     *done = (otp->rows_remaining == 0u);
     return PB_STATUS_OK;
 }

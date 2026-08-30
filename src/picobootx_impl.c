@@ -73,6 +73,42 @@ static bool pb_range_within(
     return addr >= base && end <= (uint64_t)base + (uint64_t)len;
 }
 
+#if !defined(PICOBOOTX_HOST_TEST)
+
+// What pb_ramfunc_mark holds once the startup copy has carried it into RAM.
+#define PB_RAMFUNC_MARK_VALUE 0x7062785fu
+
+// Placed with the critical routines, and read before either is called.
+//
+// An address in SRAM says the linker script put the section in RAM.  It does
+// not say the bytes arrived, since a script can place a section in RAM and
+// leave the startup with nothing that copies it.  SRAM does not power up
+// holding this word, so reading it back says a copy ran and reached this word.
+//
+// It says no more than that.  Where in the section the word sits is decided by
+// the order the linker takes the input sections in, which nothing here or in
+// an integrator's script states, so a copy that stopped short of the section's
+// end may or may not have stopped short of this.  Whether the copy covers the
+// whole section is a property of a link, and ci/check-ramfunc-c.sh is what asks
+// it of one.
+static const uint32_t PICOBOOTX_RAMFUNC_DATA pb_ramfunc_mark =
+    PB_RAMFUNC_MARK_VALUE;
+
+bool picobootx_ramfunc_in_ram_impl(const void *routine) {
+    uintptr_t addr = (uintptr_t)routine;
+    if (addr < (uintptr_t)RP2350_SRAM_BASE ||
+        addr >= (uintptr_t)RP2350_SRAM_BASE + (uintptr_t)RP2350_SRAM_SIZE) {
+        return false;
+    }
+
+    // Volatile because what is wanted is what SRAM holds now.  The value the
+    // compiler knows was linked is the answer only once the startup copy has
+    // put it there.
+    return *(const volatile uint32_t *)&pb_ramfunc_mark == PB_RAMFUNC_MARK_VALUE;
+}
+
+#endif
+
 pb_status_t pb_status_from_bootrom(int ret) {
     switch (ret) {
         case 0:                                    return PB_STATUS_OK;
@@ -181,7 +217,6 @@ size_t picoboot_get_serial(uint16_t *buffer, size_t max_len) {
 }
 
 pb_status_t picoboot_default_exclusive_access(const pb_exclusive_access_args_t *args, void *ctx) {
-    (void)args;
     (void)ctx;
 
     pb_status_t st = PB_STATUS_OK;
@@ -320,6 +355,45 @@ pb_status_t picoboot_default_write(
     return PB_STATUS_OK;
 }
 
+// This function MUST run from RAM, as it disables flash access while
+// programming.  It also disables interrupts (which are also serviced from
+// flash) for the duration of the program.
+//
+// Everything picoboot_default_flash_erase's flash_erase_critical says applies
+// here for the same reasons.  buf is read while flash is unreadable, so it has
+// to be somewhere other than flash.
+static void PICOBOOTX_RAMFUNC flash_program_critical(
+    flash_exit_xip_fn_t exit_xip,
+    flash_range_program_fn_t range_program,
+    flash_flush_cache_fn_t flush_cache,
+    flash_select_xip_read_mode_fn_t select_xip,
+    uint32_t flash_offs,
+    const uint8_t *data,
+    uint8_t clkdiv
+) {
+    // Disable interrupts
+    PICOBOOTX_IRQ_DISABLE();
+
+    // Exit XIP mode before programming so that the RP2350 enters QSPI serial
+    // command mode, which is what a program needs.  This has the impact of
+    // preventing access to flash from code.
+    exit_xip();
+
+    // One page, which is the unit the protocol writes flash in and the only
+    // length this is ever asked for.
+    range_program(flash_offs, data, FLASH_PAGE_SIZE);
+
+    // Re-enable XIP mode so firmware can re-access flash.
+    select_xip(3, clkdiv);
+
+    // Flush the flash cache to ensure the pre-program data isn't returned on
+    // subsequent reads.
+    flush_cache();
+
+    // Re-enable interrupts
+    PICOBOOTX_IRQ_ENABLE();
+}
+
 pb_status_t picoboot_default_flash_page_write(
     uint32_t addr,
     const uint8_t *buf,
@@ -327,14 +401,64 @@ pb_status_t picoboot_default_flash_page_write(
 ) {
     (void)ctx;
 
+    // The part that runs while flash is unreadable has to be in RAM, checked
+    // while flash still answers rather than found out by a fetch that never
+    // completes.  buf has to be readable then too, and that one is the caller's
+    // to arrange — see picoboot_default_flash_page_write in picobootx_impl.h.
+    PICOBOOTX_REQUIRE_RAMFUNC(flash_program_critical);
+
+    // Every routine the sequence needs is looked up before any of it runs,
+    // since stopping part way through would leave flash out of
+    // execute-in-place.
+    connect_internal_flash_fn_t connect_internal_flash = pb_lookup_connect_internal_flash_fn();
+    if (connect_internal_flash == NULL) {
+        ERR("Unable to find connect_internal_flash in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    flash_exit_xip_fn_t flash_exit_xip = pb_lookup_flash_exit_xip_fn();
+    if (flash_exit_xip == NULL) {
+        ERR("Unable to find flash_exit_xip in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
     flash_range_program_fn_t flash_range_program = pb_lookup_flash_range_program_fn();
     if (flash_range_program == NULL) {
         ERR("Unable to find flash_range_program in ROM");
         return PB_STATUS_NOT_FOUND;
     }
 
+    flash_flush_cache_fn_t flash_flush_cache = pb_lookup_flash_flush_cache_fn();
+    if (flash_flush_cache == NULL) {
+        ERR("Unable to find flash_flush_cache in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    flash_select_xip_read_mode_fn_t flash_select_xip_read_mode = pb_lookup_flash_select_xip_read_mode_fn();
+    if (flash_select_xip_read_mode == NULL) {
+        ERR("Unable to find flash_select_xip_read_mode in ROM");
+        return PB_STATUS_NOT_FOUND;
+    }
+
+    DEBUG("program flash: addr=0x%08x", addr);
+    connect_internal_flash();
+
+    // Restore XIP mode using the clock divisor currently configured in QMI,
+    // which is why it is read here rather than assumed.  See
+    // picoboot_default_flash_erase for the mode.
+    uint8_t clkdiv = PICOBOOTX_XIP_CLKDIV();
+
     uint32_t flash_offs = addr - RP2350_FLASH_BASE;
-    flash_range_program(flash_offs, buf, 256u);
+    flash_program_critical(
+        flash_exit_xip,
+        flash_range_program,
+        flash_flush_cache,
+        flash_select_xip_read_mode,
+        flash_offs,
+        buf,
+        clkdiv
+    );
+
     return PB_STATUS_OK;
 }
 
@@ -400,6 +524,9 @@ pb_status_t picoboot_default_flash_erase(
     void *ctx
 ) {
     (void)ctx;
+
+    // As picoboot_default_flash_page_write, and for the same reason.
+    PICOBOOTX_REQUIRE_RAMFUNC(flash_erase_critical);
 
     connect_internal_flash_fn_t connect_internal_flash = pb_lookup_connect_internal_flash_fn();
     if (connect_internal_flash == NULL) {
@@ -747,7 +874,7 @@ pb_status_t picoboot_default_otp_read(
 
     uint8_t row_size = ecc ? 2u : 4u;
     if (len % row_size != 0) {
-        ERR("OTP write length %u is not a multiple of row size %u", len, row_size);
+        ERR("OTP read length %u is not a multiple of row size %u", len, row_size);
         return PB_STATUS_INVALID_ARG;
     }
 

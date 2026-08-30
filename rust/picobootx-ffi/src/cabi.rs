@@ -62,6 +62,7 @@ type FnGetInfo =
     unsafe extern "C" fn(CInfoType, u32, u32, *mut u8, u32, *mut u32, *mut c_void) -> CStatus;
 type FnReadPrepare = unsafe extern "C" fn(u32, u32, *mut c_void) -> CStatus;
 type FnRead = unsafe extern "C" fn(u32, *mut u8, u32, *mut c_void) -> CStatus;
+type FnOtpPrepare = unsafe extern "C" fn(u16, u16, u8, *mut c_void) -> CStatus;
 type FnOtpRead = unsafe extern "C" fn(u16, u8, *mut u8, u32, *mut c_void) -> CStatus;
 type FnWritePrepare = unsafe extern "C" fn(u32, u32, *mut bool, *mut c_void) -> CStatus;
 type FnFlashPageWrite = unsafe extern "C" fn(u32, *const u8, *mut c_void) -> CStatus;
@@ -81,12 +82,14 @@ pub struct COps {
     pub get_info: Option<FnGetInfo>,
     pub read_prepare: Option<FnReadPrepare>,
     pub read: Option<FnRead>,
+    pub otp_read_prepare: Option<FnOtpPrepare>,
     pub otp_read: Option<FnOtpRead>,
     pub write_prepare: Option<FnWritePrepare>,
     pub flash_page_write: Option<FnFlashPageWrite>,
     pub flash_erase_prepare: Option<FnEraseArgs>,
     pub flash_erase: Option<FnEraseArgs>,
     pub write: Option<FnWrite>,
+    pub otp_write_prepare: Option<FnOtpPrepare>,
     pub otp_write: Option<FnOtpWrite>,
 }
 

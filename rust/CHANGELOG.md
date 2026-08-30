@@ -64,6 +64,13 @@ stack or an executor.
 
 ## picobootx-rp2350
 
+### 0.3.1 - 2026-08-30
+
+- `flash_page_write` no longer refuses a page buffer outside SRAM.  Where that
+  buffer lives is the caller's — the USB controller's RAM and the boot RAM are
+  both legitimate and both were refused — and the requirement is documented
+  instead.
+
 ### 0.3.0 - 2026-08-28
 
 `Info::Partition` and `Info::Uf2Target` no longer read the partition table, and

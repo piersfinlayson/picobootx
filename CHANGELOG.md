@@ -12,6 +12,24 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
+## 0.5.0 - 2026-08-30
+
+A flash page program left execute-in-place up, so on a real part it wrote
+nothing and reported success.  `picoboot_ops_t` gains a pair of OTP callbacks,
+so a device can refuse a run of rows before any of them is blown.
+
+- `picoboot_default_flash_page_write` brackets the boot ROM call with
+  execute-in-place left and put back, from RAM with interrupts off, as
+  `picoboot_default_flash_erase` already did.
+- `picoboot_ops_t.otp_read_prepare` and `otp_write_prepare` are offered the
+  whole request before any row is touched.  NULL restricts nothing, so an
+  existing device is unchanged.
+- Both flash operations return `PB_STATUS_PRECONDITION_NOT_MET` where the
+  routine that runs while flash is unreadable did not reach RAM.
+- [ci/check-ramfunc-c.sh](ci/check-ramfunc-c.sh) says whether a link placed
+  `.ramfunc` in RAM and carried its bytes there.  Point it at your own.
+- `picoboot_default_otp_read` logged a read as a write.
+
 ## 0.4.0 - 2026-08-28
 
 `PB_INFO_PARTITION` and `PB_INFO_UF2_TARGET` no longer read the partition table,

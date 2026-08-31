@@ -140,6 +140,13 @@ unsafe extern "C" {
     pub fn picoboot_vendor_stall_endpoint(ep_addr: u8);
     pub fn picoboot_vendor_unstall_endpoint(ep_addr: u8);
 
+    /// Stop taking packets from the host, and start again.
+    /// Whether anything queued for the host has still to reach it.
+    pub fn picoboot_vendor_write_pending() -> bool;
+
+    pub fn picoboot_vendor_read_pause();
+    pub fn picoboot_vendor_read_resume();
+
     // The two control-transfer entry points picobootx.c answers through.
     pub fn tud_control_xfer(
         rhport: u8,

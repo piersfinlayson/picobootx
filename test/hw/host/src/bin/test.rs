@@ -43,6 +43,12 @@ const READ_LEN: u32 = 4;
 /// that answer differently is what lets a reply say which read produced it.
 const ROM_OTHER_ADDR: u32 = 0x0000_0000;
 
+// A read long enough to be several packets, so a host can stop in the middle of
+// one.  Clear of ROM_MAGIC_ADDR, so a packet left over from it cannot be
+// mistaken for the answer to the read that checks recovery.
+const LONG_READ_ADDR: u32 = 0x0000_0100;
+const LONG_READ_LEN: u32 = 256;
+
 /// Where the boot ROM starts, and where flash is mapped.  Both answer reads,
 /// and between them they give a long transfer somewhere to come from.
 const ROM_BASE: u32 = 0x0000_0000;
@@ -301,6 +307,8 @@ async fn main() -> ExitCode {
 
     if run.group("abandoned") {
         abandoned(&mut run, &mut board).await;
+        abandoned_mid_reply(&mut run, &mut board).await;
+        command_inside_an_unfinished_reply(&mut run, &mut board).await;
     }
 
     if run.group("multi-packet") {
@@ -529,6 +537,155 @@ async fn abandoned(run: &mut Runner, board: &mut Board) {
             Ok(got) => Err(format!("it returned {got:02x?}, which is neither address")),
         },
     );
+}
+
+/// A host that stops part way through collecting a reply leaves the device
+/// unable to take its next command.
+///
+/// [`abandoned`] walks away before collecting anything, and its reply is one
+/// packet.  Stopping inside a longer one leaves the device mid data phase with
+/// its OUT endpoint closed and neither endpoint halted, so the host has no halt
+/// to clear and INTERFACE RESET is its only remedy.  The RP2350 boot ROM
+/// recovers from every one of these (datasheet 5.6.5.1).
+async fn abandoned_mid_reply(run: &mut Runner, board: &mut Board) {
+    // What every recovery below is judged against.  A device that cannot serve
+    // it now makes all of them vacuous.
+    let want = match read_word(board, ROM_MAGIC_ADDR) {
+        Read::FirstTime(w) => w,
+        Read::OnRetry(e) | Read::Never(e) => {
+            run.check("the address the recovery is judged by reads", Err(e));
+            return;
+        }
+    };
+
+    let packets = (LONG_READ_LEN as usize).div_ceil(MAX_PACKET);
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&LONG_READ_ADDR.to_le_bytes());
+    args[4..8].copy_from_slice(&LONG_READ_LEN.to_le_bytes());
+
+    for collected in 0..packets {
+        if let Err(e) = board.send_cmd(CMD_READ, LONG_READ_LEN, &args) {
+            run.check(
+                &format!("a {LONG_READ_LEN} byte read can be asked for"),
+                Err(e),
+            );
+            return;
+        }
+
+        // Take some of the reply and walk away.  This is the whole stimulus.
+        for packet in 0..collected {
+            if let Err(e) = board.read_raw(MAX_PACKET) {
+                run.check(
+                    &format!("packet {packet} of the reply comes when it is asked for"),
+                    Err(e),
+                );
+                return;
+            }
+        }
+
+        // Said once, since it is the same at every stopping point.  Nothing
+        // here for a host to clear is why the reset has to be what works.
+        if collected == 1 {
+            run.check(
+                "neither endpoint reports itself halted, so the host has nothing to clear",
+                match (
+                    board.endpoint_halted(EP_IN).await,
+                    board.endpoint_halted(EP_OUT).await,
+                ) {
+                    (Ok(false), Ok(false)) => Ok(()),
+                    (Ok(i), Ok(o)) => Err(format!("IN halted {i}, OUT halted {o}")),
+                    (Err(e), _) | (_, Err(e)) => Err(e),
+                },
+            );
+        }
+
+        run.check(
+            &format!(
+                "the device accepts INTERFACE RESET having sent {collected} of {packets} packets"
+            ),
+            board.interface_reset().await,
+        );
+
+        // Nothing is read before the reset, so an answer right here is right
+        // because the reset made it so.
+        run.check(
+            &format!("it serves the next command having sent {collected} of {packets} packets"),
+            match read_word(board, ROM_MAGIC_ADDR) {
+                Read::FirstTime(got) if got == want => Ok(()),
+                Read::FirstTime(got) => Err(format!(
+                    "it returned {got:02x?} rather than {want:02x?}, so the reply it \
+                     was left holding went out in place of this one"
+                )),
+                Read::OnRetry(e) => Err(e),
+                Read::Never(e) => Err(format!(
+                    "the reset did not put it back, and only clearing a halt the device \
+                     does not report will: {e}"
+                )),
+            },
+        );
+    }
+}
+
+/// A command sent inside a reply the host has not finished is not taken.
+///
+/// The device still owes the host packets.  The RP2350 boot ROM refuses until
+/// the phase ends, so a host that walks away and asks something else is refused
+/// rather than served the tail of what it abandoned.
+///
+/// It needs a wire.  Whether a queued packet has reached the host is not
+/// something a model of the controller knows.
+async fn command_inside_an_unfinished_reply(run: &mut Runner, board: &mut Board) {
+    let packets = (LONG_READ_LEN as usize).div_ceil(MAX_PACKET);
+    let mut args = [0u8; 8];
+    args[0..4].copy_from_slice(&LONG_READ_ADDR.to_le_bytes());
+    args[4..8].copy_from_slice(&LONG_READ_LEN.to_le_bytes());
+
+    let mut next = [0u8; 8];
+    next[0..4].copy_from_slice(&ROM_MAGIC_ADDR.to_le_bytes());
+    next[4..8].copy_from_slice(&READ_LEN.to_le_bytes());
+
+    for collected in 0..packets {
+        if let Err(e) = board.send_cmd(CMD_READ, LONG_READ_LEN, &args) {
+            run.check(
+                &format!("a {LONG_READ_LEN} byte read can be asked for"),
+                Err(e),
+            );
+            return;
+        }
+        for packet in 0..collected {
+            if let Err(e) = board.read_raw(MAX_PACKET) {
+                run.check(
+                    &format!("packet {packet} of the reply comes when it is asked for"),
+                    Err(e),
+                );
+                return;
+            }
+        }
+
+        run.check(
+            &format!("a command sent having taken {collected} of {packets} packets is refused"),
+            match board.send_cmd(CMD_READ, READ_LEN, &next) {
+                Err(_) => Ok(()),
+                Ok(()) => Err(format!(
+                    "the device took it, so the packets it still owes go out to meet \
+                     it and answer a question it was not asked - it reported {}",
+                    match board.diagnostics().await {
+                        Ok(d) => format!("{d}"),
+                        Err(e) => e,
+                    }
+                )),
+            },
+        );
+
+        // Back to a starting point, so the next stopping point measures itself.
+        if let Err(e) = board.quiesce().await {
+            run.check(
+                &format!("the board settles after taking {collected} of {packets} packets"),
+                Err(e),
+            );
+            return;
+        }
+    }
 }
 
 /// A pattern that repeats in neither byte nor packet.

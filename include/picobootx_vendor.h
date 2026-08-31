@@ -89,6 +89,13 @@ uint32_t picoboot_vendor_write_flush(void);
 // question before it.
 bool picoboot_vendor_write_clear(void);
 
+// Stop taking packets from the host, and start again.
+//
+// Paused, the endpoint refuses what the host offers rather than halting, so
+// there is nothing for the host to clear.
+void picoboot_vendor_read_pause(void);
+void picoboot_vendor_read_resume(void);
+
 // Write a null-terminated string to TX FIFO
 TU_ATTR_ALWAYS_INLINE static inline uint32_t picoboot_vendor_write_str(const char *str) {
   return picoboot_vendor_write(str, strlen(str));
@@ -116,6 +123,10 @@ bool picoboot_vendor_send_zlp(void);
 
 // Retrieve stall status of an endpoint
 bool picoboot_vendor_is_endpoint_stalled(uint8_t ep_addr);
+
+// Whether anything queued for the host has still to reach it - bytes in the
+// transmit FIFO, or a packet armed and not yet taken.
+bool picoboot_vendor_write_pending(void);
 
 // Stall an endpoint
 void picoboot_vendor_stall_endpoint(uint8_t ep_addr);

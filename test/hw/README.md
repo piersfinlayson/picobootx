@@ -36,15 +36,9 @@ somehow on the bus at once.
 
 ### What the two firmwares do not share
 
-Rough parity, not identical devices.  Two differences, and the checks are
+Rough parity, not identical devices.  One difference, and the checks are
 otherwise the same on both:
 
-- **Diagnostics.** `picobootx-embassy` publishes its own state, queue lengths
-  and halts, so the embassy device reports them over the control endpoint.  The
-  C library publishes nothing of the sort, so the tinyusb device does not serve
-  that request and `picobootx-hw-diag` refuses it.  A run against it loses the
-  confirmation, after every quiesce, that the device settled — the clearing and
-  the `INTERFACE RESET` still happen, and the rest is judged over the wire.
 - **Keeping the firmware out of the flash window.**  The embassy device's
   [memory.x](device-embassy/memory.x) offers the linker only the half of flash
   the window is not in, so a firmware that grew into it fails to link.  The C
@@ -75,6 +69,12 @@ including to swap one firmware for the other:
 That request is answered on the control endpoint, so it works even when the
 bulk endpoints are halted or wedged — which is exactly when a reflash is
 wanted.
+
+A board that has stopped answering altogether goes on presenting whatever it
+was running, since the host keeps the descriptors it already read.  Reach for
+`picobootx-hw-bootsel` first whatever the board looks like — where it cannot
+find one it resets the port and says what re-enumerating showed, which is often
+a board already sitting in BOOTSEL.  The jumper is for when that says nothing.
 
 Then:
 

@@ -16,6 +16,20 @@ that do not unify.  A `picobootx` release therefore moves both of them too.
 
 ## picobootx
 
+### 0.4.0 - unreleased
+
+`Transport` gains two required methods and `Picoboot::on_tx` takes the
+transport, so neither is backwards compatible.
+
+- `Transport::set_rx_paused` stops the transport taking packets from the host.
+  A command sent inside an unfinished device-to-host phase is then refused
+  rather than answered by the packets it interrupted, as the boot ROM does.
+- `Transport::tx_pending` says whether anything queued for the host has still to
+  reach it.  A device-to-host phase ends on that rather than on the queue
+  emptying.
+- `Picoboot::on_tx` takes a transport, the way `Picoboot::on_rx` already did.
+- Commands are taken one at a time, the way the boot ROM takes them.
+
 ### 0.3.0 - 2026-08-28
 
 `Transport` gains a required associated const, so every implementor has to
@@ -64,6 +78,15 @@ stack or an executor.
 
 ## picobootx-rp2350
 
+### 0.4.0 - unreleased
+
+- The flash page program and erase connect the flash inside the RAM routine,
+  with interrupts already down.  Connecting it leaves execute-in-place no longer
+  guaranteed, and what ran between there and the RAM routine was still fetched
+  from flash.  On the C, which had the same order, that hung the part about one
+  run in nine.
+- Moves with `picobootx` 0.4.0.
+
 ### 0.3.1 - 2026-08-30
 
 - `flash_page_write` no longer refuses a page buffer outside SRAM.  Where that
@@ -105,6 +128,13 @@ a small transmit FIFO serves those types itself.
 ### 0.1.0 - 2026-08-26
 
 ## picobootx-embassy
+
+### 0.4.0 - unreleased
+
+- `Transport::set_rx_paused` and `Transport::tx_pending` are implemented.  The
+  device task already refused to read the host-to-device endpoint while a phase
+  was unfinished, so what the device does is unchanged.
+- Moves with `picobootx` 0.4.0.
 
 ### 0.3.0 - 2026-08-28
 

@@ -10,3 +10,6 @@ test/hw/device-tinyusb/build
 test/hw/device-tinyusb/tinyusb-repo
 test/hw/device-tinyusb/tinyusb-repo.pin
 test/hw/device-tinyusb/pico-sdkless-repo
+
+# llvm-cov drops these beside the binary that produced them
+*.profraw

@@ -18,6 +18,8 @@
 #include "usbt.h"
 #include "usbt_dcd.h"
 
+#include "device/usbd_pvt.h"
+
 // The vendor interface's control requests, from picobootx_private.h.  A host
 // issues these on the interface rather than on an endpoint.
 #define VENDOR_IN  (uint8_t)(TUSB_DIR_IN_MASK | (TUSB_REQ_TYPE_VENDOR << 5) | \
@@ -387,6 +389,78 @@ static void scenario_interface_reset_takes_back_an_uncollected_reply(void) {
     PBT_CHECK(memcmp(buf, pbt_sram() + 4u, 4u) == 0);
 }
 
+// A host that stops part way through collecting a reply.
+//
+// The scenario above walks away before taking anything, and its reply is one
+// packet.  Stopping inside a longer one leaves the device mid data phase with
+// the OUT endpoint closed and neither endpoint halted, so the host has no halt
+// to clear and INTERFACE RESET is its only remedy.
+static void scenario_interface_reset_rearms_after_a_partial_reply(void) {
+    PBT_REQUIRE(ready());
+
+    // Four packets of reply, and one of them taken.
+    PBT_REQUIRE(start_read_at(RP2350_SRAM_BASE, 4u * USBT_PACKET_MAX));
+    uint8_t buf[USBT_XFER_MAX];
+    PBT_CHECK_EQ(usbt_bulk_in(buf, USBT_PACKET_MAX), (uint32_t)USBT_PACKET_MAX);
+
+    // Nothing for a host to clear, which is what leaves the reset carrying it.
+    PBT_CHECK(!usbt_ep_halted(USBT_EP_IN));
+    PBT_CHECK(!usbt_ep_halted(USBT_EP_OUT));
+
+    usbt_ctrl_result_t r =
+        usbt_control(VENDOR_OUT, REQ_INTERFACE_RESET, 0, 0, NULL, 0, 0);
+    PBT_REQUIRE(r.ok);
+    usbt_settle();
+
+    // The next command going out at all is the claim.  The endpoint was closed
+    // while the phase was unfinished, so the reset has to be what opens it.
+    PBT_REQUIRE(start_read_at(RP2350_SRAM_BASE + 8u, 4u));
+    PBT_CHECK_EQ(usbt_bulk_in(buf, 4u), 4u);
+    PBT_CHECK(memcmp(buf, pbt_sram() + 8u, 4u) == 0);
+}
+
+// A command sent inside a reply the host has not finished is not taken.
+//
+// The device still has packets queued for the host.  The RP2350 boot ROM leaves
+// its OUT endpoint closed until that phase ends, so a host that walks away and
+// asks something else is refused rather than served the tail of what it left.
+static void scenario_a_command_inside_an_unfinished_reply_is_not_taken(void) {
+    PBT_REQUIRE(ready());
+
+    // Four packets of reply, one taken, three still owed.
+    PBT_REQUIRE(start_read_at(RP2350_SRAM_BASE, 4u * USBT_PACKET_MAX));
+    uint8_t buf[USBT_XFER_MAX];
+    PBT_CHECK_EQ(usbt_bulk_in(buf, USBT_PACKET_MAX), (uint32_t)USBT_PACKET_MAX);
+
+    // The host asks something else, having put nothing right.
+    PBT_CHECK(!start_read_at(RP2350_SRAM_BASE + 8u, 4u));
+}
+
+// What the device says about its own endpoints while it owes the host packets.
+//
+// The hardware test reads this over a control request to say why a wire behaved
+// as it did, so it is asked here of a state whose shape is known.
+static void scenario_the_device_reports_its_endpoints_mid_reply(void) {
+    PBT_REQUIRE(ready());
+
+    PBT_REQUIRE(start_read_at(RP2350_SRAM_BASE, 4u * USBT_PACKET_MAX));
+
+    // A packet is armed for the host and has not been taken.
+    PBT_CHECK(usbd_edpt_busy(USBT_RHPORT, USBT_EP_IN));
+
+    // And the receive endpoint refuses to be armed, which is what the transfer
+    // callback asks after every packet.
+    PBT_CHECK(!picoboot_vendor_read_xfer());
+
+    // Once the host has taken the lot and acknowledged, both go the other way.
+    uint8_t buf[USBT_XFER_MAX];
+    PBT_CHECK_EQ(usbt_bulk_in(buf, 4u * USBT_PACKET_MAX),
+                 (uint32_t)(4u * USBT_PACKET_MAX));
+    PBT_REQUIRE(usbt_bulk_out(NULL, 0));
+    usbt_settle();
+    PBT_CHECK(!usbd_edpt_busy(USBT_RHPORT, USBT_EP_IN));
+}
+
 static const pbt_scenario_t k_scenarios[] = {
     { "a command with no data phase is acknowledged",
       scenario_command_acknowledged },
@@ -408,6 +482,12 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_acknowledgement_needs_room_in_the_fifo },
     { "INTERFACE RESET takes back a reply the host never collected",
       scenario_interface_reset_takes_back_an_uncollected_reply },
+    { "INTERFACE RESET re-arms after a reply the host stopped part way through",
+      scenario_interface_reset_rearms_after_a_partial_reply },
+    { "a command sent inside a reply the host has not finished is not taken",
+      scenario_a_command_inside_an_unfinished_reply_is_not_taken },
+    { "the device reports its endpoints while it owes the host packets",
+      scenario_the_device_reports_its_endpoints_mid_reply },
 };
 
 PBT_SUITE(usbt_suite_vendor, "vendor", k_scenarios);

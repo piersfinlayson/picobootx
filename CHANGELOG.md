@@ -12,6 +12,28 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
+## 0.6.0 - unreleased
+
+A host that walked away part way through collecting a reply left the device
+taking nothing further, and `INTERFACE_RESET` did not put it back.  The next
+command was answered with what was left of the abandoned one.  Both found on a
+real board against the RP2350 boot ROM, which does neither.
+
+- The receive endpoint is closed while a device-to-host phase is unfinished and
+  opened by the state it ends in, so a command sent inside one is refused rather
+  than answered by the packets it interrupted.  Commands are taken one at a
+  time, the way the boot ROM takes them.
+- A device-to-host phase ends when the host has the bytes, not when the queue
+  has them.
+- The flash page program and erase connect the flash inside the RAM routine,
+  with interrupts already down.  Connecting it leaves execute-in-place no longer
+  guaranteed, and what ran between there and the RAM routine was still fetched
+  from flash.  That hung the part about one run in nine.
+- `picoboot_vendor_read_pause`, `picoboot_vendor_read_resume` and
+  `picoboot_vendor_write_pending` are new.
+- `PICOBOOT_STATE_SIZE` is 84 rather than 80.  Allocating with the macro needs a
+  rebuild and nothing else.
+
 ## 0.5.1 - 2026-08-30
 
 `INTERFACE_RESET` left a reply the host had not collected armed on the endpoint,

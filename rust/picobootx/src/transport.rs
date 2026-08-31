@@ -56,6 +56,13 @@ pub trait Transport {
     /// Drop whatever the transmit FIFO is holding.
     fn tx_clear(&mut self);
 
+    /// Whether anything queued for the host has still to reach it - bytes in
+    /// the transmit FIFO, or a packet armed and not yet taken.
+    ///
+    /// A device-to-host phase is over when the host has the bytes, not when the
+    /// queue has them.
+    fn tx_pending(&self) -> bool;
+
     /// Acknowledge a command with the short packet the protocol calls a
     /// zero-length packet.  False if it could not be queued.
     ///
@@ -69,4 +76,10 @@ pub trait Transport {
 
     /// Halt or unhalt this endpoint.
     fn set_stalled(&mut self, dir: Direction, stalled: bool);
+
+    /// Stop taking packets from the host, or start again.
+    ///
+    /// Paused, the transport refuses what the host offers rather than halting,
+    /// so there is nothing for the host to clear.
+    fn set_rx_paused(&mut self, paused: bool);
 }

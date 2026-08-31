@@ -42,9 +42,17 @@ pub(crate) struct Xport<E: EndpointControl> {
     // stack arms the endpoints itself when the host configures the device.
     owed_out: bool,
     owed_in: bool,
+    // A packet out of the queue and not yet with the host.  The queue is empty
+    // for that whole window, so it cannot answer for it.
+    tx_armed: bool,
 }
 
 impl<E: EndpointControl> Xport<E> {
+    /// Record that a packet is on its way to the host, or has arrived.
+    pub(crate) const fn set_tx_armed(&mut self, armed: bool) {
+        self.tx_armed = armed;
+    }
+
     pub(crate) const fn new(ep_ctl: E, ep_out: u8, ep_in: u8, max_packet_size: u16) -> Self {
         Self {
             rx: Fifo::new(),
@@ -53,6 +61,7 @@ impl<E: EndpointControl> Xport<E> {
             ep_out,
             ep_in,
             max_packet_size,
+            tx_armed: false,
             owed_out: false,
             owed_in: false,
         }
@@ -198,6 +207,16 @@ impl<E: EndpointControl> Transport for Xport<E> {
     // to be read out of.  Halting leaves both queues alone, since the reason
     // for the refusal is answered over the control endpoint and the queues are
     // not read again until the host puts the pipe back.
+    fn tx_pending(&self) -> bool {
+        self.tx.len() > 0 || self.tx_armed
+    }
+
+    // Nothing to do.  The device task reads the host-to-device endpoint only in
+    // the states that expect something from the host, and it takes that list
+    // from the protocol's own state.  The list is the states where reading is
+    // right, so a state added later is out of it until someone says otherwise.
+    fn set_rx_paused(&mut self, _paused: bool) {}
+
     fn set_stalled(&mut self, dir: Direction, stalled: bool) {
         self.ep_ctl.set_stalled(self.addr(dir), stalled);
         if stalled {

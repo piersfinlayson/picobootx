@@ -47,7 +47,7 @@ _Static_assert(CFG_TUD_ENDPOINT0_SIZE == 64, "The picoboot protocol requires bMa
 // Size of pb_state_block_t in bytes. Use this to allocate storage without
 // needing to include picoboot_private.h. Verified by _Static_assert in
 // picoboot_private.h.
-#define PICOBOOT_STATE_SIZE    80u
+#define PICOBOOT_STATE_SIZE    84u
 
 #define FLASH_SECTOR_SIZE      4096u
 #define FLASH_PAGE_SIZE        256u

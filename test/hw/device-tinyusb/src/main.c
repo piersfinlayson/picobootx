@@ -18,6 +18,11 @@
 #include "tusb_config.h"
 #include "picobootx.h"
 #include "picobootx_impl.h"
+#include "picobootx_vendor.h"
+// An instrument, in this tree, so it reads the protocol's state out of the
+// block rather than asking for an accessor no integrator has a use for.
+#include "picobootx_private.h"
+#include "device/usbd_pvt.h"
 #include "usb_descriptors.h"
 
 // Forward declarations of functions in main
@@ -46,6 +51,11 @@ uint32_t tusb_time_millis_api(void);
 // two cannot drift.
 #define REQ_SCRATCH         0x47
 #define SCRATCH_REPLY_LEN   16
+
+// Ask what the protocol and its queues are doing.  Same request and same shape
+// as the embassy device, so one host reads either.
+#define REQ_DIAG            0x46
+#define DIAG_REPLY_LEN      8
 
 // Reboot into BOOTSEL, from the RP2350 bootrom's own reboot routine.
 #define REBOOT_TYPE_BOOTSEL 0x2
@@ -191,6 +201,33 @@ static bool handle_scratch(
     return tud_control_xfer(rhport, request, reply, SCRATCH_REPLY_LEN);
 }
 
+// What the protocol and its queues are doing, at the moment of asking.
+//
+// Eight bytes: the state, the halt on each endpoint, whether a packet is armed
+// for the host and not yet taken, then the bytes queued each way.  A wire says
+// what a device did and this says why.
+static bool handle_diag(
+    uint8_t rhport,
+    tusb_control_request_t const *request
+) {
+    static uint8_t reply[DIAG_REPLY_LEN];
+
+    uint16_t rx = (uint16_t)picoboot_vendor_available();
+    uint16_t tx = (uint16_t)(CFG_TUD_PICOBOOT_TX_BUFSIZE -
+                             picoboot_vendor_write_available());
+
+    reply[0] = (uint8_t)picoboot_state->state;
+    reply[1] = picoboot_vendor_is_endpoint_stalled(EPNUM_PICOBOOTX_OUT) ? 1u : 0u;
+    reply[2] = picoboot_vendor_is_endpoint_stalled(EPNUM_PICOBOOTX_IN) ? 1u : 0u;
+    reply[3] = usbd_edpt_busy(BOARD_TUD_RHPORT, EPNUM_PICOBOOTX_IN) ? 1u : 0u;
+    reply[4] = (uint8_t)(rx & 0xffu);
+    reply[5] = (uint8_t)(rx >> 8);
+    reply[6] = (uint8_t)(tx & 0xffu);
+    reply[7] = (uint8_t)(tx >> 8);
+
+    return tud_control_xfer(rhport, request, reply, DIAG_REPLY_LEN);
+}
+
 // Invoked when a control transfer is received on vendor interface
 // Used to respond to MS OS 2.0 descriptor request from Windows
 bool tud_vendor_control_xfer_cb(
@@ -236,6 +273,11 @@ bool tud_vendor_control_xfer_cb(
         if ((request->bRequest == REQ_SCRATCH) &&
             (request->bmRequestType_bit.direction == TUSB_DIR_IN)) {
             return handle_scratch(rhport, request);
+        }
+
+        if ((request->bRequest == REQ_DIAG) &&
+            (request->bmRequestType_bit.direction == TUSB_DIR_IN)) {
+            return handle_diag(rhport, request);
         }
     }
 

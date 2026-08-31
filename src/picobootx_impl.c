@@ -363,16 +363,22 @@ pb_status_t picoboot_default_write(
 // here for the same reasons.  buf is read while flash is unreadable, so it has
 // to be somewhere other than flash.
 static void PICOBOOTX_RAMFUNC flash_program_critical(
+    connect_internal_flash_fn_t connect_internal_flash,
     flash_exit_xip_fn_t exit_xip,
     flash_range_program_fn_t range_program,
     flash_flush_cache_fn_t flush_cache,
     flash_select_xip_read_mode_fn_t select_xip,
     uint32_t flash_offs,
-    const uint8_t *data,
-    uint8_t clkdiv
+    const uint8_t *data
 ) {
     // Disable interrupts
     PICOBOOTX_IRQ_DISABLE();
+
+    // Connecting the flash leaves XIP no longer guaranteed, so every
+    // instruction from here to the end has to be one already in RAM.  The
+    // divisor is read here for the same reason.
+    connect_internal_flash();
+    uint8_t clkdiv = PICOBOOTX_XIP_CLKDIV();
 
     // Exit XIP mode before programming so that the RP2350 enters QSPI serial
     // command mode, which is what a program needs.  This has the impact of
@@ -441,22 +447,16 @@ pb_status_t picoboot_default_flash_page_write(
     }
 
     DEBUG("program flash: addr=0x%08x", addr);
-    connect_internal_flash();
-
-    // Restore XIP mode using the clock divisor currently configured in QMI,
-    // which is why it is read here rather than assumed.  See
-    // picoboot_default_flash_erase for the mode.
-    uint8_t clkdiv = PICOBOOTX_XIP_CLKDIV();
 
     uint32_t flash_offs = addr - RP2350_FLASH_BASE;
     flash_program_critical(
+        connect_internal_flash,
         flash_exit_xip,
         flash_range_program,
         flash_flush_cache,
         flash_select_xip_read_mode,
         flash_offs,
-        buf,
-        clkdiv
+        buf
     );
 
     return PB_STATUS_OK;
@@ -486,16 +486,22 @@ pb_status_t picoboot_default_flash_erase_prepare(
 // It also disables interrupts (which are also serviced from flash) for the
 // duration of the erase.
 static void PICOBOOTX_RAMFUNC flash_erase_critical(
+    connect_internal_flash_fn_t connect_internal_flash,
     flash_exit_xip_fn_t exit_xip,
     flash_range_erase_fn_t range_erase,
     flash_flush_cache_fn_t flush_cache,
     flash_select_xip_read_mode_fn_t select_xip,
     uint32_t flash_offs,
-    uint32_t size,
-    uint8_t clkdiv
+    uint32_t size
 ) {
     // Disable interrupts
     PICOBOOTX_IRQ_DISABLE();
+
+    // Connecting the flash leaves XIP no longer guaranteed, so every
+    // instruction from here to the end has to be one already in RAM.  The
+    // divisor is read here for the same reason.
+    connect_internal_flash();
+    uint8_t clkdiv = PICOBOOTX_XIP_CLKDIV();
 
     // Exit XIP mode before erasing so that the RP2350 enters QSPI serial
     // command mode (required for erases).  This has the impact of preventing
@@ -559,27 +565,21 @@ pb_status_t picoboot_default_flash_erase(
     }
 
     DEBUG("erase flash: addr=0x%08x size=%u", args->addr, args->size);
-    connect_internal_flash();
 
-    // Restore XIP mode using the clock divisor currently configured in QMI,
-    // which reflects whatever was set up by the firmware's own QMI setup.
-    // Mode 3 (EBh quad-IO) is the fastest; if this causes issues try mode 2
-    // (BBh dual-IO), mode 1 (0Bh serial), or mode 0 (03h serial, slowest/most
-    // compatible). Alternatively, the bootrom saves the discovered mode into
-    // boot RAM as an XIP setup function which could be called here instead,
-    // restoring exactly what the bootrom found during flash scanning.
-    uint8_t clkdiv = PICOBOOTX_XIP_CLKDIV();
-    DEBUG("Will be restoring flash XIP mode 3 with clkdiv %u", clkdiv);
-
+    // XIP is restored in mode 3 (EBh quad-IO), the fastest.  If that ever
+    // causes trouble the alternatives are mode 2 (BBh dual-IO), mode 1 (0Bh
+    // serial) and mode 0 (03h serial, slowest and most compatible), or the XIP
+    // setup function the bootrom leaves in boot RAM, which restores exactly
+    // what it found when it scanned the flash.
     uint32_t flash_offs = args->addr - RP2350_FLASH_BASE;
     flash_erase_critical(
+        connect_internal_flash,
         flash_exit_xip,
         flash_range_erase,
         flash_flush_cache,
         flash_select_xip_read_mode,
         flash_offs,
-        args->size,
-        clkdiv
+        args->size
     );
 
     DEBUG("flash erase completed");

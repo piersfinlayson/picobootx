@@ -202,6 +202,12 @@ struct pb_state_block {
     // asked for.
     uint32_t                     data_in_remaining; // 4 bytes
 
+    // Whether the fill has produced everything the transfer asked for.  The
+    // bytes are queued rather than taken then, so the pump waits on the wire
+    // instead of asking a finished fill for more.
+    bool                         data_in_filled;    // 1 byte
+    uint8_t                      reserved[3];       // 3 bytes (completes word)
+
     // Per-command state — only one member is ever live at a time.  These are
     // mutually exclusive by command category: read/get_info/otp/write belong
     // to a data phase, reboot2_args to a deferred action (which has no data

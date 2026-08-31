@@ -13,9 +13,10 @@ use picobootx::{Direction, Transport};
 
 use crate::cabi::{
     picoboot_vendor_available, picoboot_vendor_is_endpoint_stalled, picoboot_vendor_read,
-    picoboot_vendor_read_clear, picoboot_vendor_send_zlp, picoboot_vendor_stall_endpoint,
-    picoboot_vendor_unstall_endpoint, picoboot_vendor_write, picoboot_vendor_write_available,
-    picoboot_vendor_write_clear, picoboot_vendor_write_flush,
+    picoboot_vendor_read_clear, picoboot_vendor_read_pause, picoboot_vendor_read_resume,
+    picoboot_vendor_send_zlp, picoboot_vendor_stall_endpoint, picoboot_vendor_unstall_endpoint,
+    picoboot_vendor_write, picoboot_vendor_write_available, picoboot_vendor_write_clear,
+    picoboot_vendor_write_flush, picoboot_vendor_write_pending,
 };
 
 pub struct VendorTransport {
@@ -75,6 +76,18 @@ impl Transport for VendorTransport {
 
     fn is_stalled(&self, dir: Direction) -> bool {
         unsafe { picoboot_vendor_is_endpoint_stalled(self.addr(dir)) }
+    }
+
+    fn tx_pending(&self) -> bool {
+        unsafe { picoboot_vendor_write_pending() }
+    }
+
+    fn set_rx_paused(&mut self, paused: bool) {
+        if paused {
+            unsafe { picoboot_vendor_read_pause() };
+        } else {
+            unsafe { picoboot_vendor_read_resume() };
+        }
     }
 
     fn set_stalled(&mut self, dir: Direction, stalled: bool) {

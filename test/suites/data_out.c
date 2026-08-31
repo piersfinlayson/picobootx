@@ -366,9 +366,15 @@ static void scenario_flash_program_sequence(void) {
     // and the interrupt handlers that would run during the program are
     // themselves fetched from flash, so both have to be down for the program
     // and back up afterwards.
+    //
+    // Interrupts go down first, ahead of connecting the flash.  Connecting it
+    // is what leaves execute-in-place no longer guaranteed, so an interrupt
+    // taken after that point fetches its handler from a flash that may not
+    // answer.  Verified on hardware: the other order hangs the part about one
+    // run in nine, and this one survived forty three.
+    PBT_CHECK(pbt_before("irq_disable", "rom_connect_internal_flash"));
     PBT_CHECK(pbt_before("rom_connect_internal_flash", "xip_clkdiv_read"));
-    PBT_CHECK(pbt_before("xip_clkdiv_read", "irq_disable"));
-    PBT_CHECK(pbt_before("irq_disable", "rom_flash_exit_xip"));
+    PBT_CHECK(pbt_before("xip_clkdiv_read", "rom_flash_exit_xip"));
     PBT_CHECK(pbt_before("rom_flash_exit_xip", "rom_flash_range_program"));
     PBT_CHECK(pbt_before("rom_flash_range_program",
                          "rom_flash_select_xip_read_mode"));
@@ -378,7 +384,8 @@ static void scenario_flash_program_sequence(void) {
 
     // The divisor is read before execute-in-place is taken down, which is the
     // reason it is read separately at all, and handed back to the call that
-    // restores it.
+    // restores it.  That read is from RAM too, for the same reason as the
+    // connect above it.
     PBT_REQUIRE(pbt_nth("xip_clkdiv_read", 0) != NULL);
     PBT_CHECK_EQ(pbt_nth("xip_clkdiv_read", 0)->a0, 0x2Au);
     PBT_REQUIRE(pbt_nth("rom_flash_select_xip_read_mode", 0) != NULL);
@@ -578,9 +585,9 @@ static void scenario_flash_erase_sequence(void) {
     // would run during the erase are themselves fetched from flash, so both
     // have to be down for the erase and back up afterwards.
     PBT_CHECK(pbt_before("op_flash_erase_prepare", "op_flash_erase"));
+    PBT_CHECK(pbt_before("irq_disable", "rom_connect_internal_flash"));
     PBT_CHECK(pbt_before("rom_connect_internal_flash", "xip_clkdiv_read"));
-    PBT_CHECK(pbt_before("xip_clkdiv_read", "irq_disable"));
-    PBT_CHECK(pbt_before("irq_disable", "rom_flash_exit_xip"));
+    PBT_CHECK(pbt_before("xip_clkdiv_read", "rom_flash_exit_xip"));
     PBT_CHECK(pbt_before("rom_flash_exit_xip", "rom_flash_range_erase"));
     PBT_CHECK(pbt_before("rom_flash_range_erase",
                          "rom_flash_select_xip_read_mode"));
@@ -590,7 +597,8 @@ static void scenario_flash_erase_sequence(void) {
 
     // The divisor is read before execute-in-place is taken down, which is the
     // reason it is read separately at all, and handed back to the call that
-    // restores it.
+    // restores it.  That read is from RAM too, for the same reason as the
+    // connect above it.
     PBT_REQUIRE(pbt_nth("xip_clkdiv_read", 0) != NULL);
     PBT_CHECK_EQ(pbt_nth("xip_clkdiv_read", 0)->a0, 0x2Au);
     PBT_REQUIRE(pbt_nth("rom_flash_select_xip_read_mode", 0) != NULL);

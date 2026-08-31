@@ -92,6 +92,9 @@ static uint32_t s_payload_len;
 // ---------------------------------------------------------------------------
 
 static bool s_stalled_out;
+// Whether the device is taking anything from the host.  A pause is not a halt,
+// so nothing about it reaches the host except that its packets go nowhere.
+static bool s_rx_paused;
 static bool s_stalled_in;
 
 static bool *pbt_stall_flag(uint8_t ep_addr) {
@@ -123,6 +126,7 @@ void pbt_wire_reset(void) {
     s_packets_completed = 0;
     s_payload_len       = 0;
     s_stalled_out       = false;
+    s_rx_paused         = false;
     s_stalled_in        = false;
     s_ctrl_reply_len    = 0;
     s_tx_fifo           = PBT_TX_FIFO;
@@ -189,6 +193,20 @@ void picoboot_vendor_read_clear(void) {
 
 bool picoboot_vendor_read_xfer(void) {
     return true;
+}
+
+bool picoboot_vendor_write_pending(void) {
+    return s_tx_len > 0u;
+}
+
+void picoboot_vendor_read_pause(void) {
+    pbt_log("rx_pause", 0, 0, 0, 0);
+    s_rx_paused = true;
+}
+
+void picoboot_vendor_read_resume(void) {
+    pbt_log("rx_resume", 0, 0, 0, 0);
+    s_rx_paused = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +394,13 @@ void pbt_host_send(const void *data, uint32_t len) {
     // a stall really did stop the host being heard.
     if (s_stalled_out) {
         pbt_log("packet_out_stalled", len, 0, 0, 0);
+        return;
+    }
+
+    // A device owing the host packets takes nothing from it.  Dropping it here
+    // is what lets a scenario show the host was not heard.
+    if (s_rx_paused) {
+        pbt_log("packet_out_paused", len, 0, 0, 0);
         return;
     }
 

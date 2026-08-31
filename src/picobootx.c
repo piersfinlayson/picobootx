@@ -35,6 +35,17 @@ const char * const pb_state_to_str[] = {
 static void pb_set_state(pb_state_block_t *s, pb_state_t new_state) {
     DEBUG("STATE: %s -> %s", pb_state_to_str[s->state], pb_state_to_str[new_state]);
     s->state = new_state;
+
+    // A state that owes the host packets takes nothing from it.  What the host
+    // sends before it has collected them belongs to no command, and serving it
+    // sends those packets out to answer it.  The RP2350 boot ROM refuses the
+    // host here (datasheet 5.6.5.1).
+    if (new_state == PB_STATE_DATA_IN || new_state == PB_STATE_CUSTOM_IN) {
+        s->data_in_filled = false;
+        picoboot_vendor_read_pause();
+    } else {
+        picoboot_vendor_read_resume();
+    }
 #if 0
     DEBUG("bc3=0x%08lx a=%u s=%u f=%u bs=0x%08lx",
         EP3_OUT_BUF_CTRL,
@@ -913,6 +924,11 @@ static void pb_task_idle(pb_state_block_t *s) {
         return;
     }
 
+    // One command at a time, the way the RP2350 boot ROM takes them.  Emptying
+    // the FIFO is what lets the endpoint arm again, so the close comes first
+    // and the state this command lands in is what opens it.
+    picoboot_vendor_read_pause();
+
     picoboot_cmd_t cmd;
     uint32_t n = picoboot_vendor_read(&cmd, sizeof(cmd));
     if (n != PICOBOOT_CMD_LEN) {
@@ -930,6 +946,8 @@ static void pb_task_idle(pb_state_block_t *s) {
         ERR("pb_task_idle: unknown magic 0x%08x", cmd.magic);
         pb_stall(s, PB_STATUS_UNKNOWN_CMD);
     }
+
+    // Every outcome above left this state, and leaving it opens the endpoint.
 }
 
 // Drives a device->host data phase: calls fill repeatedly, moving what it
@@ -946,6 +964,16 @@ static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
     // producer writes words — the RP2350 ROM information routines do — can then
     // write them straight into this rather than into a buffer of its own.
     _Alignas(uint32_t) uint8_t buf[PB_DATA_IN_BUF_SIZE];
+
+    // The fill is done and the wire is not.  The phase ends when the host has
+    // the bytes rather than when the queue has them.
+    if (s->data_in_filled) {
+        picoboot_vendor_write_flush();
+        if (!picoboot_vendor_write_pending()) {
+            pb_set_state(s, PB_STATE_AWAIT_ACK);
+        }
+        return;
+    }
 
     while (true) {
         uint32_t space = picoboot_vendor_write_available();
@@ -994,8 +1022,11 @@ static void pb_pump_data_in(pb_state_block_t *s, pb_data_in_fill_fn fill) {
         }
 
         if (done) {
+            s->data_in_filled = true;
             picoboot_vendor_write_flush();
-            pb_set_state(s, PB_STATE_AWAIT_ACK);
+            if (!picoboot_vendor_write_pending()) {
+                pb_set_state(s, PB_STATE_AWAIT_ACK);
+            }
             return;
         }
 

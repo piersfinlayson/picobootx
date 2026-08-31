@@ -48,6 +48,8 @@ struct Wire {
     acks: usize,
     stalled_out: bool,
     stalled_in: bool,
+    /// Whether the protocol has told it to take nothing from the host.
+    rx_paused: bool,
 }
 
 impl Wire {
@@ -60,6 +62,7 @@ impl Wire {
             acks: 0,
             stalled_out: false,
             stalled_in: false,
+            rx_paused: false,
         }
     }
 
@@ -74,6 +77,14 @@ impl Transport for Wire {
 
     fn rx_available(&self) -> u32 {
         self.rx.len() as u32
+    }
+
+    fn tx_pending(&self) -> bool {
+        !self.fifo.is_empty()
+    }
+
+    fn set_rx_paused(&mut self, paused: bool) {
+        self.rx_paused = paused;
     }
 
     fn rx_read(&mut self, buf: &mut [u8]) -> u32 {
@@ -338,7 +349,7 @@ fn the_operations_stay_reachable_once_the_protocol_holds_them() {
     pb.poll(&mut wire);
     assert_eq!(pb.state(), State::AwaitZlp);
     assert_eq!(wire.acks, 1);
-    pb.on_tx();
+    pb.on_tx(&mut wire);
     assert_eq!(pb.state(), State::Idle);
 
     // Reach past the protocol and change the device's mind.  The accessor has
@@ -435,7 +446,7 @@ fn a_device_that_writes_no_reboot_answers_and_stays_where_it_is() {
     assert_eq!(wire.acks, 1);
 
     // The acknowledgement has gone, which is when the reboot would happen.
-    pb.on_tx();
+    pb.on_tx(&mut wire);
     assert_eq!(pb.state(), State::Idle);
 
     // Still serving, because nothing rebooted.
@@ -456,7 +467,7 @@ fn a_device_that_writes_no_reboot_answers_and_stays_where_it_is() {
     pb.poll(&mut wire);
     assert!(pb.ops().went.is_none());
 
-    pb.on_tx();
+    pb.on_tx(&mut wire);
     let went = pb.ops().went.expect("the reboot was not run");
     assert_eq!(went.flags, 2);
     assert_eq!(went.delay_ms, 50);

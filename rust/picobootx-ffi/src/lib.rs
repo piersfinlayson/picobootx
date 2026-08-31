@@ -127,7 +127,8 @@ pub unsafe extern "C" fn picoboot_tx_cb(state_block: *mut c_void, sent_bytes: u3
     // picobootx.h takes the count, and the library does not read it.
     let _ = sent_bytes;
     let s = unsafe { state(state_block) };
-    s.pb.on_tx();
+    let mut t = VendorTransport::new(s.ep_out, s.ep_in);
+    s.pb.on_tx(&mut t);
 }
 
 #[unsafe(no_mangle)]

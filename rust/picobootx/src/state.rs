@@ -219,6 +219,11 @@ pub struct Picoboot<'a, O: Ops, C: Custom = crate::ops::NoCustom> {
     // no more than this, so no fill can put more on the bulk pipe than the host
     // asked for.
     data_in_remaining: u32,
+
+    /// Whether the fill has produced everything the transfer asked for.  The
+    /// bytes are queued rather than taken then, so the pump waits on the wire
+    /// instead of asking a finished fill for more.
+    data_in_filled: bool,
 }
 
 impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
@@ -246,6 +251,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             status: StatusBlock::new(),
             xfer: Xfer::None,
             data_in_remaining: 0,
+            data_in_filled: false,
         }
     }
 
@@ -282,17 +288,30 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         self.set_status(Status::Ok, true);
     }
 
+    /// Move to a new state, and say whether the host may send.
+    ///
+    /// A state that owes the host packets takes nothing from it.  What the host
+    /// sends before it has collected them belongs to no command, and serving it
+    /// sends those packets out to answer it.
+    fn set_state<T: Transport>(&mut self, t: &mut T, new_state: State) {
+        self.state = new_state;
+        if matches!(new_state, State::DataIn | State::CustomIn) {
+            self.data_in_filled = false;
+        }
+        t.set_rx_paused(matches!(new_state, State::DataIn | State::CustomIn));
+    }
+
     fn stall<T: Transport>(&mut self, t: &mut T, code: Status) {
         self.set_status(code, false);
         t.set_stalled(Direction::Out, true);
         t.set_stalled(Direction::In, true);
         self.status.set_in_progress(false);
-        self.state = State::Stalled;
+        self.set_state(t, State::Stalled);
     }
 
     fn ack<T: Transport>(&mut self, t: &mut T) {
         self.set_status(Status::Ok, false);
-        self.state = State::AwaitZlp;
+        self.set_state(t, State::AwaitZlp);
         if !t.send_ack() {
             self.stall(t, Status::UnknownError);
         }
@@ -353,6 +372,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             }
             return;
         }
+
+        // One command at a time, the way the RP2350 boot ROM takes them.
+        // Emptying the queue is what lets the transport take another, so the
+        // close comes first and the state this command lands in opens it.
+        t.set_rx_paused(true);
 
         let mut buf = [0u8; CMD_LEN];
         let n = t.rx_read(&mut buf);
@@ -420,12 +444,12 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             Category::DataIn => match self.prepare_in(cmd) {
                 Ok(()) => {
                     self.data_in_remaining = tlen;
-                    self.state = State::DataIn;
+                    self.set_state(t, State::DataIn);
                 }
                 Err(e) => self.stall(t, e),
             },
             Category::DataOut => match self.prepare_out(cmd) {
-                Ok(()) => self.state = State::DataOut,
+                Ok(()) => self.set_state(t, State::DataOut),
                 Err(e) => self.stall(t, e),
             },
             // Unreachable: an Unsupported category stalls and returns earlier
@@ -600,6 +624,16 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     // byte on the pipe — an integrator's own fill included, which is the one
     // the library cannot reach into.
     fn task_data_in<T: Transport>(&mut self, t: &mut T) {
+        // The fill is done and the wire is not.  The phase ends when the host
+        // has the bytes rather than when the queue has them.
+        if self.data_in_filled {
+            t.tx_flush();
+            if !t.tx_pending() {
+                self.set_state(t, State::AwaitAck);
+            }
+            return;
+        }
+
         let mut aligned = DataInBuf([0u8; DATA_IN_LEN]);
         let buf = &mut aligned.0;
         loop {
@@ -658,8 +692,11 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             self.data_in_remaining -= written as u32;
 
             if done {
+                self.data_in_filled = true;
                 t.tx_flush();
-                self.state = State::AwaitAck;
+                if !t.tx_pending() {
+                    self.set_state(t, State::AwaitAck);
+                }
                 return;
             }
 
@@ -1008,7 +1045,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         // than borrowed from a caller whose copy is about to go out of scope.
         self.xfer = Xfer::Custom(*cmd);
         self.data_in_remaining = cmd.transfer_len;
-        self.state = State::CustomIn;
+        self.set_state(t, State::CustomIn);
     }
 
     // -----------------------------------------------------------------
@@ -1016,7 +1053,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     // -----------------------------------------------------------------
 
     /// Tell the protocol a transmission finished.
-    pub fn on_tx(&mut self) {
+    pub fn on_tx<T: Transport>(&mut self, t: &mut T) {
         if self.state != State::AwaitZlp {
             return;
         }
@@ -1025,7 +1062,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         {
             self.ops.reboot_execute(&args);
         }
-        self.state = State::Idle;
+        self.set_state(t, State::Idle);
     }
 
     /// Tell the protocol bytes arrived on the receive endpoint.
@@ -1040,7 +1077,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 // acknowledgement, since a host that cannot send the first
                 // sends the second.
                 self.set_status(Status::Ok, false);
-                self.state = State::Idle;
+                self.set_state(t, State::Idle);
             }
             if available == 1 && self.state != State::DataOut {
                 let mut discard = [0u8; 1];
@@ -1052,7 +1089,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             // Data where an acknowledgement was expected means the
             // acknowledgement was missed, so take the data as the next thing.
             self.set_status(Status::Ok, false);
-            self.state = State::Idle;
+            self.set_state(t, State::Idle);
         }
     }
 
@@ -1097,7 +1134,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                 if stage == Stage::Setup {
                     t.set_stalled(Direction::Out, false);
                     t.set_stalled(Direction::In, false);
-                    self.state = State::Idle;
+                    self.set_state(t, State::Idle);
                     self.set_status(Status::Ok, false);
                 }
                 Control::Ack
@@ -1113,7 +1150,7 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
                     // cannot act on, so it is reported as an error rather than
                     // as success.
                     self.set_status(Status::UnknownError, false);
-                    self.state = State::Stalled;
+                    self.set_state(t, State::Stalled);
                 }
                 Control::Reply(&self.status.0)
             }

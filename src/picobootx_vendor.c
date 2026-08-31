@@ -61,6 +61,12 @@ typedef struct {
   uint8_t rhport;
   uint8_t itf_num;
 
+  // Whether the device is taking anything from the host.  Every path that could
+  // arm the receive endpoint checks it.  Nothing takes an armed buffer back -
+  // the port's abort busy-waits for a controller that never answers when there
+  // is nothing in flight.
+  bool rx_paused;
+
   // From this point, data is not cleared by bus reset
   tu_edpt_stream_t tx_stream;
   tu_edpt_stream_t rx_stream;
@@ -69,7 +75,7 @@ typedef struct {
 } picoboot_interface_t;
 
 // Some magic so TUD can reset bits of our interface structure
-#define ITF_MEM_RESET_SIZE (offsetof(picoboot_interface_t, itf_num) + TU_FIELD_SIZE(picoboot_interface_t, itf_num))
+#define ITF_MEM_RESET_SIZE (offsetof(picoboot_interface_t, rx_paused) + TU_FIELD_SIZE(picoboot_interface_t, rx_paused))
 
 // Global picoboot vendor interface instances.
 static picoboot_interface_t p_itf;
@@ -97,16 +103,38 @@ bool picoboot_vendor_peek(uint8_t *u8) {
 }
 
 uint32_t picoboot_vendor_read(void *buffer, uint32_t bufsize) {
-    return tu_edpt_stream_read(&p_itf.rx_stream, buffer, bufsize);
+    // tu_edpt_stream_read arms the endpoint as soon as the FIFO has room, which
+    // is the one thing a pause has to stop.
+    uint32_t n = tu_fifo_read_n(&p_itf.rx_stream.ff, buffer, (uint16_t)bufsize);
+    if (!p_itf.rx_paused) {
+        tu_edpt_stream_read_xfer(&p_itf.rx_stream);
+    }
+    return n;
 }
 
 void picoboot_vendor_read_clear(void) {
     tu_edpt_stream_clear(&p_itf.rx_stream);
-    tu_edpt_stream_read_xfer(&p_itf.rx_stream);
+    if (!p_itf.rx_paused) {
+        tu_edpt_stream_read_xfer(&p_itf.rx_stream);
+    }
 }
 
 bool picoboot_vendor_read_xfer(void) {
+    if (p_itf.rx_paused) {
+        return false;
+    }
     return tu_edpt_stream_read_xfer(&p_itf.rx_stream);
+}
+
+void picoboot_vendor_read_pause(void) {
+    DEBUG("Pausing reads on endpoint %02X", p_itf.rx_stream.ep_addr);
+    p_itf.rx_paused = true;
+}
+
+void picoboot_vendor_read_resume(void) {
+    DEBUG("Resuming reads on endpoint %02X", p_itf.rx_stream.ep_addr);
+    p_itf.rx_paused = false;
+    tu_edpt_stream_read_xfer(&p_itf.rx_stream);
 }
 
 //
@@ -146,6 +174,12 @@ bool picoboot_vendor_is_endpoint_stalled(uint8_t ep_addr) {
     return usbd_edpt_stalled(p_itf.rhport, ep_addr);
 }
 
+bool picoboot_vendor_write_pending(void) {
+    return (tu_edpt_stream_write_available(&p_itf.tx_stream) <
+            CFG_TUD_PICOBOOT_TX_BUFSIZE) ||
+           usbd_edpt_busy(p_itf.rhport, p_itf.tx_stream.ep_addr);
+}
+
 void picoboot_vendor_stall_endpoint(uint8_t ep_addr) {
     if (usbd_edpt_stalled(p_itf.rhport, ep_addr)) {
         // Already stalled
@@ -174,8 +208,9 @@ void picoboot_vendor_unstall_endpoint(uint8_t ep_addr) {
     }
     if (tu_edpt_dir(ep_addr) == TUSB_DIR_OUT) {
         // A stall killed the armed read transfer, so it has to be started
-        // again.  Without one it is still armed, and only the bytes it
-        // buffered are stale.
+        // again.  Without a stall it is armed already, or closed because the
+        // protocol owes the host packets, and the state change that follows
+        // this request opens it.
         if (was_stalled) {
             DEBUG("Re-arm OUT endpoint");
             picoboot_vendor_read_clear();
@@ -285,8 +320,9 @@ bool vendord_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint
         // application, so it can provide picoboot its state
         app_picoboot_rx_cb(picoboot_vendor_available());
 
-        // Prepare for the next data
-        tu_edpt_stream_read_xfer(&p_itf.rx_stream);
+        // Prepare for the next data, unless the protocol has closed the
+        // endpoint - the callback above is where it decides.
+        picoboot_vendor_read_xfer();
     } else if (ep_addr == p_itf.tx_stream.ep_addr) {
         // Let the picoboot protocol handler know - this has to go via the
         // application, so it can provide picoboot its state

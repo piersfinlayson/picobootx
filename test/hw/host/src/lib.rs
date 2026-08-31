@@ -81,11 +81,9 @@ impl Firmware {
 
     /// Whether it answers [`REQUEST_DIAG`].
     ///
-    /// `picobootx-embassy` publishes its own state and queue lengths, so the
-    /// embassy device reports them.  The C library publishes nothing of the
-    /// sort, so a run against tinyusb settles for what the wire says.
+    /// Both do.  A wire says what a device did and this says why.
     pub const fn serves_diagnostics(self) -> bool {
-        matches!(self, Firmware::Embassy)
+        matches!(self, Firmware::Embassy | Firmware::Tinyusb)
     }
 }
 
@@ -93,6 +91,33 @@ impl fmt::Display for Firmware {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
+}
+
+/// Reset the port the board is on, and say what re-enumerating showed.
+///
+/// A board that has stopped answering keeps the descriptors the host already
+/// read, so it goes on presenting whatever it was running.  Resetting the port
+/// makes it say what it is now, which is how a board sitting in BOOTSEL after a
+/// hand jumper stops looking like a wedged firmware.
+pub async fn port_reset() -> Result<Option<String>, String> {
+    let info = nusb::list_devices()
+        .wait()
+        .map_err(|e| format!("cannot list the bus: {e}"))?
+        .find(|d| d.vendor_id() == VID && d.product_id() == PID)
+        .ok_or_else(|| format!("nothing answering {VID:04x}:{PID:04x} to reset"))?;
+
+    info.open()
+        .await
+        .map_err(|e| format!("cannot open the device: {e}"))?
+        .reset()
+        .await
+        .map_err(|e| format!("the port reset failed: {e}"))?;
+
+    Ok(nusb::list_devices()
+        .wait()
+        .map_err(|e| format!("cannot list the bus: {e}"))?
+        .find(|d| d.vendor_id() == VID && d.product_id() == PID)
+        .and_then(|d| d.product_string().map(str::to_owned)))
 }
 
 /// Take `--device <name>` off a command line, and hand back the rest.

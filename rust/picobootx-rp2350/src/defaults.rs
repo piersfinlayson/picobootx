@@ -8,8 +8,8 @@ use picobootx::wire::{FLASH_BLOCK_SIZE, FLASH_PAGE_SIZE, FLASH_SECTOR_SIZE};
 use picobootx::{Ecc, Exclusive, Info, Reboot, Result, Status, Target};
 
 use crate::bootrom::{
-    self, FlashExitXipFn, FlashFlushCacheFn, FlashRangeEraseFn, FlashRangeProgramFn,
-    FlashSelectXipReadModeFn, OTP_ACCESS_FLAG_ECC, OTP_ACCESS_FLAG_WRITE,
+    self, ConnectInternalFlashFn, FlashExitXipFn, FlashFlushCacheFn, FlashRangeEraseFn,
+    FlashRangeProgramFn, FlashSelectXipReadModeFn, OTP_ACCESS_FLAG_ECC, OTP_ACCESS_FLAG_WRITE,
 };
 use crate::chip;
 use crate::{FLASH_BASE, FLASH_SIZE, ROM_BASE, ROM_SIZE, SRAM_BASE, SRAM_SIZE};
@@ -237,20 +237,14 @@ pub fn flash_page_write(addr: u32, page: &[u8; FLASH_PAGE_SIZE]) -> Result {
     let flush_cache = bootrom::flash_flush_cache().ok_or(Status::NotFound)?;
     let select_xip = bootrom::flash_select_xip_read_mode().ok_or(Status::NotFound)?;
 
-    unsafe { connect_internal_flash() };
-
-    // Execute-in-place is restored on the divisor the firmware's own QMI setup
-    // put in force, which is why it is read here rather than assumed.
-    let clkdiv = chip::xip_clkdiv();
-
     program_critical(
+        connect_internal_flash,
         exit_xip,
         range_program,
         flush_cache,
         select_xip,
         flash_offs(addr),
         page.as_ptr(),
-        clkdiv,
     );
     Ok(())
 }
@@ -337,15 +331,21 @@ fn ramfunc_resident(routine: *const ()) -> bool {
 #[cfg_attr(target_os = "none", unsafe(link_section = ".ramfunc"))]
 #[inline(never)]
 fn erase_critical(
+    connect_internal_flash: ConnectInternalFlashFn,
     exit_xip: FlashExitXipFn,
     range_erase: FlashRangeEraseFn,
     flush_cache: FlashFlushCacheFn,
     select_xip: FlashSelectXipReadModeFn,
     flash_offs: u32,
     size: u32,
-    clkdiv: u8,
 ) {
     chip::irq_disable();
+
+    // Connecting the flash leaves execute-in-place no longer guaranteed, so it
+    // and everything after it runs from RAM with interrupts already down.  The
+    // divisor is read here for the same reason.
+    unsafe { connect_internal_flash() };
+    let clkdiv = chip::xip_clkdiv();
 
     // Leaving XIP puts the QSPI interface into serial command mode, which is
     // what an erase needs and what stops code being fetched from flash.
@@ -385,15 +385,21 @@ fn erase_critical(
 #[cfg_attr(target_os = "none", unsafe(link_section = ".ramfunc"))]
 #[inline(never)]
 fn program_critical(
+    connect_internal_flash: ConnectInternalFlashFn,
     exit_xip: FlashExitXipFn,
     range_program: FlashRangeProgramFn,
     flush_cache: FlashFlushCacheFn,
     select_xip: FlashSelectXipReadModeFn,
     flash_offs: u32,
     data: *const u8,
-    clkdiv: u8,
 ) {
     chip::irq_disable();
+
+    // Connecting the flash leaves execute-in-place no longer guaranteed, so it
+    // and everything after it runs from RAM with interrupts already down.  The
+    // divisor is read here for the same reason.
+    unsafe { connect_internal_flash() };
+    let clkdiv = chip::xip_clkdiv();
 
     // Leaving XIP puts the QSPI interface into serial command mode, which is
     // what a program needs and what stops code being fetched from flash.
@@ -440,22 +446,18 @@ pub fn flash_erase(addr: u32, size: u32) -> Result {
     let flush_cache = bootrom::flash_flush_cache().ok_or(Status::NotFound)?;
     let select_xip = bootrom::flash_select_xip_read_mode().ok_or(Status::NotFound)?;
 
-    unsafe { connect_internal_flash() };
-
     // Execute-in-place is restored on the divisor the firmware's own QMI setup
-    // put in force, which is why it is read here rather than assumed.  The
+    // put in force, read inside the critical section rather than assumed.  The
     // bootrom also leaves the setup routine it discovered in boot RAM, and
     // calling that would restore exactly what the flash scan found.
-    let clkdiv = chip::xip_clkdiv();
-
     erase_critical(
+        connect_internal_flash,
         exit_xip,
         range_erase,
         flush_cache,
         select_xip,
         flash_offs(addr),
         size,
-        clkdiv,
     );
 
     Ok(())

@@ -4,7 +4,7 @@
 
 [package]
 name = "picobootx"
-version = "0.3.0"
+version = "0.4.0"
 description = "Device-side PICOBOOT protocol, for firmware that is not a bootloader"
 keywords = ["embedded", "no-std", "usb", "rp2350", "picoboot"]
 categories = ["embedded", "no-std"]

@@ -15,7 +15,7 @@
 
 use std::process::ExitCode;
 
-use picobootx_hw_host::{Board, take_device_arg};
+use picobootx_hw_host::{Board, port_reset, take_device_arg};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -30,7 +30,16 @@ async fn main() -> ExitCode {
     let board = match Board::open(want).await {
         Ok(b) => b,
         Err(e) => {
+            // A board that stopped answering keeps the descriptors the host
+            // already has, so what it looks like is what it was running rather
+            // than what it is.  Resetting the port is what settles that, and it
+            // is the difference between reaching for the jumper and not.
             eprintln!("picobootx-hw-bootsel: {e}");
+            match port_reset().await {
+                Ok(Some(now)) => eprintln!("  after a port reset it presents as {now}"),
+                Ok(None) => eprintln!("  after a port reset it names nothing"),
+                Err(e) => eprintln!("  the port reset got nowhere either: {e}"),
+            }
             return ExitCode::FAILURE;
         }
     };

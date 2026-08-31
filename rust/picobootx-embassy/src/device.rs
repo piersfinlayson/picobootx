@@ -208,6 +208,9 @@ impl<'a, O: Ops, C: Custom, E: EndpointControl> PicobootClass<'a, O, C, E> {
                 }
                 let n = i.xport.take_tx(&mut packet);
                 if n > 0 {
+                    // Out of the queue and not yet with the host, a window the
+                    // queue cannot report.
+                    i.xport.set_tx_armed(true);
                     return Action::Send(n);
                 }
                 // Reading the host-to-device endpoint waits for a packet, so
@@ -256,19 +259,25 @@ impl<'a, O: Ops, C: Custom, E: EndpointControl> PicobootClass<'a, O, C, E> {
                 Action::Halted => self.unhalted().await,
                 Action::Send(n) => {
                     ep_in.wait_enabled().await;
-                    match ep_in.write(&packet[..n]).await {
-                        // write returns once the packet is armed, and the
-                        // protocol acts on a transmission the host has taken —
-                        // CMD_REBOOT2 reboots in on_tx.  So the delivery is
-                        // waited for, and a packet the bus never carried is not
-                        // reported as one that went.
-                        Ok(()) => match self.await_collection().await {
-                            Collection::Taken => self.lock(|i| i.core.on_tx()),
-                            // A packet no host took is not one the protocol
-                            // hears about.
-                            Collection::Withdrawn | Collection::Gone => {}
-                        },
-                        Err(_) => yield_now().await,
+                    // write returns once the packet is armed, and the protocol
+                    // acts on a transmission the host has taken — CMD_REBOOT2
+                    // reboots in on_tx.  So the delivery is waited for, and a
+                    // packet the bus never carried is not reported as one that
+                    // went.
+                    let collection = match ep_in.write(&packet[..n]).await {
+                        Ok(()) => Some(self.await_collection().await),
+                        Err(_) => None,
+                    };
+                    // However it went, it is no longer on its way.
+                    self.lock(|i| i.xport.set_tx_armed(false));
+                    match collection {
+                        Some(Collection::Taken) => {
+                            self.lock(|i| i.core.on_tx(&mut i.xport));
+                        }
+                        // A packet no host took is not one the protocol hears
+                        // about, and a write that failed carried none.
+                        Some(Collection::Withdrawn | Collection::Gone) => {}
+                        None => yield_now().await,
                     }
                 }
                 Action::Receive => {

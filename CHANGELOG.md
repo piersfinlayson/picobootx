@@ -12,7 +12,7 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
-## 0.6.0 - unreleased
+## 0.6.0 - 2026-09-01
 
 A host that walked away part way through collecting a reply left the device
 taking nothing further, and `INTERFACE_RESET` did not put it back.  The next

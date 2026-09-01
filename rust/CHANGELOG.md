@@ -16,7 +16,7 @@ that do not unify.  A `picobootx` release therefore moves both of them too.
 
 ## picobootx
 
-### 0.4.0 - unreleased
+### 0.4.0 - 2026-09-01
 
 `Transport` gains two required methods and `Picoboot::on_tx` takes the
 transport, so neither is backwards compatible.
@@ -78,7 +78,7 @@ stack or an executor.
 
 ## picobootx-rp2350
 
-### 0.4.0 - unreleased
+### 0.4.0 - 2026-09-01
 
 - The flash page program and erase connect the flash inside the RAM routine,
   with interrupts already down.  Connecting it leaves execute-in-place no longer
@@ -129,7 +129,7 @@ a small transmit FIFO serves those types itself.
 
 ## picobootx-embassy
 
-### 0.4.0 - unreleased
+### 0.4.0 - 2026-09-01
 
 - `Transport::set_rx_paused` and `Transport::tx_pending` are implemented.  The
   device task already refused to read the host-to-device endpoint while a phase

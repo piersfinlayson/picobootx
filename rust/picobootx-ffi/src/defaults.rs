@@ -75,23 +75,12 @@ pub unsafe extern "C" fn picoboot_default_enter_xip(ctx: *mut c_void) -> CStatus
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn picoboot_default_reboot2_prepare(
+pub unsafe extern "C" fn picoboot_default_reboot2(
     args: *const CRebootArgs,
     ctx: *mut c_void,
 ) -> CStatus {
     let _ = ctx;
-    code(picobootx_rp2350::reboot_prepare(&reboot_args(unsafe {
-        &*args
-    })))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn picoboot_default_reboot2_execute(
-    args: *const CRebootArgs,
-    ctx: *mut c_void,
-) {
-    let _ = ctx;
-    picobootx_rp2350::reboot_execute(&reboot_args(unsafe { &*args }));
+    code(picobootx_rp2350::reboot(&reboot_args(unsafe { &*args })))
 }
 
 fn reboot_args(args: &CRebootArgs) -> Reboot {

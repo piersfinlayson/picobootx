@@ -182,19 +182,17 @@ static void scenario_every_status_a_callback_returns_reaches_the_host(void) {
 // REBOOT2
 // ---------------------------------------------------------------------------
 
-static void scenario_reboot2_without_prepare_is_refused(void) {
+static void scenario_reboot2_without_its_callback_is_refused(void) {
     pbt_begin();
-    pbt_ops.reboot2_prepare = NULL;
+    pbt_ops.reboot2 = NULL;
     pbt_start();
 
-    // Preparing is where the device decides whether it can reboot at all.  With
-    // no way to ask, the command is refused rather than acknowledged and then
-    // silently not carried out.
+    // With no reboot callback the command fails.  Acknowledging it would
+    // promise a reboot that never happens.
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
     pbt_args_reboot2(&cmd, 0x0002u, 10u, 0u, 0u);
 
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_UNKNOWN_CMD);
-    PBT_CHECK_EQ(pbt_count("op_reboot2_execute"), 0);
     PBT_CHECK_EQ(pbt_count("rom_reboot"), 0);
     PBT_CHECK_EQ(pbt_packet_count(), 0u);
 
@@ -204,36 +202,6 @@ static void scenario_reboot2_without_prepare_is_refused(void) {
     pbt_args_reboot2(&again, 0x0002u, 10u, 0u, 0u);
     PBT_CHECK_STATUS(pbt_run_cmd(&again), PB_STATUS_OK);
     PBT_CHECK_EQ(pbt_count("rom_reboot"), 1);
-}
-
-static void scenario_reboot2_without_execute_still_acknowledges(void) {
-    pbt_begin();
-    pbt_ops.reboot2_execute = NULL;
-    pbt_start();
-
-    // Rebooting is deferred until the acknowledgement has gone, and an
-    // integrator with nothing to defer still gets the acknowledgement.  A
-    // device that stopped short of it here would leave every host waiting.
-    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
-    pbt_args_reboot2(&cmd, 0x0002u, 10u, 0u, 0u);
-
-    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
-    PBT_CHECK_EQ(pbt_count("op_reboot2_prepare"), 1);
-    PBT_CHECK_EQ(pbt_count("rom_reboot"), 0);
-    PBT_CHECK_EQ(pbt_packet_count(), 1u);
-    PBT_REQUIRE(pbt_packet(0) != NULL);
-    PBT_CHECK_EQ(pbt_packet(0)->len, 1u);
-    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
-
-    // With the callback in place the same command reboots after the same
-    // acknowledgement, so what was missing was the reboot and not the reply.
-    pbt_begin();
-    pbt_start();
-    picoboot_cmd_t again = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
-    pbt_args_reboot2(&again, 0x0002u, 10u, 0u, 0u);
-    PBT_CHECK_STATUS(pbt_run_cmd(&again), PB_STATUS_OK);
-    PBT_CHECK_EQ(pbt_count("rom_reboot"), 1);
-    PBT_CHECK(pbt_before("packet_in", "rom_reboot"));
 }
 
 // ---------------------------------------------------------------------------
@@ -276,10 +244,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_an_action_callback_that_refuses_stalls },
     { "every status a callback returns reaches the host",
       scenario_every_status_a_callback_returns_reaches_the_host },
-    { "REBOOT2 without its prepare callback is refused",
-      scenario_reboot2_without_prepare_is_refused },
-    { "REBOOT2 without its execute callback still acknowledges",
-      scenario_reboot2_without_execute_still_acknowledges },
+    { "REBOOT2 without its callback is refused",
+      scenario_reboot2_without_its_callback_is_refused },
     { "WRITE without its prepare callback is refused",
       scenario_write_without_prepare_is_refused },
 };

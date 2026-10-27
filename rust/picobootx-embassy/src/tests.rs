@@ -38,7 +38,7 @@ use embassy_usb_driver::{
 };
 
 use picobootx::wire::{CMD_LEN, DIR_IN, MAGIC};
-use picobootx::{NoCustom, Ops, Reboot, Result as PbResult, State, Status};
+use picobootx::{NoCustom, Ops, Result as PbResult, State, Status};
 
 use crate::PicobootClass;
 use crate::endpoint::EndpointControl;
@@ -51,7 +51,6 @@ const MAX_PACKET: u16 = 64;
 const CMD_READ: u8 = 0x04 | DIR_IN;
 const CMD_WRITE: u8 = 0x05;
 const CMD_EXIT_XIP: u8 = 0x06;
-const CMD_REBOOT2: u8 = 0x0a;
 
 // ---------------------------------------------------------------------------
 // The bus
@@ -74,8 +73,6 @@ struct Bus {
     resyncs: Vec<u8>,
     /// Every endpoint address `retract` was called for, in order.
     retracts: Vec<u8>,
-    /// How many times the device has actually rebooted.
-    reboots: usize,
     /// Whether the host collects a packet the moment it is written.  A real
     /// host does, and a test that wants to watch a packet sit unread says so.
     host_collects: bool,
@@ -262,22 +259,15 @@ struct MemOps {
     mem: [u8; 512],
     /// Refuse the next prepare, whichever it is.
     refuse: bool,
-    /// Where a reboot is recorded, since the effect of one is not something a
-    /// test can observe on the bus.
-    bus: Rc<RefCell<Bus>>,
 }
 
 impl MemOps {
-    fn new(bus: &Rc<RefCell<Bus>>) -> Self {
+    fn new() -> Self {
         let mut mem = [0u8; 512];
         for (i, b) in mem.iter_mut().enumerate() {
             *b = i as u8;
         }
-        Self {
-            mem,
-            refuse: false,
-            bus: Rc::clone(bus),
-        }
+        Self { mem, refuse: false }
     }
 }
 
@@ -310,19 +300,6 @@ impl Ops for MemOps {
         let at = addr as usize;
         self.mem[at..at + buf.len()].copy_from_slice(buf);
         Ok(())
-    }
-
-    fn reboot_prepare(&mut self, args: &Reboot) -> PbResult {
-        let _ = args;
-        Ok(())
-    }
-
-    // Runs only once the host has taken the acknowledgement, which is what
-    // makes it worth counting: a reboot recorded here without the host having
-    // collected anything is one no host asked for.
-    fn reboot_execute(&mut self, args: &Reboot) {
-        let _ = args;
-        self.bus.borrow_mut().reboots += 1;
     }
 }
 
@@ -357,7 +334,7 @@ fn device(
     FakeIn,
 ) {
     let picoboot = PicobootClass::new(
-        MemOps::new(bus),
+        MemOps::new(),
         NoCustom,
         None,
         Endpoints {
@@ -572,8 +549,7 @@ fn a_halted_pipe_serves_again_once_the_halts_are_cleared() {
 
 /// A packet the host has not taken is not reported to the protocol as sent.
 ///
-/// `CMD_REBOOT2` acts in `on_tx`, so a device that counted an armed packet as a
-/// delivered one would reboot with the reply still sitting on the controller.
+/// `on_tx` means the host has the packet.
 #[test]
 fn a_packet_the_host_has_not_taken_is_not_counted_as_sent() {
     let bus = Bus::new();
@@ -815,9 +791,7 @@ fn a_packet_left_by_a_bus_that_went_away_is_not_counted_as_sent() {
 
     // The transfer is not finished, because the packet that would have finished
     // it was never taken.  What matters is that the protocol was not told it
-    // went: CMD_REBOOT2 acts in on_tx, and a device that counted an armed
-    // packet as a delivered one would reboot with the reply still on the
-    // controller.
+    // went.
     assert_ne!(
         picoboot.diagnostics().state,
         State::Idle,
@@ -1127,21 +1101,19 @@ fn interface_reset_takes_back_a_reply_the_host_never_collected() {
     );
 }
 
-/// REBOOT2 acts once the host has taken the acknowledgement, and not before.
+/// A command ends when the host collects its acknowledgement, not before.
 ///
-/// The command is answered first and acted on when the answer has gone, so a
-/// device that treated an armed packet as a delivered one would reboot with the
-/// acknowledgement still sitting on the controller - and the host that asked
-/// would never learn the command was accepted.
+/// Otherwise the device would read the next command while the acknowledgement
+/// is still waiting on the controller.
 #[test]
-fn reboot2_acts_once_the_host_has_taken_the_acknowledgement() {
-    // The host that never collects.  The board must stay where it is.
+fn a_command_ends_once_the_host_has_taken_the_acknowledgement() {
+    // A host that never collects the acknowledgement.  The command must not end.
     let bus = Bus::new();
     let host = Host(Rc::clone(&bus));
     bus.borrow_mut().host_collects = false;
     let (picoboot, ep_out, ep_in) = device(&bus);
 
-    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    host.send_cmd(CMD_EXIT_XIP, 0, &[]);
     let mut fut = pin!(picoboot.run(ep_out, ep_in));
     step(&mut fut, STEPS);
 
@@ -1150,40 +1122,39 @@ fn reboot2_acts_once_the_host_has_taken_the_acknowledgement() {
         "the acknowledgement was never armed, so nothing here is being waited on"
     );
     assert_eq!(
-        bus.borrow().reboots,
-        0,
-        "it rebooted with the acknowledgement still on the controller"
+        picoboot.diagnostics().state,
+        State::AwaitZlp,
+        "the command ended with the acknowledgement still on the controller"
     );
 
-    // The same command, to a host that does collect.  Without this the test
-    // would pass on a device that never reboots at all.
+    // The same command to a host that collects.  Without this, a device that
+    // never ends a command would pass.
     let bus = Bus::new();
     let host = Host(Rc::clone(&bus));
     let (picoboot, ep_out, ep_in) = device(&bus);
 
-    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    host.send_cmd(CMD_EXIT_XIP, 0, &[]);
     let mut fut = pin!(picoboot.run(ep_out, ep_in));
     step(&mut fut, STEPS);
 
     assert_eq!(
-        bus.borrow().reboots,
-        1,
-        "a host that took the acknowledgement did not get its reboot"
+        picoboot.diagnostics().state,
+        State::Idle,
+        "a host that took the acknowledgement left the command unfinished"
     );
 }
 
-/// A reboot the device took back is not one the protocol hears about.
+/// An acknowledgement withdrawn by INTERFACE RESET isn't reported as collected.
 ///
-/// INTERFACE RESET retracts the acknowledgement, so no host ever took it.  The
-/// board must stay where it is, and the wait must end rather than run on.
+/// The wait for it must end.
 #[test]
-fn a_withdrawn_acknowledgement_does_not_reboot_the_board() {
+fn a_withdrawn_acknowledgement_is_not_read_as_taken() {
     let bus = Bus::new();
     let host = Host(Rc::clone(&bus));
     bus.borrow_mut().host_collects = false;
     let (picoboot, ep_out, ep_in) = device(&bus);
 
-    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    host.send_cmd(CMD_EXIT_XIP, 0, &[]);
     let mut fut = pin!(picoboot.run(ep_out, ep_in));
     step(&mut fut, STEPS);
     assert!(
@@ -1195,29 +1166,25 @@ fn a_withdrawn_acknowledgement_does_not_reboot_the_board() {
     step(&mut fut, STEPS);
 
     assert_eq!(
-        bus.borrow().reboots,
-        0,
-        "a reboot fired on an acknowledgement the device had taken back"
-    );
-    assert_eq!(
         picoboot.last_collection(),
         Some(Collection::Withdrawn),
         "a packet the device took back was read as one the host took"
     );
 }
 
-/// A reboot the bus went away under is not one the protocol hears about.
+/// An acknowledgement still waiting when the bus goes down isn't reported as
+/// collected.
 ///
 /// The acknowledgement stays armed - powering the bus off retracts nothing -
 /// so this is the ending that has to be told apart from the host taking it.
 #[test]
-fn an_acknowledgement_the_bus_went_away_under_does_not_reboot_the_board() {
+fn an_acknowledgement_the_bus_went_away_under_does_not_end_the_command() {
     let bus = Bus::new();
     let host = Host(Rc::clone(&bus));
     bus.borrow_mut().host_collects = false;
     let (picoboot, ep_out, ep_in) = device(&bus);
 
-    host.send_cmd(CMD_REBOOT2, 0, &[0u8; 16]);
+    host.send_cmd(CMD_EXIT_XIP, 0, &[]);
     let mut fut = pin!(picoboot.run(ep_out, ep_in));
     step(&mut fut, STEPS);
     assert!(
@@ -1229,9 +1196,9 @@ fn an_acknowledgement_the_bus_went_away_under_does_not_reboot_the_board() {
     step(&mut fut, STEPS);
 
     assert_eq!(
-        bus.borrow().reboots,
-        0,
-        "a reboot fired on an acknowledgement no host had taken"
+        picoboot.diagnostics().state,
+        State::AwaitZlp,
+        "the command ended on an acknowledgement no host had taken"
     );
     assert_eq!(
         picoboot.last_collection(),

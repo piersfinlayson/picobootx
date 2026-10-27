@@ -1605,14 +1605,10 @@ fn reboot_args(flags: u32, delay_ms: u32) -> [u8; REBOOT_ARGS_LEN] {
     args
 }
 
-/// The command that answers before it acts, and the bus going away underneath
-/// it.
+/// `REBOOT2`, and the bus going down under a command.
 ///
-/// `REBOOT2` is acknowledged first and carried out once the acknowledgement has
-/// gone, so a device that treated an armed packet as a delivered one reboots
-/// with the answer still on the controller and the host never learns the
-/// command was taken.  Which of the two happened is only visible on a wire: a
-/// model has no moment where a packet is written but not yet collected.
+/// Like the boot ROM, the device sets the reboot going and then acknowledges,
+/// so the host has `delay_ms` to collect the acknowledgement.
 ///
 /// Takes the board rather than borrowing it, because a reboot ends the
 /// connection - the handle afterwards is a different one, and the reopening is
@@ -1692,8 +1688,8 @@ async fn reboot(run: &mut Runner, mut board: Board) -> Option<Board> {
         }
     };
 
-    // The reboot itself.  A delay, so the acknowledgement has somewhere to be
-    // collected before the part goes - which is the ordering under test.
+    // The reboot itself, with a delay so the acknowledgement can be collected
+    // first.
     let acknowledged = board
         .send_cmd(CMD_REBOOT2, 0, &reboot_args(REBOOT_NORMAL, REBOOT_DELAY_MS))
         .and_then(|()| board.read_ack());

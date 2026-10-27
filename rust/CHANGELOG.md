@@ -16,6 +16,17 @@ that do not unify.  A `picobootx` release therefore moves both of them too.
 
 ## picobootx
 
+### 0.5.0 - unreleased
+
+`REBOOT2` is fixed to mirror the RP2350 boot ROM implementation.  Its two
+methods are collapsed into one, so this is not backwards compatible.
+
+- The reboot used to start once the host had read the acknowledgement.  It now
+  starts when `REBOOT2` arrives.
+- `Ops::reboot` replaces `Ops::reboot_prepare` and `Ops::reboot_execute`.
+- If `Ops::reboot` returns an error, `REBOOT2` fails.
+- `REBOOT2_FLAG_NO_RETURN_ON_SUCCESS` is cleared before `Ops::reboot` is called.
+
 ### 0.4.0 - 2026-09-01
 
 `Transport` gains two required methods and `Picoboot::on_tx` takes the
@@ -78,6 +89,15 @@ stack or an executor.
 
 ## picobootx-rp2350
 
+### 0.5.0 - unreleased
+
+- `reboot` replaces `reboot_prepare` and `reboot_execute`.
+- If the boot ROM can't reboot, `REBOOT2` now fails.  It used to succeed and the
+  device didn't reboot.
+- A delay of 0 is passed to the boot ROM as 1ms.  The boot ROM doesn't reboot at
+  all for 0.
+- Moves with `picobootx` 0.5.0.
+
 ### 0.4.0 - 2026-09-01
 
 - The flash page program and erase connect the flash inside the RAM routine,
@@ -128,6 +148,10 @@ a small transmit FIFO serves those types itself.
 ### 0.1.0 - 2026-08-26
 
 ## picobootx-embassy
+
+### 0.5.0 - unreleased
+
+- Moves with `picobootx` 0.5.0.
 
 ### 0.4.0 - 2026-09-01
 

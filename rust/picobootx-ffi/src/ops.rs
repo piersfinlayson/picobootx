@@ -237,11 +237,8 @@ impl Ops for OpsTable {
         Ok(written as usize)
     }
 
-    fn reboot_prepare(&mut self, args: &Reboot) -> Result {
-        let f = self
-            .t()
-            .and_then(|t| t.reboot2_prepare)
-            .ok_or(Status::UnknownCmd)?;
+    fn reboot(&mut self, args: &Reboot) -> Result {
+        let f = self.t().and_then(|t| t.reboot2).ok_or(Status::UnknownCmd)?;
         let c = CRebootArgs {
             flags: args.flags,
             delay_ms: args.delay_ms,
@@ -249,18 +246,6 @@ impl Ops for OpsTable {
             p1: args.p1,
         };
         status(unsafe { f(&c, self.ctx) })
-    }
-
-    fn reboot_execute(&mut self, args: &Reboot) {
-        if let Some(f) = self.t().and_then(|t| t.reboot2_execute) {
-            let c = CRebootArgs {
-                flags: args.flags,
-                delay_ms: args.delay_ms,
-                p0: args.p0,
-                p1: args.p1,
-            };
-            unsafe { f(&c, self.ctx) };
-        }
     }
 }
 

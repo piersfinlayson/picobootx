@@ -41,16 +41,9 @@ static pb_status_t op_enter_xip(void *ctx) {
     return picoboot_default_enter_xip(ctx);
 }
 
-static pb_status_t op_reboot2_prepare(const pb_reboot2_args_t *args, void *ctx) {
-    pbt_log("op_reboot2_prepare", args->flags, args->delay_ms, args->p0,
-            args->p1);
-    return picoboot_default_reboot2_prepare(args, ctx);
-}
-
-static void op_reboot2_execute(const pb_reboot2_args_t *args, void *ctx) {
-    pbt_log("op_reboot2_execute", args->flags, args->delay_ms, args->p0,
-            args->p1);
-    picoboot_default_reboot2_execute(args, ctx);
+static pb_status_t op_reboot2(const pb_reboot2_args_t *args, void *ctx) {
+    pbt_log("op_reboot2", args->flags, args->delay_ms, args->p0, args->p1);
+    return picoboot_default_reboot2(args, ctx);
 }
 
 // Logged after the call rather than before it, unlike the wrappers around it,
@@ -161,8 +154,7 @@ void pbt_ops_reset(void) {
         .exclusive_access    = op_exclusive_access,
         .exit_xip            = op_exit_xip,
         .enter_xip           = op_enter_xip,
-        .reboot2_prepare     = op_reboot2_prepare,
-        .reboot2_execute     = op_reboot2_execute,
+        .reboot2             = op_reboot2,
         .get_info_prepare    = op_get_info_prepare,
         .get_info            = op_get_info,
         .read_prepare        = op_read_prepare,

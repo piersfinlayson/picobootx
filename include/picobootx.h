@@ -173,11 +173,9 @@ _Static_assert(sizeof(pb_status_t) == 1, "pb_status_t size mismatch");
 
 typedef enum {
     PB_CAT_ACTION_SYNC,     // synchronous: call op, it returns, send ack
-                            // (exclusive_access, exit_xip, enter_xip)
+                            // (exclusive_access, exit_xip, enter_xip, reboot2)
     PB_CAT_ACTION_ASYNC,    // async: call op to initiate, completion signalled
                             // via callback (flash_erase)
-    PB_CAT_ACTION_DEFERRED, // send ack first, execute after ack clears
-                            // (reboot2)
     PB_CAT_DATA_IN,         // device->host data transfer
                             // (read, get_info, otp_read)
     PB_CAT_DATA_OUT,        // host->device data transfer
@@ -251,8 +249,16 @@ typedef struct {
     pb_status_t (*exclusive_access)(const pb_exclusive_access_args_t *args, void *ctx);
     pb_status_t (*exit_xip)(void *ctx);
     pb_status_t (*enter_xip)(void *ctx);
-    pb_status_t (*reboot2_prepare)(const pb_reboot2_args_t *args, void *ctx);
-    void (*reboot2_execute)(const pb_reboot2_args_t *args, void *ctx);
+
+    // REBOOT2.  Sets the part to reboot args->delay_ms from now, then returns.
+    // The acknowledgement is sent after it returns, so rebooting sooner can
+    // lose it.  Anything but PB_STATUS_OK fails the command and nothing
+    // reboots.  NULL fails it with PB_STATUS_UNKNOWN_CMD.
+    //
+    // args->flags never has REBOOT2_FLAG_NO_RETURN_ON_SUCCESS set.  The library
+    // clears it, as the RP2350 boot ROM does, so that this returns and the
+    // acknowledgement can be sent.
+    pb_status_t (*reboot2)(const pb_reboot2_args_t *args, void *ctx);
 
     // GET_INFO.  Both are needed: with either NULL, GET_INFO returns
     // PB_STATUS_UNKNOWN_CMD, which is a device that does not serve it at all.

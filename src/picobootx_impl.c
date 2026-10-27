@@ -244,36 +244,22 @@ pb_status_t picoboot_default_enter_xip(void *ctx) {
     return PB_STATUS_OK;
 }
 
-pb_status_t picoboot_default_reboot2_prepare(const pb_reboot2_args_t *args, void *ctx) {
+pb_status_t picoboot_default_reboot2(const pb_reboot2_args_t *args, void *ctx) {
     (void)ctx;
-    (void)args;
 
     reboot_fn_t reboot = pb_lookup_reboot_fn();
     if (reboot == NULL) {
-        ERR("Unable to find reboot function in ROM - cannot prepare for reboot");
+        ERR("Unable to find reboot function in ROM - cannot reboot");
         return PB_STATUS_NOT_FOUND;
     }
 
-    return PB_STATUS_OK;
-}
-
-void picoboot_default_reboot2_execute(const pb_reboot2_args_t *args, void *ctx) {
-    (void)args;
-    (void)ctx;
-
-    // This should not fail as it as we checked for it in prepare
-    reboot_fn_t reboot = pb_lookup_reboot_fn();
-    if (reboot == NULL) {
-        ERR("Unable to find reboot function in ROM - cannot prepare for reboot");
-        return;
+    uint32_t delay_ms = args->delay_ms ? args->delay_ms : 1u;
+    int ret = reboot(args->flags, delay_ms, args->p0, args->p1);
+    if (ret < 0) {
+        ERR("reboot refused flags 0x%08x: %d", args->flags, ret);
+        return pb_status_from_bootrom(ret);
     }
-
-    uint32_t flags  = args->flags;
-    uint32_t delay_ms = args->delay_ms;
-    uint32_t p0 = args->p0;
-    uint32_t p1 = args->p1;
-
-    reboot(flags, delay_ms, p0, p1);
+    return PB_STATUS_OK;
 }
 
 pb_status_t picoboot_default_read_prepare(

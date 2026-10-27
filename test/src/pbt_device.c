@@ -70,6 +70,13 @@ static int s_otp_rc;
 
 void pbt_otp_fail(int rc) { s_otp_rc = rc; }
 
+// The bootrom error code the reboot routine returns, or zero for success.  A
+// part returns one for an unknown reboot type, or an architecture switch its
+// OTP doesn't allow.
+static int s_reboot_rc;
+
+void pbt_reboot_fail(int rc) { s_reboot_rc = rc; }
+
 bool pbt_irq_disabled(void) { return s_irq_disabled; }
 bool pbt_xip_active(void)   { return s_xip_active; }
 
@@ -325,6 +332,7 @@ void pbt_device_reset(void) {
 
     s_withheld_count      = 0;
     s_otp_rc              = 0;
+    s_reboot_rc           = 0;
     s_sys_info_rc         = 0;
     s_sys_info_ok_calls   = 0;
     s_partition_rc        = 0;
@@ -390,7 +398,7 @@ void picobootx_host_test_irq_enable(void) {
 static int pbt_rom_reboot(uint32_t flags, uint32_t delay_ms, uint32_t p0,
                           uint32_t p1) {
     pbt_log("rom_reboot", flags, delay_ms, p0, p1);
-    return 0;
+    return s_reboot_rc;
 }
 
 static int pbt_rom_get_sys_info(uint32_t *out, uint32_t out_words,

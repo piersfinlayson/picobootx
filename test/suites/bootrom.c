@@ -392,41 +392,67 @@ static void scenario_otp_write_without_its_bootrom_routine(void) {
     PBT_CHECK_EQ(pbt_count("rom_otp_access"), 0);
 }
 
-static void scenario_a_reboot_the_part_no_longer_offers_does_not_happen(void) {
+static void scenario_a_failed_reboot_is_not_acknowledged(void) {
     pbt_begin();
+    pbt_reboot_fail(ROM_NOT_PERMITTED);
     pbt_start();
 
-    // Preparing found the routine, so the command was accepted and the
-    // acknowledgement sent.  The reboot itself happens after that, and looks
-    // the routine up again.
+    // The boot ROM can't do an unknown reboot type or an architecture switch
+    // its OTP doesn't allow.  The command must fail, not be acknowledged with no
+    // reboot to follow.
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
     pbt_args_reboot2(&cmd, 0x0002u, 10u, 0u, 0u);
-    pbt_host_send_cmd(&cmd);
-    pbt_task();
 
-    PBT_REQUIRE(pbt_cur_state() == PB_STATE_AWAIT_ZLP);
-    PBT_REQUIRE(pbt_count("op_reboot2_prepare") == 1);
-    PBT_CHECK_EQ(pbt_packet_count(), 1u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_NOT_PERMITTED);
+    PBT_CHECK_EQ(pbt_count("rom_reboot"), 1);
+    PBT_CHECK_EQ(pbt_packet_count(), 0u);
 
-    // Between the two the part stops publishing it.  Rebooting through a null
-    // pointer would fault, so the second lookup is checked as well as the first.
-    pbt_bootrom_withhold('R', 'B');
-    pbt_complete_tx();
-
-    PBT_CHECK_EQ(pbt_count("op_reboot2_execute"), 1);
-    PBT_CHECK_EQ(pbt_count("rom_reboot"), 0);
-    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
-
-    // Without the withdrawal the same sequence reboots, so what stopped it was
-    // the missing routine.
+    // The same command succeeds when the bootrom does, so the bootrom's error
+    // is what failed it.
     pbt_begin();
     pbt_start();
     picoboot_cmd_t again = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
     pbt_args_reboot2(&again, 0x0002u, 10u, 0u, 0u);
-    pbt_host_send_cmd(&again);
-    pbt_task();
-    pbt_complete_tx();
+    PBT_CHECK_STATUS(pbt_run_cmd(&again), PB_STATUS_OK);
     PBT_CHECK_EQ(pbt_count("rom_reboot"), 1);
+    PBT_CHECK_EQ(pbt_packet_count(), 1u);
+}
+
+static void scenario_a_zero_delay_reboots_after_1ms(void) {
+    pbt_begin();
+    pbt_start();
+
+    // The bootrom never reboots for a delay of 0, so it is passed 1ms instead.
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
+    pbt_args_reboot2(&cmd, 0x0002u, 0u, 0u, 0u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_nth("rom_reboot", 0) != NULL);
+    PBT_CHECK_EQ(pbt_nth("rom_reboot", 0)->a1, 1u);
+
+    // Any other delay is passed unchanged.
+    pbt_begin();
+    pbt_start();
+    picoboot_cmd_t again = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
+    pbt_args_reboot2(&again, 0x0002u, 7u, 0u, 0u);
+    PBT_CHECK_STATUS(pbt_run_cmd(&again), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_nth("rom_reboot", 0) != NULL);
+    PBT_CHECK_EQ(pbt_nth("rom_reboot", 0)->a1, 7u);
+}
+
+static void scenario_the_no_return_flag_is_cleared(void) {
+    pbt_begin();
+    pbt_start();
+
+    // REBOOT2_FLAG_NO_RETURN_ON_SUCCESS stops the reboot routine returning,
+    // and the acknowledgement is only sent after it returns.  Only that flag is
+    // cleared, so 0x10 stays set.
+    picoboot_cmd_t cmd = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
+    pbt_args_reboot2(&cmd, 0x0112u, 10u, 0u, 0u);
+
+    PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_OK);
+    PBT_REQUIRE(pbt_nth("rom_reboot", 0) != NULL);
+    PBT_CHECK_EQ(pbt_nth("rom_reboot", 0)->a0, 0x0012u);
+    PBT_CHECK_EQ(pbt_packet_count(), 1u);
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,8 +1274,12 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_only_system_information_reaches_the_bootrom },
     { "OTP_WRITE without its bootrom routine is refused",
       scenario_otp_write_without_its_bootrom_routine },
-    { "a reboot the part no longer offers does not happen",
-      scenario_a_reboot_the_part_no_longer_offers_does_not_happen },
+    { "a failed reboot is not acknowledged",
+      scenario_a_failed_reboot_is_not_acknowledged },
+    { "the no-return flag is cleared before the reboot",
+      scenario_the_no_return_flag_is_cleared },
+    { "a zero delay reboots after 1ms",
+      scenario_a_zero_delay_reboots_after_1ms },
     { "OTP access of part of a row is refused",
       scenario_otp_access_of_part_of_a_row_is_refused },
     { "a zero-length OTP access is nothing to do",

@@ -259,11 +259,9 @@ impl<'a, O: Ops, C: Custom, E: EndpointControl> PicobootClass<'a, O, C, E> {
                 Action::Halted => self.unhalted().await,
                 Action::Send(n) => {
                     ep_in.wait_enabled().await;
-                    // write returns once the packet is armed, and the protocol
-                    // acts on a transmission the host has taken — CMD_REBOOT2
-                    // reboots in on_tx.  So the delivery is waited for, and a
-                    // packet the bus never carried is not reported as one that
-                    // went.
+                    // write returns once the packet is armed, but on_tx means
+                    // the host has the packet.  So wait for the host to collect
+                    // it, and don't call on_tx for a packet it never collected.
                     let collection = match ep_in.write(&packet[..n]).await {
                         Ok(()) => Some(self.await_collection().await),
                         Err(_) => None,

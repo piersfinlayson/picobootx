@@ -167,42 +167,34 @@ static void scenario_the_next_command_also_ends_a_transfer(void) {
     PBT_CHECK_EQ(status.token, next.token);
 }
 
-static void scenario_reboot_runs_only_once_the_ack_has_gone(void) {
+static void scenario_reboot_starts_before_its_acknowledgement(void) {
     pbt_begin();
     pbt_start();
 
-    // A reboot that ran before its acknowledgement reached the host would look
-    // to the host like a command that was never answered.
+    // Like the RP2350 boot ROM, the reboot is set going before the
+    // acknowledgement is sent.
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
-    pbt_args_reboot2(&cmd, 0x0002u, 100u, 0u, 0u);
+    pbt_args_reboot2(&cmd, 0x0002u, 100u, 0x11u, 0x22u);
 
     pbt_host_send_cmd(&cmd);
 
     pbt_task();
-    PBT_CHECK_EQ(pbt_count("op_reboot2_prepare"), 1);
+    PBT_CHECK_EQ(pbt_count("rom_reboot"), 1);
     PBT_CHECK_EQ(pbt_packet_count(), 1u);
+    PBT_CHECK(pbt_before("rom_reboot", "packet_in"));
     PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_AWAIT_ZLP);
 
-    // Queued, not yet gone — and the reboot has not happened.
-    PBT_CHECK_EQ(pbt_count("op_reboot2_execute"), 0);
-
-    pbt_complete_tx();
-
-    PBT_CHECK_EQ(pbt_count("op_reboot2_execute"), 1);
-    PBT_CHECK(pbt_before("packet_in", "op_reboot2_execute"));
-    PBT_CHECK(pbt_before("tx_complete", "op_reboot2_execute"));
-    PBT_CHECK(pbt_before("op_reboot2_prepare", "op_reboot2_execute"));
-
-    // The arguments survive from the command packet to the reboot itself, which
-    // is why the library keeps a copy of them.
-    PBT_REQUIRE(pbt_nth("op_reboot2_execute", 0) != NULL);
-    PBT_CHECK_EQ(pbt_nth("op_reboot2_execute", 0)->a0, 0x0002u);
-    PBT_CHECK_EQ(pbt_nth("op_reboot2_execute", 0)->a1, 100u);
-
-    // And the bootrom really was asked to reboot, with those arguments.
+    // The bootrom gets the command's arguments unchanged.
     PBT_REQUIRE(pbt_nth("rom_reboot", 0) != NULL);
     PBT_CHECK_EQ(pbt_nth("rom_reboot", 0)->a0, 0x0002u);
     PBT_CHECK_EQ(pbt_nth("rom_reboot", 0)->a1, 100u);
+    PBT_CHECK_EQ(pbt_nth("rom_reboot", 0)->a2, 0x11u);
+    PBT_CHECK_EQ(pbt_nth("rom_reboot", 0)->a3, 0x22u);
+
+    // Collecting the acknowledgement ends the command and doesn't reboot again.
+    pbt_complete_tx();
+    PBT_CHECK_EQ(pbt_count("rom_reboot"), 1);
+    PBT_CHECK_EQ(pbt_cur_state(), PB_STATE_IDLE);
 }
 
 static void scenario_reboot_refused_when_the_bootrom_has_no_reboot(void) {
@@ -213,11 +205,11 @@ static void scenario_reboot_refused_when_the_bootrom_has_no_reboot(void) {
     picoboot_cmd_t cmd = pbt_cmd(PB_CMD_REBOOT2, 0x10u, 0u);
     pbt_args_reboot2(&cmd, 0x0002u, 100u, 0u, 0u);
 
-    // The refusal happens while preparing, so no acknowledgement is sent and
-    // nothing is deferred.
+    // No acknowledgement is sent, and nothing reboots.
     PBT_CHECK_STATUS(pbt_run_cmd(&cmd), PB_STATUS_NOT_FOUND);
-    PBT_CHECK_EQ(pbt_count("op_reboot2_execute"), 0);
+    PBT_CHECK_EQ(pbt_count("op_reboot2"), 1);
     PBT_CHECK_EQ(pbt_count("rom_reboot"), 0);
+    PBT_CHECK_EQ(pbt_packet_count(), 0u);
 }
 
 static const pbt_scenario_t k_scenarios[] = {
@@ -237,8 +229,8 @@ static const pbt_scenario_t k_scenarios[] = {
       scenario_single_byte_acknowledgement_ends_a_transfer },
     { "the next command ends a device-to-host transfer, and still runs",
       scenario_the_next_command_also_ends_a_transfer },
-    { "a reboot runs only once its acknowledgement has gone",
-      scenario_reboot_runs_only_once_the_ack_has_gone },
+    { "a reboot starts before its acknowledgement is sent",
+      scenario_reboot_starts_before_its_acknowledgement },
     { "a reboot is refused when the bootrom does not publish one",
       scenario_reboot_refused_when_the_bootrom_has_no_reboot },
 };

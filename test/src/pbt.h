@@ -271,6 +271,10 @@ void pbt_bootrom_withhold(char a, char b);
 // answering normally.
 void pbt_otp_fail(int rc);
 
+// Make the modelled reboot routine return this bootrom error code, as a part
+// does for an unknown reboot type.  Zero makes it succeed again.
+void pbt_reboot_fail(int rc);
+
 // The XIP clock divisor the model reports.  The erase sequence must read this
 // and hand this same value back to the routine that restores XIP.
 void pbt_set_xip_clkdiv(uint8_t clkdiv);
@@ -492,7 +496,7 @@ void pbt_pump(void);
 // One picoboot_task call, with no transmit completion delivered afterwards.
 // Between this and pbt_complete_tx a scenario can look at the device in the
 // state it is in once a packet has been queued and before the hardware has
-// reported it gone — which is where the protocol's deferred actions live.
+// reported it gone.
 void pbt_task(void);
 
 // Deliver the transmit-completion callback for every packet emitted and not yet

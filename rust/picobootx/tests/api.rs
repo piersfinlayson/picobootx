@@ -103,7 +103,7 @@ fn every_command_that_moves_data_is_refused_as_one_this_device_does_not_serve() 
         Err(Status::UnknownCmd)
     );
 
-    assert_eq!(d.reboot_prepare(&reboot_args()), Err(Status::UnknownCmd));
+    assert_eq!(d.reboot(&reboot_args()), Err(Status::UnknownCmd));
 }
 
 #[test]

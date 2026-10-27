@@ -82,32 +82,22 @@ pub fn enter_xip() -> Result {
 
 /// Whether this part can reboot as asked.
 ///
-/// The arguments are the bootrom's to judge, so all this establishes is that
-/// there is a routine to hand them to.
+/// Reboot through the bootrom, `delay_ms` after the call.  A delay of 0 is
+/// passed to the bootrom as 1ms, because it never reboots for 0.
 ///
 /// # Errors
 ///
-/// [`Status::NotFound`] when the part publishes no reboot routine.
-pub fn reboot_prepare(args: &Reboot) -> Result {
-    let _ = args;
-    if bootrom::reboot().is_none() {
+/// [`Status::NotFound`] if the part has no reboot routine, or the routine's
+/// error through [`bootrom::status_from`].
+pub fn reboot(args: &Reboot) -> Result {
+    let Some(reboot) = bootrom::reboot() else {
         return Err(Status::NotFound);
+    };
+    let ret = unsafe { reboot(args.flags, args.delay_ms.max(1), args.p0, args.p1) };
+    if ret < 0 {
+        return Err(bootrom::status_from(ret));
     }
     Ok(())
-}
-
-/// Reboot.
-///
-/// The pair keeps nothing between the two calls, so the routine is looked up
-/// here as well as in [`reboot_prepare`].  The check on it is made again
-/// because this returns nothing: a part that does not publish the routine
-/// cannot be reported from here, and the only thing left to do about it is stay
-/// where we are.
-pub fn reboot_execute(args: &Reboot) {
-    let Some(reboot) = bootrom::reboot() else {
-        return;
-    };
-    unsafe { reboot(args.flags, args.delay_ms, args.p0, args.p1) };
 }
 
 /// Whether this range may be read.

@@ -23,7 +23,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use picobootx::{Ecc, Exclusive, Info, Ops, Reboot, Status, Target};
@@ -71,6 +71,9 @@ static PUBLISH_REBOOT: AtomicBool = AtomicBool::new(true);
 /// What the reboot routine was called with, if it was.
 static REBOOTED: Mutex<Option<[u32; 4]>> = Mutex::new(None);
 
+/// What the reboot routine returns.
+static REBOOT_RET: AtomicI32 = AtomicI32::new(0);
+
 /// Whether the stand-in bootrom publishes a system information routine, and
 /// how many words that routine answers when it does.
 ///
@@ -86,6 +89,7 @@ fn chip() -> MutexGuard<'static, ()> {
     let guard = CHIP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     DEV_PTR_CALLS.store(0, Ordering::SeqCst);
     PUBLISH_REBOOT.store(true, Ordering::SeqCst);
+    REBOOT_RET.store(0, Ordering::SeqCst);
     PUBLISH_SYS_INFO.store(false, Ordering::SeqCst);
     SYS_INFO_WORDS.store(0, Ordering::SeqCst);
     *REBOOTED
@@ -121,7 +125,7 @@ extern "C" fn reboot_stub(flags: u32, delay_ms: u32, p0: u32, p1: u32) -> c_int 
     *REBOOTED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some([flags, delay_ms, p0, p1]);
-    0
+    REBOOT_RET.load(Ordering::SeqCst)
 }
 
 /// The word the stand-in information routine puts at one index.  Distinct per
@@ -514,7 +518,7 @@ fn a_routine_the_bootrom_does_not_publish_is_reported_as_one_that_is_not_there()
 }
 
 #[test]
-fn a_reboot_is_agreed_to_when_the_part_publishes_the_routine_and_then_run() {
+fn a_reboot_is_run_when_the_part_publishes_the_routine() {
     let _chip = chip();
     let mut d = Rp2350;
     let args = Reboot {
@@ -524,22 +528,35 @@ fn a_reboot_is_agreed_to_when_the_part_publishes_the_routine_and_then_run() {
         p1: 0x0002_0000,
     };
 
-    assert_eq!(d.reboot_prepare(&args), Ok(()));
-    assert_eq!(*REBOOTED.lock().unwrap(), None);
-
-    d.reboot_execute(&args);
+    assert_eq!(d.reboot(&args), Ok(()));
     assert_eq!(
         *REBOOTED.lock().unwrap(),
         Some([2, 50, 0x1000_0000, 0x0002_0000])
     );
 
-    // The one thing changed: a part whose bootrom does not publish the routine
-    // refuses before the host is acknowledged, and stays where it is if it is
-    // asked to go anyway.
+    // The one thing changed: without the routine, reboot fails and nothing is
+    // called.
     PUBLISH_REBOOT.store(false, Ordering::SeqCst);
     *REBOOTED.lock().unwrap() = None;
 
-    assert_eq!(d.reboot_prepare(&args), Err(Status::NotFound));
-    d.reboot_execute(&args);
+    assert_eq!(d.reboot(&args), Err(Status::NotFound));
     assert_eq!(*REBOOTED.lock().unwrap(), None);
+}
+
+#[test]
+fn a_failed_reboot_returns_the_bootrom_error() {
+    let _chip = chip();
+    let mut d = Rp2350;
+    let args = Reboot {
+        flags: 2,
+        delay_ms: 50,
+        p0: 0,
+        p1: 0,
+    };
+
+    // BOOTROM_ERROR_NOT_PERMITTED, the routine's error for an unknown reboot
+    // type.
+    REBOOT_RET.store(-4, Ordering::SeqCst);
+    assert_eq!(d.reboot(&args), Err(Status::NotPermitted));
+    assert_eq!(*REBOOTED.lock().unwrap(), Some([2, 50, 0, 0]));
 }

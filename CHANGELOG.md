@@ -12,6 +12,22 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
+## 0.7.0 - unreleased
+
+`REBOOT2` is fixed to mirror the RP2350 boot ROM implementation.  Its two
+callbacks are collapsed into one, so this is not backwards compatible.
+
+- The reboot used to start once the host had read the acknowledgement.  It now
+  starts when `REBOOT2` arrives.
+- `reboot2` replaces `reboot2_prepare` and `reboot2_execute`, and
+  `picoboot_default_reboot2` replaces their two defaults.
+- If the boot ROM can't reboot, `REBOOT2` now fails.  It used to succeed and the
+  device didn't reboot.
+- A delay of 0 is passed to the boot ROM as 1ms.  The boot ROM doesn't reboot at
+  all for 0.
+- `REBOOT2_FLAG_NO_RETURN_ON_SUCCESS` is cleared before `reboot2` is called.
+- `PB_CAT_ACTION_DEFERRED` is removed.
+
 ## 0.6.0 - 2026-09-01
 
 A host that walked away part way through collecting a reply left the device

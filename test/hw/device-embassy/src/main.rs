@@ -32,7 +32,7 @@ use embassy_usb::{Builder, Config, Handler};
 use picobootx::wire::FLASH_PAGE_SIZE;
 use picobootx::{Endpoints, NoCustom, Reboot};
 use picobootx_embassy::{PicobootClass, Rp2350EndpointControl};
-use picobootx_rp2350::{Rp2350, reboot_execute};
+use picobootx_rp2350::{Rp2350, reboot};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -121,14 +121,15 @@ impl Handler for Bootsel<'_, '_> {
             return None;
         }
 
-        reboot_execute(&Reboot {
+        match reboot(&Reboot {
             flags: REBOOT_TYPE_BOOTSEL,
             delay_ms: REBOOT_DELAY_MS,
             p0: 0,
             p1: 0,
-        });
-
-        Some(OutResponse::Accepted)
+        }) {
+            Ok(()) => Some(OutResponse::Accepted),
+            Err(_) => Some(OutResponse::Rejected),
+        }
     }
 
     fn control_in<'r>(&'r mut self, req: Request, _buf: &'r mut [u8]) -> Option<InResponse<'r>> {

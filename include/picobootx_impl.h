@@ -222,17 +222,11 @@ pb_status_t picoboot_default_exit_xip(void *ctx);
 // Returns PB_STATUS_OK.
 pb_status_t picoboot_default_enter_xip(void *ctx);
 
-// Whether this part can reboot as asked.  The arguments are the bootrom's to
-// judge, so all this establishes is that there is a routine to hand them to —
-// PB_STATUS_NOT_FOUND when the part publishes none, and PB_STATUS_OK otherwise.
-// It does not reboot.
-pb_status_t picoboot_default_reboot2_prepare(
-    const pb_reboot2_args_t *args, 
-    void *ctx
-);
-
-// Reboots into BOOTSEL using the provided arguments.
-void picoboot_default_reboot2_execute(
+// Reboots through the bootrom, args->delay_ms after the call.  A delay of 0 is
+// passed to the bootrom as 1ms, because it never reboots for 0.  Returns
+// PB_STATUS_NOT_FOUND if the part has no reboot routine, or the routine's
+// error.
+pb_status_t picoboot_default_reboot2(
     const pb_reboot2_args_t *args, 
     void *ctx
 );

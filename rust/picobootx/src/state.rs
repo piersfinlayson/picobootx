@@ -89,6 +89,9 @@ const CMD_READ: u8 = 0x84;
 const CMD_GET_INFO: u8 = 0x8b;
 const CMD_OTP_READ: u8 = 0x8c;
 
+// REBOOT2 flag that stops the reboot routine returning.  See Ops::reboot.
+const REBOOT2_FLAG_NO_RETURN_ON_SUCCESS: u32 = 0x100;
+
 // How much of a device to host answer the protocol can hold at once, and so the
 // most room it can offer a fill however large the transmit FIFO is.
 const DATA_IN_LEN: usize = 64;
@@ -120,8 +123,6 @@ enum Category {
     Sync,
     // Prepare, then act, then acknowledge.
     Async,
-    // Acknowledge first, act once the acknowledgement has gone.
-    Deferred,
     // Device to host.
     DataIn,
     // Host to device.
@@ -137,13 +138,13 @@ struct Spec {
 }
 
 fn spec(cmd_id: u8) -> Option<Spec> {
-    use Category::{Async, DataIn, DataOut, Deferred, Sync, Unsupported};
+    use Category::{Async, DataIn, DataOut, Sync, Unsupported};
     let (cmd_size, tlen, category) = match cmd_id {
         CMD_EXCLUSIVE_ACCESS => (0x01, TLen::Zero, Sync),
         CMD_EXIT_XIP => (0x00, TLen::Zero, Sync),
         CMD_ENTER_XIP => (0x00, TLen::Zero, Sync),
         CMD_FLASH_ERASE => (0x08, TLen::Zero, Async),
-        CMD_REBOOT2 => (0x10, TLen::Zero, Deferred),
+        CMD_REBOOT2 => (0x10, TLen::Zero, Sync),
         CMD_READ => (0x08, TLen::AddrSize, DataIn),
         CMD_GET_INFO => (0x10, TLen::Own, DataIn),
         CMD_OTP_READ => (0x05, TLen::Otp, DataIn),
@@ -195,7 +196,6 @@ enum Xfer {
         target: Target,
         page_offset: usize,
     },
-    Reboot(Reboot),
     Custom(Command),
 }
 
@@ -440,7 +440,6 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
         match spec.category {
             Category::Sync => self.action_sync(t, cmd),
             Category::Async => self.action_async(t, cmd),
-            Category::Deferred => self.action_deferred(t, cmd),
             Category::DataIn => match self.prepare_in(cmd) {
                 Ok(()) => {
                     self.data_in_remaining = tlen;
@@ -465,7 +464,13 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             CMD_EXCLUSIVE_ACCESS => self.ops.exclusive_access(Exclusive::from(cmd.args[0])),
             CMD_EXIT_XIP => self.ops.exit_xip(),
             CMD_ENTER_XIP => self.ops.enter_xip(),
-            // Unreachable: spec marks only these three commands Sync, and only
+            CMD_REBOOT2 => self.ops.reboot(&Reboot {
+                flags: cmd.arg_u32(0) & !REBOOT2_FLAG_NO_RETURN_ON_SUCCESS,
+                delay_ms: cmd.arg_u32(4),
+                p0: cmd.arg_u32(8),
+                p1: cmd.arg_u32(12),
+            }),
+            // Unreachable: spec marks only these four commands Sync, and only
             // a Sync command is routed here.
             // LCOV_UNREACHABLE_START
             _ => unreachable!(),
@@ -484,20 +489,6 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
             .flash_erase_prepare(addr, size)
             .and_then(|()| self.ops.flash_erase(addr, size));
         match r {
-            Ok(()) => self.ack(t),
-            Err(e) => self.stall(t, e),
-        }
-    }
-
-    fn action_deferred<T: Transport>(&mut self, t: &mut T, cmd: &Command) {
-        let args = Reboot {
-            flags: cmd.arg_u32(0),
-            delay_ms: cmd.arg_u32(4),
-            p0: cmd.arg_u32(8),
-            p1: cmd.arg_u32(12),
-        };
-        self.xfer = Xfer::Reboot(args);
-        match self.ops.reboot_prepare(&args) {
             Ok(()) => self.ack(t),
             Err(e) => self.stall(t, e),
         }
@@ -1056,11 +1047,6 @@ impl<'a, O: Ops, C: Custom> Picoboot<'a, O, C> {
     pub fn on_tx<T: Transport>(&mut self, t: &mut T) {
         if self.state != State::AwaitZlp {
             return;
-        }
-        if self.cmd_id == CMD_REBOOT2
-            && let Xfer::Reboot(args) = self.xfer
-        {
-            self.ops.reboot_execute(&args);
         }
         self.set_state(t, State::Idle);
     }

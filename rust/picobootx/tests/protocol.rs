@@ -11,8 +11,8 @@
 
 use picobootx::wire::{CMD_LEN, DIR_IN, MAGIC, STATUS_LEN};
 use picobootx::{
-    Command, Control, Custom, Direction, Endpoints, Filled, NoCustom, Ops, Picoboot, Reboot,
-    Recipient, Request, RequestType, Result, Stage, State, Status, Transport,
+    Command, Control, Custom, Direction, Endpoints, Filled, NoCustom, Ops, Picoboot, Recipient,
+    Request, RequestType, Result, Stage, State, Status, Transport,
 };
 
 const EP_OUT: u8 = 0x03;
@@ -20,7 +20,6 @@ const EP_IN: u8 = 0x84;
 
 const CMD_FLASH_ERASE: u8 = 0x03;
 const CMD_EXIT_XIP: u8 = 0x06;
-const CMD_REBOOT2: u8 = 0x0a;
 const CMD_READ: u8 = 0x84;
 
 /// The magic a device of our own would carry.  Not `MAGIC`.
@@ -217,32 +216,6 @@ impl Ops for Switch {
     }
 }
 
-/// A device that agrees to reboot and leaves `reboot_execute` to its default.
-struct RebootsQuietly;
-
-impl Ops for RebootsQuietly {
-    fn reboot_prepare(&mut self, args: &Reboot) -> picobootx::Result {
-        let _ = args;
-        Ok(())
-    }
-}
-
-/// The same, with the reboot itself written.
-struct RebootsLoudly {
-    went: Option<Reboot>,
-}
-
-impl Ops for RebootsLoudly {
-    fn reboot_prepare(&mut self, args: &Reboot) -> picobootx::Result {
-        let _ = args;
-        Ok(())
-    }
-
-    fn reboot_execute(&mut self, args: &Reboot) {
-        self.went = Some(*args);
-    }
-}
-
 /// Commands of our own, whose magic can be taken away and given back.
 struct Ours {
     magic: Option<u32>,
@@ -433,42 +406,4 @@ fn a_fill_that_reports_more_than_the_room_it_was_given_is_refused() {
 
     assert_eq!(pb.state(), State::AwaitAck);
     assert_eq!(wire.sent, vec![0x5a; PUMP_BUF]);
-}
-
-#[test]
-fn a_device_that_writes_no_reboot_answers_and_stays_where_it_is() {
-    let mut wire = Wire::new(64);
-    let mut pb = Picoboot::new(RebootsQuietly, NoCustom, None, endpoints());
-
-    wire.host_send(&packet(MAGIC, CMD_REBOOT2, 0x10, 0));
-    pb.poll(&mut wire);
-    assert_eq!(pb.state(), State::AwaitZlp);
-    assert_eq!(wire.acks, 1);
-
-    // The acknowledgement has gone, which is when the reboot would happen.
-    pb.on_tx(&mut wire);
-    assert_eq!(pb.state(), State::Idle);
-
-    // Still serving, because nothing rebooted.
-    wire.host_send(&packet(MAGIC, CMD_EXIT_XIP, 0x00, 0));
-    pb.poll(&mut wire);
-    assert_eq!(pb.state(), State::AwaitZlp);
-    assert_eq!(wire.acks, 2);
-
-    // The one thing changed: a device that writes reboot_execute is called,
-    // with the arguments the command carried, at that same point.
-    let mut wire = Wire::new(64);
-    let mut pb = Picoboot::new(RebootsLoudly { went: None }, NoCustom, None, endpoints());
-
-    let mut cmd = packet(MAGIC, CMD_REBOOT2, 0x10, 0);
-    cmd[16..20].copy_from_slice(&2u32.to_le_bytes());
-    cmd[20..24].copy_from_slice(&50u32.to_le_bytes());
-    wire.host_send(&cmd);
-    pb.poll(&mut wire);
-    assert!(pb.ops().went.is_none());
-
-    pb.on_tx(&mut wire);
-    let went = pb.ops().went.expect("the reboot was not run");
-    assert_eq!(went.flags, 2);
-    assert_eq!(went.delay_ms, 50);
 }

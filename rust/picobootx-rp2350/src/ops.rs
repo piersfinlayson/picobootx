@@ -142,11 +142,7 @@ impl Ops for Rp2350 {
         defaults::get_info(info, param0, at_word, buf)
     }
 
-    fn reboot_prepare(&mut self, args: &Reboot) -> Result {
-        defaults::reboot_prepare(args)
-    }
-
-    fn reboot_execute(&mut self, args: &Reboot) {
-        defaults::reboot_execute(args);
+    fn reboot(&mut self, args: &Reboot) -> Result {
+        defaults::reboot(args)
     }
 }

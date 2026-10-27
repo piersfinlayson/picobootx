@@ -561,7 +561,7 @@ static const pb_cmd_table_entry_t k_cmd_table[] = {
     { PB_CMD_EXIT_XIP,         PB_CAT_ACTION_SYNC,     0x00u, NULL,           false, NULL,                 { NULL }              },
     { PB_CMD_ENTER_XIP,        PB_CAT_ACTION_SYNC,     0x00u, NULL,           false, NULL,                 { NULL }              },
     { PB_CMD_FLASH_ERASE,      PB_CAT_ACTION_ASYNC,    0x08u, NULL,           false, NULL,                 { NULL }              },
-    { PB_CMD_REBOOT2,          PB_CAT_ACTION_DEFERRED, 0x10u, NULL,           false, NULL,                 { NULL }              },
+    { PB_CMD_REBOOT2,          PB_CAT_ACTION_SYNC,     0x10u, NULL,           false, NULL,                 { NULL }              },
     { PB_CMD_READ,             PB_CAT_DATA_IN,         0x08u, tlen_addr_size, false, pb_read_prepare,      { .fill = pb_read_fill }     },
     { PB_CMD_GET_INFO,         PB_CAT_DATA_IN,         0x10u, NULL,           true,  pb_get_info_prepare,  { .fill = pb_get_info_fill } },
     { PB_CMD_OTP_READ,         PB_CAT_DATA_IN,         0x05u, tlen_otp,       false, pb_otp_read_prepare,  { .fill = pb_otp_read_fill } },
@@ -612,6 +612,16 @@ static void pb_handle_action_sync(pb_state_block_t *s, const picoboot_cmd_t *cmd
                 st = s->ops->enter_xip(s->ctx);
             }
             break;
+        case PB_CMD_REBOOT2: {
+            if (!s->ops->reboot2) {
+                st = PB_STATUS_UNKNOWN_CMD;
+                break;
+            }
+            pb_reboot2_args_t args = *(const pb_reboot2_args_t *)cmd->args;
+            args.flags &= ~PB_REBOOT2_FLAG_NO_RETURN_ON_SUCCESS;
+            st = s->ops->reboot2(&args, s->ctx);
+            break;
+        }
         // LCOV_UNREACHABLE_START
         default:
             pb_stall(s, PB_STATUS_UNKNOWN_CMD);
@@ -660,32 +670,6 @@ static void pb_handle_action_async(pb_state_block_t *s, const picoboot_cmd_t *cm
     if (st != PB_STATUS_OK) {
         pb_stall(s, st);
         return;
-    }
-    pb_send_zlp(s);
-}
-
-static void pb_handle_action_deferred(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
-    // Unreachable default, for the same reason as pb_handle_action_sync's:
-    // REBOOT2 is the only PB_CAT_ACTION_DEFERRED row in the table.
-    switch ((pb_cmd_id_t)cmd->cmd_id) {
-        case PB_CMD_REBOOT2: {
-            if (!s->ops->reboot2_prepare) {
-                pb_stall(s, PB_STATUS_UNKNOWN_CMD);
-                return;
-            }
-            s->xfer.reboot2_args = *(const pb_reboot2_args_t *)cmd->args;
-            pb_status_t st = s->ops->reboot2_prepare(&s->xfer.reboot2_args, s->ctx);
-            if (st != PB_STATUS_OK) {
-                pb_stall(s, st);
-                return;
-            }
-            break;
-        }
-        // LCOV_UNREACHABLE_START
-        default:
-            pb_stall(s, PB_STATUS_UNKNOWN_CMD);
-            return;
-        // LCOV_UNREACHABLE_STOP
     }
     pb_send_zlp(s);
 }
@@ -827,10 +811,6 @@ static void pb_dispatch_cmd(pb_state_block_t *s, const picoboot_cmd_t *cmd) {
             pb_handle_action_async(s, cmd);
             break;
             
-        case PB_CAT_ACTION_DEFERRED:
-            pb_handle_action_deferred(s, cmd);
-            break;
-
         case PB_CAT_DATA_IN:
             pb_handle_data_in(s, cmd);
             break;
@@ -1160,14 +1140,6 @@ void picoboot_tx_cb(
         return;
     }
 
-    if (state->cmd_id == (uint8_t)PB_CMD_REBOOT2) {
-        // As we have now sent the ZLP we can reboot
-        if (state->ops->reboot2_execute) {
-            state->ops->reboot2_execute(&state->xfer.reboot2_args, state->ctx);
-        }
-    }
-
-    // For the non-reboot2 case (reboot2 should never get this far)
     LOG("ZLP ACK sent, returning to IDLE %u bytes", sent_bytes);
     pb_set_state(state, PB_STATE_IDLE);
 }

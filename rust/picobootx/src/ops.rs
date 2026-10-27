@@ -349,18 +349,16 @@ pub trait Ops {
         Err(Status::UnknownCmd)
     }
 
-    /// Whether the device will reboot as asked.  Runs before the host is
-    /// acknowledged.
-    fn reboot_prepare(&mut self, args: &Reboot) -> Result {
+    /// Set the part to reboot `delay_ms` from now, then return.  The
+    /// acknowledgement is sent after this returns, so rebooting sooner can lose
+    /// it.  An error fails the command and nothing reboots.
+    ///
+    /// `flags` never has `REBOOT2_FLAG_NO_RETURN_ON_SUCCESS` set.  The library
+    /// clears it, as the RP2350 boot ROM does, so that this returns and the
+    /// acknowledgement can be sent.
+    fn reboot(&mut self, args: &Reboot) -> Result {
         let _ = args;
         Err(Status::UnknownCmd)
-    }
-
-    /// Reboot.  Runs after the host has been acknowledged, so the
-    /// acknowledgement reaches it.  Absent means the device answers and stays
-    /// where it is.
-    fn reboot_execute(&mut self, args: &Reboot) {
-        let _ = args;
     }
 }
 

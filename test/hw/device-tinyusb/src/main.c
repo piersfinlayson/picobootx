@@ -101,8 +101,7 @@ static const picoboot_ops_t picoboot_ops = {
     .exclusive_access    = picoboot_default_exclusive_access,
     .exit_xip            = picoboot_default_exit_xip,
     .enter_xip           = picoboot_default_enter_xip,
-    .reboot2_prepare     = picoboot_default_reboot2_prepare,
-    .reboot2_execute     = picoboot_default_reboot2_execute,
+    .reboot2             = picoboot_default_reboot2,
     .read_prepare        = picoboot_default_read_prepare,
     .read                = picoboot_default_read,
     .write_prepare       = picoboot_default_write_prepare,
@@ -250,7 +249,7 @@ bool tud_vendor_control_xfer_cb(
             .p0 = 0,
             .p1 = 0,
         };
-        picoboot_default_reboot2_execute(&args, NULL);
+        (void)picoboot_default_reboot2(&args, NULL);
         return true;
     }
 

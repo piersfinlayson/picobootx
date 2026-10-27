@@ -52,8 +52,7 @@ pub struct CRebootArgs {
 
 type FnExclusive = unsafe extern "C" fn(*const CExclusiveArgs, *mut c_void) -> CStatus;
 type FnVoidCtx = unsafe extern "C" fn(*mut c_void) -> CStatus;
-type FnRebootPrepare = unsafe extern "C" fn(*const CRebootArgs, *mut c_void) -> CStatus;
-type FnRebootExecute = unsafe extern "C" fn(*const CRebootArgs, *mut c_void);
+type FnReboot = unsafe extern "C" fn(*const CRebootArgs, *mut c_void) -> CStatus;
 /// `pb_info_type_t`, one byte under `-fshort-enums`.
 pub type CInfoType = u8;
 
@@ -76,8 +75,7 @@ pub struct COps {
     pub exclusive_access: Option<FnExclusive>,
     pub exit_xip: Option<FnVoidCtx>,
     pub enter_xip: Option<FnVoidCtx>,
-    pub reboot2_prepare: Option<FnRebootPrepare>,
-    pub reboot2_execute: Option<FnRebootExecute>,
+    pub reboot2: Option<FnReboot>,
     pub get_info_prepare: Option<FnGetInfoPrepare>,
     pub get_info: Option<FnGetInfo>,
     pub read_prepare: Option<FnReadPrepare>,

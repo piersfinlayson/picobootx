@@ -12,7 +12,7 @@ picobootx follows [semantic versioning](https://semver.org).  Releases before
 carry the same version, so an integrator can compile against more than one
 release.
 
-## 0.7.0 - unreleased
+## 0.7.0 - 2026-10-27
 
 `REBOOT2` is fixed to mirror the RP2350 boot ROM implementation.  Its two
 callbacks are collapsed into one, so this is not backwards compatible.

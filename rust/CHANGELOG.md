@@ -16,7 +16,7 @@ that do not unify.  A `picobootx` release therefore moves both of them too.
 
 ## picobootx
 
-### 0.5.0 - unreleased
+### 0.5.0 - 2026-10-27
 
 `REBOOT2` is fixed to mirror the RP2350 boot ROM implementation.  Its two
 methods are collapsed into one, so this is not backwards compatible.
@@ -89,7 +89,7 @@ stack or an executor.
 
 ## picobootx-rp2350
 
-### 0.5.0 - unreleased
+### 0.5.0 - 2026-10-27
 
 - `reboot` replaces `reboot_prepare` and `reboot_execute`.
 - If the boot ROM can't reboot, `REBOOT2` now fails.  It used to succeed and the
@@ -149,7 +149,7 @@ a small transmit FIFO serves those types itself.
 
 ## picobootx-embassy
 
-### 0.5.0 - unreleased
+### 0.5.0 - 2026-10-27
 
 - Moves with `picobootx` 0.5.0.
 
